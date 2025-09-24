@@ -1,0 +1,13 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "tsc: watch - vscode-seamless",
+      "type": "typescript",
+      "tsconfig": "vscode-seamless/tsconfig.json",
+      "option": "watch",
+      "problemMatcher": ["$tsc-watch"],
+      "isBackground": true
+    }
+  ]
+}

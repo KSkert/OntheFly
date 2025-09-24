@@ -1,0 +1,29 @@
+seamless-modeldev/
+├─ pyproject.toml
+├─ README.md
+├─ src/
+│  └─ seamless_modeldev/
+│     ├─ __init__.py
+│     ├─ session.py
+│     ├─ control.py
+│     ├─ checkpoints.py
+│     ├─ merging.py
+│     ├─ autofork.py
+│     ├─ data_explorer.py
+│     ├─ metrics.py
+│     └─ utils.py
+├─ package-lock.json
+├─ package.json
+├─ pyproject.toml
+├─ vscode-seamless
+│  ├─ .vscode/
+│  ├─ node_modules/
+│  ├─ src/
+│     ├─ package-lock.json
+│     ├─ package.json
+│     ├─ tsconfig.json
+│     ├─ extension.js
+│     ├─ storage.js
+│     ├─ webview/
+│        ├─ dashboard.html
+│        ├─ dashboard.js

@@ -1,0 +1,1145 @@
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>On The Fly</title>
+  <style>
+    /* =========================================================
+      On the Fly — VS Code–native themed, responsive dashboard
+      NOTE: All original IDs & button labels preserved.
+      ========================================================= */
+
+    /* ---------- VS Code color tokens ---------- */
+    :root {
+      /* Core */
+      --bg: var(--vscode-editor-background);
+      --fg: var(--vscode-foreground);
+      --muted: var(--vscode-descriptionForeground);
+      --panel-bg: var(--vscode-editorWidget-background);
+      --panel-elev: var(--vscode-editor-background);
+      --border: var(--vscode-panel-border, var(--vscode-widget-border, rgba(0,0,0,.2)));
+
+      /* Buttons */
+      --btn-bg: var(--vscode-button-background);
+      --btn-fg: var(--vscode-button-foreground);
+      --btn-bg-hover: var(--vscode-button-hoverBackground);
+      --btn-bg-secondary: var(--vscode-button-secondaryBackground, var(--vscode-dropdown-background, var(--panel-bg)));
+      --btn-fg-secondary: var(--vscode-button-secondaryForeground, var(--fg));
+
+      /* Inputs / focus */
+      --input-bg: var(--vscode-input-background);
+      --input-fg: var(--vscode-input-foreground);
+      --input-border: var(--vscode-input-border, var(--border));
+      --focus: #fff;
+
+      /* Badges */
+      --badge-bg: var(--vscode-badge-background, var(--btn-bg));
+      --badge-fg: var(--vscode-badge-foreground, var(--btn-fg));
+
+      /* Charts */
+      --chart-text: var(--fg);
+      --chart-grid: var(--vscode-editorWidget-border, var(--border));
+
+      /* Neutralize heavy effects */
+      --ring: 0 0 0 1px var(--border) inset;
+      --btn-shadow: none;
+      --btn-shadow-hover: none;
+
+      --ease: cubic-bezier(.2,.8,.2,1);
+    }
+
+    /* ---------- Base & layout ---------- */
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; }
+
+    body {
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Arial, sans-serif;
+      margin: 0; color: var(--fg); background: var(--bg);
+      background-image: none;
+      min-height: 100%;
+    }
+
+    .flyHeader {
+      position: static; top: auto; z-index: auto;
+      background: var(--panel-bg);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: none;
+    }
+    .flyHeaderInner { display:flex; align-items:center; gap:12px; }
+    .brandMark { display:none; }
+    .brandTitle { font-weight: 700; letter-spacing: .2px; font-size: 16px; }
+    .brandSub { margin-left: 0; }
+
+    .rootWrap { max-width: 1200px; margin: 16px auto; padding: 0 16px 32px; }
+
+    /* ---------- Unified components ---------- */
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+    button {
+      padding: 8px 10px; border: 1px solid transparent; border-radius: 6px;
+      background: var(--btn-bg); color: var(--btn-fg);
+      cursor: pointer; box-shadow: none;
+      transition: background-color .15s var(--ease), border-color .15s var(--ease), transform .06s ease;
+    }
+    /* Primary buttons: gentle grow on hover, crunch on click */
+    button:hover:not(:disabled) {
+      transform: translateY(-1px) scale(1.02);
+      box-shadow: var(--btn-shadow-hover);
+      filter: brightness(1.02);
+    }
+    button:active:not(:disabled) {
+      transform: translateY(0) scale(0.98);
+      filter: brightness(.98);
+    }
+
+    button:disabled { opacity: .5; cursor: not-allowed; }
+
+    .iconBtn, .icon-btn {
+      --size: 32px;
+      inline-size: var(--size); block-size: var(--size);
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0; border-radius: 6px;
+      background: var(--btn-bg); color: var(--btn-fg);
+      border: 1px solid transparent; box-shadow: none;
+      transition: background-color .15s var(--ease);
+    }
+    /* Icon buttons: a bit more pop */
+    .iconBtn:hover:not(:disabled),
+    .icon-btn:hover:not(:disabled) {
+      transform: translateY(-1px) scale(1.04);
+      box-shadow: var(--btn-shadow-hover);
+    }
+    .iconBtn:active:not(:disabled),
+    .icon-btn:active:not(:disabled) {
+      transform: translateY(0) scale(0.96);
+    }
+    .iconBtn:disabled,
+    .icon-btn:disabled { opacity: .4; }
+
+    .icon { width: 18px; height: 18px; display: block; }
+
+    label { color: var(--muted); font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+
+    select, input, textarea {
+      padding: 6px 8px; background: var(--input-bg);
+      color: var(--input-fg); border: 1px solid var(--input-border);
+      border-radius: 6px; outline: none; transition: box-shadow .15s var(--ease), border-color .15s var(--ease);
+      box-shadow: none;
+    }
+    select:focus, input:focus, textarea:focus { border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus); }
+
+    .panel {
+      border: 1px solid var(--border); border-radius: 8px; padding: 12px; background: var(--panel-bg);
+      box-shadow: none;
+    }
+
+    .widget {
+      position: relative; border-radius: 8px; overflow: clip; background: var(--panel-bg);
+      transition: none;
+    }
+    .widget:hover { transform: none; }
+    .widget.dragging { opacity: .96; transform: none; }
+
+    .widgetHeader { display:flex; align-items:center; justify-content:space-between; gap: 8px; padding: 8px 4px; }
+    .widgetTitle { font-weight: 700; letter-spacing: .2px; }
+
+    .grid {
+      display: grid; gap: 14px; grid-template-columns: repeat(12, 1fr);
+    }
+    .col-12 { grid-column: span 12; }
+    .col-8 { grid-column: span 8; }
+    .col-7 { grid-column: span 7; }
+    .col-6 { grid-column: span 6; }
+    .col-5 { grid-column: span 5; }
+    .col-4 { grid-column: span 4; }
+
+    @media (max-width: 1100px) {
+      .col-8, .col-7, .col-6, .col-5 { grid-column: span 12; }
+    }
+    @media (max-width: 720px) { .grid { gap: 10px; } }
+
+    .ghostBtn {
+      background: var(--btn-bg-secondary);
+      color: var(--btn-fg-secondary);
+      border: 1px solid var(--border);
+      box-shadow: none;
+    }
+
+    /* Hide Manual Fork where it currently sits; we relocate it into the report */
+    #modelNavRow #btnManualFork { display: none !important; }
+
+    /* --- Help badge for the Model Loss Distribution button --- */
+    .fs-helpWrap { position: relative; display: inline-block; }
+    .fs-helpMark {
+      position: absolute; top: -5px; right: -25px;
+      width: 16px; height: 16px; border-radius: 9999px;
+      background: var(--badge-bg); color: var(--badge-fg);
+      font-weight: 800; font-size: 10px; display: inline-flex; align-items: center; justify-content: center;
+      box-shadow: none; z-index: 2; cursor: default;
+    }
+    .fs-helpMark::after {
+      content: attr(data-tip); position: absolute; top: -30px; right: 0; transform: translateY(4px);
+      white-space: nowrap; padding: 4px 6px; font-size: 11px; border-radius: 6px;
+      background: var(--panel-bg); color: var(--fg);
+      border: 1px solid var(--border); box-shadow: none; opacity: 0; pointer-events: none;
+      transition: opacity .12s ease, transform .12s ease;
+    }
+    .fs-helpMark::before {
+      content: ""; position: absolute; top: -8px; right: 6px;
+      border: 6px solid transparent; border-top-color: var(--panel-bg);
+      filter: drop-shadow(0 -1px 0 var(--border)); opacity: 0; transition: opacity .12s ease;
+    }
+    .fs-helpMark:hover::after, .fs-helpMark:hover::before { opacity: 1; transform: translateY(0); }
+
+    /* ---------- Charts ---------- */
+    .chartsRow { display: block; }
+    .chartsMain { display: flex; flex-direction: column; gap: 12px; }
+    .chartWrap { position: relative; border: 1px solid var(--border); border-radius: 8px; padding: 8px; overflow: hidden; background: var(--panel-bg); min-height: 220px; }
+    canvas { display: block; width: 100%; max-width: 100%; }
+    #lossChart { height: 240px; }
+    #valLossChart, #smoothChart { height: 340px; }
+    #lossDistChart { height: 260px; }
+    .chartTitle { margin: 6px 2px 2px; font-weight: 700; font-size: 14px; letter-spacing: .2px; }
+
+    /* ---------- Report ---------- */
+    .reportRow { display: grid; grid-template-columns: 3fr 1fr; gap: 12px; align-items: start; margin-top: 12px; }
+    .reportSide { width: 100%; min-width: 200px; display: flex; flex-direction: column; gap: 8px; }
+    .pill { padding: 6px 10px; border-radius: 9999px; background: var(--badge-bg); color: var(--badge-fg); font-weight: 700; font-size: 12px; width: max-content; box-shadow: none; }
+    .note { font-size: 12px; color: var(--muted); white-space: pre-wrap; margin: 0; }
+    @media (max-width: 1100px) { .reportRow { grid-template-columns: 1fr; } }
+
+    /* ---------- Export + Icon buttons ---------- */
+    .exportBtn {
+      position: absolute; top: 6px; right: 6px; width: 32px; height: 32px; padding: 0; border-radius: 6px;
+      border: 1px solid var(--border); background: var(--panel-bg); color: var(--fg);
+      display: flex; align-items: center; justify-content: center; opacity: 1;
+      transition: background .15s var(--ease);
+      z-index: 2;
+    }
+    /* Tiny export buttons */
+    .exportBtn:hover:not(:disabled) {
+      opacity: 1;
+      transform: translateY(-1px) scale(1.04);
+      box-shadow: var(--btn-shadow-hover);
+    }
+    .exportBtn:active:not(:disabled) {
+      transform: translateY(0) scale(0.96);
+    }
+    .exportBtn:disabled { opacity: .45; cursor: not-allowed; }
+
+    .exportIcon { width: 18px; height: 18px; display: block; }
+
+    /* ---------- DAG overlay ---------- */
+    .dagOverlay { position: fixed; inset: 0; display: none; background: rgba(0,0,0,0.45); z-index: 9999; }
+    .dagOverlay.show { display: block; }
+    .dagPanel { position: absolute; inset: 5% 4%; background: var(--panel-bg); color: var(--fg); border: 1px solid var(--border); border-radius: 8px; box-shadow: none; display: flex; flex-direction: column; overflow: hidden; }
+    .dagHeader { display: flex; align-items: center; justify-content: space-between; padding: 10px 12px; border-bottom: 1px solid var(--border); background: var(--panel-bg); }
+    .dagCanvasWrap { flex: 1; min-height: 380px; background: var(--panel-bg) !important; }
+    #dagSvg { width: 100%; height: 100%; display: block; }
+
+    :root{
+      --dag-node-blue: var(--btn-bg);
+      --dag-text: var(--vscode-editor-foreground, var(--fg));
+      --dag-edge: var(--vscode-editor-foreground, var(--fg));
+      --dag-minW: 960; --dag-minH: 560;
+    }
+    #dagSvg .dagNode rect {
+      fill: var(--dag-node-blue) !important;
+      stroke: var(--border) !important;
+      stroke-width: 1;
+      rx: 6; ry: 6;
+      filter: none !important;
+    }
+    #dagSvg .dagNode text { fill: var(--dag-text) !important; font-weight: 600; }
+    #dagSvg .dagNode, #dagSvg .dagNode rect { transition: none !important; }
+
+    #dagSvg .dagNode.selected rect {
+      stroke: #fff !important;
+      stroke-width: 3 !important;
+      filter: none !important;
+    }
+
+    #dagSvg .dagEdge {
+      fill: none;
+      color: var(--dag-edge);
+      stroke: currentColor !important;
+      stroke-width: 2 !important;
+      opacity: 0.9 !important;
+      vector-effect: non-scaling-stroke;
+      filter: none !important;
+    }
+    #dagSvg marker#arrowHead path.dagEdgeArrow {
+      fill: currentColor !important; stroke: none !important; opacity: 0.95 !important; filter: none !important;
+    }
+
+    /* --------- AutoFork settings tabs --------- */
+    .afTabButtons { display:flex; gap:8px; border-bottom:1px solid var(--border); margin-bottom:10px; }
+    .afTabBtn {
+      padding:8px 12px; border-radius:6px 6px 0 0; border:1px solid var(--border);
+      border-bottom-color: transparent; background: var(--panel-bg);
+      color: var(--fg); cursor:pointer;
+    }
+    .afTabBtn[aria-selected="true"] { background: var(--vscode-editor-background); font-weight:700; }
+    .afTabPanel { padding: 8px 4px 4px; }
+    .afTabPanel[hidden] { display: none !important; }
+
+    /* ---- AutoFork form layout ---- */
+    #autoForkPanel .afTabPanel .afGrid {
+      --cell-min: 260px;
+      grid-template-columns: repeat(auto-fit, minmax(var(--cell-min), 1fr));
+      gap: 10px 12px;
+    }
+    #autoForkPanel .afTabPanel .afGrid label:not(:has(> input[type="checkbox"])) {
+      display: grid;
+      grid-template-columns: 1fr minmax(90px, 140px);
+      align-items: center; gap: 6px; white-space: normal;
+    }
+    #autoForkPanel .afTabPanel .afGrid label:not(:has(> input[type="checkbox"])) > input,
+    #autoForkPanel .afTabPanel .afGrid label:not(:has(> input[type="checkbox"])) > select,
+    #autoForkPanel .afTabPanel .afGrid label:not(:has(> input[type="checkbox"])) > textarea {
+      width: 100%; min-width: 0; justify-self: end;
+    }
+    #autoForkPanel .afTabPanel .afGrid input[type="number"] { text-align: right; }
+    @media (max-width: 600px) {
+      #autoForkPanel .afTabPanel .afGrid label:not(:has(> input[type="checkbox"])) { grid-template-columns: 1fr; }
+    }
+
+    /* ---------- Utility ---------- */
+    .sr-only { position:absolute; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden; clip:rect(0,0,0,0); border:0; }
+    .afGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; align-items: center; }
+    .afSectionTitle { margin: 8px 0 4px; font-weight: 700; font-size: 14px; }
+    .afPlanBox { min-height: 120px; max-height: 280px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; padding: 8px; background: var(--panel-bg); }
+
+    .btn-refresh { display:inline-flex; align-items:center; gap:.45rem; padding:.5rem .75rem; line-height:1; }
+    .icon-rotate { font-family: "Segoe UI Symbol","Apple Symbols","Noto Sans Symbols 2","DejaVu Sans",system-ui,sans-serif; font-weight: 700; font-size: 1.6em; line-height: 1; display: inline-block; }
+
+    /* ---------- Customizer UI ---------- */
+    .customBar {
+      position: sticky; top: auto; z-index: auto; display: flex; gap: 8px; padding: 10px; margin-bottom: 12px;
+      border: 1px dashed var(--border); border-radius: 8px; background: var(--panel-bg); align-items: center;
+    }
+    .customList { display:flex; flex-wrap:wrap; gap: 8px; }
+    .customList label { background: var(--panel-bg); border: 1px solid var(--border); padding: 6px 8px; border-radius: 9999px; }
+    .dragHint { margin-left:auto; color: var(--muted); font-size: 12px; }
+
+    /* ---------- Log ---------- */
+    #log {
+      width:100%; height:180px; resize:vertical;
+      border:1px solid var(--border); border-radius:6px; padding:8px;
+      background: var(--vscode-editor-background); color: var(--vscode-editor-foreground, var(--fg));
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      line-height:1.3; white-space:pre; overflow:auto;
+    }
+
+    /* ====== View Tabs (now in header, right-aligned) ====== */
+    .viewTabs{
+      position: static;   /* not sticky inside header */
+      top: auto;
+      z-index: auto;
+      display: inline-flex;
+      margin-left: auto;  /* push to far right of header row */
+      margin-bottom: 0;
+      gap: 6px; padding: 6px;
+      border: 1px solid var(--border); border-radius: 9999px;
+      background: var(--panel-bg); box-shadow: none;
+    }
+
+    .viewTabBtn {
+      appearance: none; border: 1px solid var(--border);
+      background: var(--panel-bg);
+      color: var(--fg); padding: 6px 10px; border-radius: 9999px; cursor: pointer;
+      font-weight: 600; font-size: 12px;
+      transition: transform 120ms var(--ease), outline-width 120ms var(--ease);
+      will-change: transform;
+    }
+    /* Selected tab: white ring persists on hover/active/focus */
+    .viewTabBtn[aria-selected="true"]{
+      background: var(--vscode-editor-background);
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+      transform: scale(1.06);
+      z-index: 1;
+    }
+    .viewTabBtn[aria-selected="true"]:hover,
+    .viewTabBtn[aria-selected="true"]:active,
+    .viewTabBtn[aria-selected="true"]:focus-visible{
+      outline-width: 3px;
+      transform: scale(1.07);
+    }
+
+    @media (prefers-reduced-motion: reduce){
+      .viewTabBtn{ transition: none; }
+      .viewTabBtn[aria-selected="true"]{ transform: none; }
+      .viewTabBtn[aria-selected="true"]:hover,
+      .viewTabBtn[aria-selected="true"]:active,
+      .viewTabBtn[aria-selected="true"]:focus-visible{ transform: none; }
+    }
+
+    /* ====== Comparison Panel ====== */
+    .columnsWrap {
+      display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: stretch;
+      min-height: 360px;
+    }
+    .columnsRail {
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--panel-bg);
+      display: flex; flex-direction: column; align-items: stretch; padding: 6px;
+    }
+    .railTab {
+      writing-mode: vertical-rl; transform: rotate(180deg);
+      border: 1px solid var(--border); border-radius: 8px;
+      background: var(--panel-bg);
+      color: var(--fg); font-weight: 700; letter-spacing: .6px;
+      padding: 10px 6px; margin: 4px 0; cursor: pointer;
+    }
+    .railTab[aria-selected="true"] { background: var(--vscode-editor-background); box-shadow: inset 0 0 0 1px var(--border); }
+    .railTab:focus { outline: none; box-shadow: 0 0 0 1px var(--focus); }
+
+    .columnsScroller {
+      overflow: auto; padding: 2px; border-radius: 8px;
+      background: var(--panel-bg);
+      border: 1px solid var(--border);
+    }
+    .columnsGrid {
+      display: grid; gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      padding: 10px;
+    }
+
+    .modelCol {
+      border: 1px solid var(--border); border-radius: 8px; background: var(--panel-bg);
+      box-shadow: none; display: flex; flex-direction: column; min-height: 220px;
+    }
+
+    .modelCap {
+      position: relative; padding: 10px 12px; border-bottom: 1px solid var(--border);
+      cursor: pointer; user-select: none;
+      background: var(--panel-bg);
+    }
+    .modelCap::before, .modelCap::after { content: none; }
+    .modelCap:focus { outline: none; box-shadow: 0 0 0 1px var(--focus); }
+    .capInner { display:flex; flex-direction:column; gap:2px; }
+    .capName { font-weight: 700; }
+    .capSub  { color: var(--muted); font-size: 12px; }
+
+    .summaryBox {
+      flex: 1; margin: 10px; border: 1px dashed var(--border); border-radius: 6px;
+      background: var(--vscode-editor-background);
+      padding: 10px; color: var(--vscode-editor-foreground, var(--fg));
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: pre-wrap; overflow: auto; line-height: 1.35; font-size: 12px;
+    }
+
+    .addColTile {
+      display: grid; place-items: center; min-height: 140px;
+      border: 1px dashed var(--border) !important; border-radius: 8px;
+      background: var(--panel-bg) !important; color: var(--muted) !important; box-shadow: none;
+    }
+    .addColTile:hover { filter: brightness(1.02); }
+    .addCol:focus { outline: none; box-shadow: 0 0 0 1px var(--focus); }
+
+    .modelCol .runMiniSel { margin-left: auto; max-width: 60%; }
+    #columnsGrid.dropping { outline: 2px dashed var(--btn-bg); outline-offset: 6px; }
+
+    /* === Single-pane Compare layout === */
+    .sessionPane {
+      display: grid; grid-template-rows: auto 1fr; gap: 8px; min-height: 340px;
+      border: 1px solid var(--border); border-radius: 8px; background: var(--panel-bg); padding: 8px;
+    }
+    .sessionToggle {
+      display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+      border: 1px solid var(--border); border-radius: 6px; background: var(--panel-bg);
+    }
+    .sessionToggle .sessionSel { min-width: 220px; max-width: 100%; }
+
+    #singleSessionCol { display: flex; flex-direction: column; min-height: 220px; position: relative; }
+    #columnsWrap { display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: stretch; }
+    #columnsGrid { padding: 0; overflow: hidden; }
+    #btnAddColumn.addColTile { display: none !important; }
+
+    .exportBtn.copied { filter: brightness(1.05); }
+
+    header .modelCap > #btnCopySummary,
+    header .modelCap > .modelCapCopy {
+      opacity: 1 !important; z-index: 10 !important;
+      background: var(--panel-bg) !important; border-color: var(--border) !important; box-shadow: none !important;
+    }
+
+    #btnCopySummary .exportIcon * { vector-effect: non-scaling-stroke; }
+
+    /* ====== AutoFork ON/OFF toggles: persistent white ring ====== */
+    .afToggleBtn { transition: transform 120ms ease; }
+    .afToggleBtn.is-active{
+      transform: scale(1.03);
+      outline: 2px solid var(--focus);
+      outline-offset: 2px;
+    }
+    .afToggleBtn.is-active:hover,
+    .afToggleBtn.is-active:active,
+    .afToggleBtn.is-active:focus-visible{
+      transform: scale(1.04);
+      outline-width: 3px;
+    }
+    .afToggleBtn.is-inactive { transform: scale(0.97); opacity: 0.95; }
+
+    /* Hide selection highlight inside the DAG only (Chromium/Blink) */
+    #dagSvg ::selection { background: transparent; color: inherit; }
+    /* For completeness, also catch content in foreignObject */
+    #dagSvg foreignObject ::selection { background: transparent; color: inherit; }
+
+    #flyLogo {
+      forced-color-adjust: none;     /* <- key */
+      background: transparent;       /* belt-and-braces */
+      display: block;
+    }
+  </style>
+
+</head>
+<body>
+  <!-- ===== Header ===== -->
+  <header class="flyHeader" role="banner">
+    <div class="flyHeaderInner">
+      
+      <img class="flyLogo" src="__FLY__" alt="Fly logo" width="48" height="48" />
+      <div>
+        <div class="brandTitle">On the Fly</div>
+        <div class="sr-only" aria-live="polite">VS Code–native dashboard for model forking and training</div>
+      </div>
+      <section class="viewTabs" id="viewTabs" role="tablist" aria-label="View mode">
+        <button id="tabCreate" class="viewTabBtn" role="tab" aria-selected="true">Model Creation</button>
+        <button id="tabCompare" class="viewTabBtn" role="tab" aria-selected="false">Model Comparison</button>
+      </section>
+    </div>
+  </header>
+
+  <main class="rootWrap" role="main">
+
+    <!-- ===== Customizer bar ===== -->
+    <section class="customBar" id="customBar" aria-label="Customize dashboard layout">
+      <div class="customList" id="customList" aria-live="polite">
+        <label><input type="checkbox" data-widget="w-top" checked> Top Controls</label>
+        <label><input type="checkbox" data-widget="w-autofork" checked> AutoFork</label>
+        <label><input type="checkbox" data-widget="w-runs" checked> Runs & Controls</label>
+        <label><input type="checkbox" data-widget="w-charts" checked> Charts</label>
+        <label><input type="checkbox" data-widget="w-report" checked> Report</label>
+        <label><input type="checkbox" data-widget="w-log" checked> Log</label>
+      </div>
+    </section>
+
+    <!-- ===== Grid layout ===== -->
+    <section id="flyGrid" class="grid" aria-label="Dashboard widgets">
+
+      <!-- === Widget: Model Comparison (starts hidden) === -->
+      <div class="widget col-12" data-widget-id="w-compare" id="w-compare" style="display:none">
+        <div class="panel comparePanel">
+          <div class="widgetHeader">
+            <div class="widgetTitle">Model Comparison</div>
+            <button id="btnClearColumns" class="ghostBtn" type="button" title="Remove all model columns">Clear Columns</button>
+            <div class="row" style="margin-left:auto;gap:8px">
+              <button id="btnUploadSession" class="ghostBtn" type="button" title="Upload a saved On the Fly session file">Upload Session…</button>
+              <input id="sessionFilePicker" type="file"
+                     accept=".json,.yml,.yaml,.fsession,.fsess,.forksmith,application/json"
+                     style="display:none" />
+            </div>
+          </div>
+
+          <div class="compareWrap" id="columnsWrap">
+            <!-- Left vertical rail: train/test -->
+            <aside class="compareRail" id="compareRail" aria-label="Choose view">
+              <button class="railTab" data-view="train" aria-selected="true"  type="button">train</button>
+              <button class="railTab" data-view="test"  aria-selected="false" type="button">test</button>
+            </aside>
+
+            <!-- Right: single-pane session viewer (keep id=columnsGrid for JS compatibility) -->
+            <div class="sessionPane" id="columnsGrid">
+              <!-- Session toggle (top) -->
+              <div class="sessionToggle" id="sessionToggle" aria-label="Choose session">
+                <label for="sessionSel">Session</label>
+                <select id="sessionSel" class="sessionSel">
+                  <option value="">This Session</option>
+                </select>
+              </div>
+
+              <!-- Content pane (one “column” that fills the area) -->
+              <article class="modelCol" id="singleSessionCol" data-session-id="" data-run-id="__aggregate__">
+                <header class="modelCap">
+                  <div class="capInner">
+                    <span class="capName" id="singleCapName">Current session</span>
+                    <span class="capSub">train summary</span>
+                  </div>
+
+                  <!-- Copy button (always top-right of the cap) -->
+                  <button id="btnCopySummary" class="exportBtn modelCapCopy" title="Copy to clipboard" aria-label="Copy summary">
+                    <svg class="exportIcon" viewBox="0 0 24 24" aria-hidden="true">
+                      <defs>
+                        <mask id="copy-cut">
+                          <rect x="0" y="0" width="24" height="24" fill="#fff"/>
+                          <rect x="8.5" y="8.5" width="10" height="10" rx="2.25" fill="#000"/>
+                        </mask>
+                      </defs>
+                      <rect x="3.5" y="3.5" width="10" height="10" rx="2.25"
+                            fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
+                            opacity=".55" mask="url(#copy-cut)"/>
+                      <rect x="8.5" y="8.5" width="10" height="10" rx="2.25" fill="currentColor" opacity=".08"/>
+                      <rect x="8.5" y="8.5" width="10" height="10" rx="2.25" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+                      <path d="M18.5 8.5h-2.9a.6.6 0 0 0-.6.6v0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity=".8"/>
+                      <path d="M18.5 8.5 L18.5 11.4 L15.6 11.4 Z" fill="currentColor" opacity=".15"/>
+                    </svg>
+                  </button>
+                </header>
+                <pre class="summaryBox" id="singleSummary">(loading…)</pre>
+              </article>
+
+              <!-- legacy node kept for JS that expects it; hidden by CSS -->
+              <button id="btnAddColumn" class="addColTile" type="button" title="Add a model column">+ Add Model</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- === Widget: Top Controls === -->
+      <div class="widget col-12" data-widget-id="w-top">
+        <div class="panel">
+          <div class="widgetHeader"><div class="widgetTitle">Workspace</div></div>
+
+          <div class="row" style="margin-bottom:8px">
+            <button id="btnChoose">Choose Python Script</button>
+            <span id="scriptName" style="font-weight:700"></span>
+          </div>
+          <div class="row">
+            <label>Python:</label>
+            <input id="pyPath" placeholder="python" />
+            <button id="btnSetPy">Save Python Path</button>
+            <button id="btnSaveCkpt">Save ckpt</button>
+            <button id="btnAutoSave">Export Session…</button>
+            <button id="btnLoad">Load Session</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- === Widget: AutoFork === -->
+      <div class="widget col-12" data-widget-id="w-autofork">
+        <div class="panel" id="autoForkPanel">
+          <div class="widgetHeader"><div class="widgetTitle">AutoFork</div></div>
+
+          <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:8px">
+            <div class="row" style="margin:0">
+              <button id="btnAutoForkOn"  class="afToggleBtn" title="Enable AutoFork with defaults">ON</button>
+              <button id="btnAutoForkOff" class="afToggleBtn" title="Disable AutoFork">OFF</button>
+              <button id="btnAutoForkApply" title="Apply the current rules to the session">Apply Rules</button>
+              <label>Variant
+                <input id="afVariantIndex" type="number" value="0" min="0" style="width:72px" />
+              </label>
+            </div>
+          </div>
+
+          <div id="afTabs" class="afTabs">
+            <div id="afTabButtons" class="afTabButtons" role="tablist" aria-label="AutoFork tabs">
+              <button type="button" data-tab="forking"  class="afTabBtn" role="tab" aria-selected="true">Forking</button>
+              <button type="button" data-tab="sampling" class="afTabBtn" role="tab" aria-selected="false">Sampling</button>
+              <button type="button" data-tab="merging"  class="afTabBtn" role="tab" aria-selected="false">Merging</button>
+              <button type="button" data-tab="plan"     class="afTabBtn" role="tab" aria-selected="false">Plan</button>
+            </div>
+
+            <!-- Forking -->
+            <section class="afTabPanel" data-tab="forking" role="tabpanel">
+              <div class="afSectionTitle">Triggers & Limits</div>
+              <div class="afGrid">
+                <label><input id="afEnabled" type="checkbox" /> Enabled</label>
+                <label>Loss plateau patience <input id="afLossPlateauPatience" type="number" step="1" /></label>
+                <label>Loss plateau delta <input id="afLossPlateauDelta" type="number" step="0.0001" /></label>
+                <label>Per-sample window <input id="afPerSampleWindow" type="number" step="1" /></label>
+                <label>k-means k <input id="afKmeansK" type="number" step="1" /></label>
+                <label>Dead cluster z <input id="afDeadClusterZ" type="number" step="0.1" /></label>
+                <label>High-loss quantile <input id="afHighLossQuantile" type="number" step="0.01" min="0" max="1" /></label>
+                <label>Spike σ <input id="afSpikeSigma" type="number" step="0.1" /></label>
+                <label>EMA decay <input id="afEmaDecay" type="number" step="0.001" min="0" max="1" /></label>
+                <label>Max parallel children <input id="afMaxParallelChildren" type="number" step="1" min="0" /></label>
+                <label>Fork cooldown (steps) <input id="afForkCooldownSteps" type="number" step="1" min="0" /></label>
+                <label>Gate epochs <input id="afGateEpochs" type="number" step="1" min="0" /></label>
+              </div>
+            </section>
+
+            <!-- Sampling -->
+            <section class="afTabPanel" data-tab="sampling" role="tabpanel" hidden>
+              <div class="afSectionTitle">PSL & Feature Sampling</div>
+              <div class="afGrid">
+                <label>PSL every <input id="afPslEvery" type="number" step="1" min="1" /></label>
+                <label>PSL budget <input id="afPslBudget" type="number" step="1" min="0" /></label>
+                <label><input id="afMirrorTrain" type="checkbox" /> Mirror train</label>
+                <label><input id="afAmpForPsl" type="checkbox" /> AMP for PSL</label>
+
+                <label class="checkbox" style="grid-column: span 2;">
+                  <input type="checkbox" id="afComputeMargins" />
+                  Compute margins (top-2 logit gap)
+                </label>
+
+                <label class="checkbox" style="grid-column: span 2;">
+                  <input type="checkbox" id="afComputeEmbeddings" />
+                  Compute embeddings (via embedding_hook)
+                </label>
+
+                <label style="grid-column: span 2;">
+                  Embed max dim
+                  <input id="afEmbedMaxDim" type="number" step="1" min="1" value="256" style="width:90px" />
+                </label>
+              </div>
+            </section>
+
+            <!-- Merging -->
+            <section class="afTabPanel" data-tab="merging" role="tabpanel" hidden>
+              <div class="afSectionTitle">Merging & Backpressure</div>
+              <div class="afGrid">
+                <label><input id="afMergeOnPlateau" type="checkbox" /> Merge on plateau</label>
+                <label>Reunify every (steps) <input id="afReunifyEverySteps" type="number" step="1" min="0" /></label>
+                <label>Min child steps before merge <input id="afMinChildStepsBeforeMerge" type="number" step="1" min="0" /></label>
+                <label>Merge uplift threshold <input id="afMergeUpliftThreshold" type="number" step="0.0001" /></label>
+                <label>
+                  Merge method
+                  <select id="afMergeMethodSelector">
+                    <option value="swa">SWA</option>
+                    <option value="distill">Knowledge distillation</option>
+                    <option value="fisher_soup">Fisher-weighted soup</option>
+                    <option value="adapter_fuse">Adapter fusion</option>
+                    <option value="none">Disable merges</option>
+                  </select>
+                </label>
+                <label>Inter-fork improvement <input id="afInterForkImprovement" type="number" step="0.0001" /></label>
+                <label>Fork backpressure α <input id="afForkBackpressureAlpha" type="number" step="0.0001" min="0" max="1" /></label>
+              </div>
+            </section>
+
+            <!-- Plan -->
+            <section class="afTabPanel" data-tab="plan" role="tabpanel" hidden>
+              <div class="afSectionTitle">Suggested Plan</div>
+              <pre id="afPlan" class="note afPlanBox">(no plan yet)</pre>
+              <div class="row" style="margin-top:8px">
+                <button id="btnAutoForkExec" title="Execute the latest suggested plan">
+                  Execute Plan
+                </button>
+              </div>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <!-- === Widget: Runs & Controls === -->
+      <div class="widget col-12" data-widget-id="w-runs">
+        <div class="panel">
+          <div class="widgetHeader"><div class="widgetTitle">Models & Controls</div></div>
+
+          <div class="row" style="margin-bottom:8px">
+            <div class="modelArrows" style="display:flex; gap:8px;">
+              <button id="btnPrevModel" class="iconBtn" title="Previous model">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 19l-7-7 7-7" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+              <button id="btnNextModel" class="iconBtn" title="Next model">
+                <svg class="icon" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+            </div>
+            <select id="runSel"></select>
+            <button id="btnOpenDag" title="View lineage DAG">Open Model Graph</button>
+            <button id="btnRefreshRuns" class="btn-refresh" type="button"><span class="icon-rotate" aria-hidden="true">↻</span></button>
+          </div>
+
+          <div class="row" id="runControlsRow" style="margin-bottom:8px">
+            <button id="btnResume" class="icon-btn" aria-label="Play" title="Play">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+            </button>
+            <button id="btnPause" class="icon-btn" aria-label="Pause" title="Pause">
+              <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>
+            </button>
+            <button id="btnTestNow" title="Test Model">Test Model</button>
+            <button id="btnGenerateReport" title="Compute per-sample losses">Show Model Loss Distribution</button>
+            <button id="btnManualFork" title="Fork using selected loss region">Manual Fork This Model</button>
+            <span id="modelLabel" style="font-weight:700"></span>
+          </div>
+
+          <div class="card" id="subsetExportCard">
+            <div class="card-title">Export subset</div>
+            <div class="card-body" style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <label for="exportSubsetFmt">Format</label>
+              <select id="exportSubsetFmt">
+                <option value="parquet" selected>Parquet (.parquet)</option>
+                <option value="csv">CSV (.csv)</option>
+                <option value="feather">Feather (.feather)</option>
+              </select>
+              <button id="btnExportSubset">Export subset for selected run</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- === Widget: Charts === -->
+      <div class="widget col-12" data-widget-id="w-charts">
+        <div class="panel">
+          <div class="widgetHeader"><div class="widgetTitle">Training Metrics</div></div>
+
+          <div class="chartsRow">
+            <div class="chartsMain">
+              <!-- Loss chart -->
+              <div class="chartWrap">
+                <button id="exportLossBtn" class="exportBtn" title="Export PNG" aria-label="Export loss chart">
+                  <svg class="exportIcon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M12 3v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M8 9l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M4 21h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M6 21v-2M18 21v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <canvas id="lossChart"></canvas>
+              </div>
+
+              <!-- Validation / GUR chart -->
+              <div class="chartWrap">
+                <button id="exportValLossBtn" class="exportBtn" title="Export PNG" aria-label="Export GUR chart">
+                  <svg class="exportIcon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M12 3v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M8 9l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M4 21h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M6 21v-2M18 21v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <canvas id="valLossChart"></canvas>
+              </div>
+
+              <!-- Report heading -->
+              <h3 class="chartTitle">Loss Distribution by Sample</h3>
+
+              <!-- Histogram + meta -->
+              <div class="reportRow">
+                <div class="chartWrap">
+                  <button id="exportLossDistBtn" class="exportBtn" title="Export PNG" aria-label="Export histogram">
+                    <svg class="exportIcon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M12 3v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      <path d="M8 9l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                      <path d="M4 21h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      <path d="M6 21v-2M18 21v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                  </button>
+                  <canvas id="lossDistChart"></canvas>
+                </div>
+                <aside class="reportSide">
+                  <div id="reportMeta" class="pill">—</div>
+                  <pre id="reportNote" class="note"></pre>
+                </aside>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- === Widget: Notes === -->
+      <div class="widget col-12" data-widget-id="w-report">
+        <div class="panel">
+          <div class="widgetHeader"><div class="widgetTitle">Notes</div></div>
+          <p class="note">Observations and auto-generated notes will appear alongside the histogram above.</p>
+        </div>
+      </div>
+
+      <!-- === Widget: Log === -->
+      <div class="widget col-12" data-widget-id="w-log">
+        <div class="panel">
+          <div class="widgetHeader"><div class="widgetTitle">Log</div></div>
+          <textarea id="log" readonly></textarea>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <!-- ========== DAG Overlay Markup (IDs preserved) ========== -->
+  <div id="dagOverlay" class="dagOverlay" aria-hidden="true">
+    <div class="dagPanel" role="dialog" aria-modal="true" aria-labelledby="dagTitle">
+      <div class="dagHeader">
+        <strong id="dagTitle">Model Lineage</strong>
+        <div style="display:flex;gap:8px;align-items:center">
+          <label style="display:flex;gap:6px;align-items:center">
+            Strategy:
+            <select id="dagStrategy">
+              <option value="swa">swa</option>
+              <option value="weighted">weighted</option>
+              <option value="advanced">advanced</option>
+            </select>
+          </label>
+          <button id="dagMergeBtn" disabled>Pick 2 to merge</button>
+          <button id="dagClose">Close</button>
+        </div>
+      </div>
+      <div class="dagCanvasWrap">
+        <svg id="dagSvg" width="100%" height="100%" role="img" aria-label="Model lineage graph"></svg>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Theme → Chart.js bridge ===== -->
+  <script nonce="__NONCE__">
+    (function () {
+      function applyChartTheme() {
+        var cs = getComputedStyle(document.documentElement);
+        var text = (cs.getPropertyValue('--chart-text') || cs.getPropertyValue('--fg')).trim();
+        var grid = (cs.getPropertyValue('--chart-grid') || cs.getPropertyValue('--border')).trim();
+        if (window.Chart) {
+          Chart.defaults.color = text;
+          Chart.defaults.borderColor = grid;
+          Chart.defaults.plugins = Chart.defaults.plugins || {};
+          Chart.defaults.plugins.legend = Chart.defaults.plugins.legend || {};
+          Chart.defaults.plugins.legend.labels = Chart.defaults.plugins.legend.labels || {};
+          Chart.defaults.plugins.legend.labels.color = text;
+          Chart.defaults.plugins.tooltip = Chart.defaults.plugins.tooltip || {};
+          Chart.defaults.plugins.tooltip.titleColor = text;
+          Chart.defaults.plugins.tooltip.bodyColor = text;
+          Chart.defaults.scales = Chart.defaults.scales || {};
+          ['linear', 'logarithmic', 'category', 'time', 'timeseries'].forEach(function (type) {
+            Chart.defaults.scales[type] = Chart.defaults.scales[type] || {};
+            Chart.defaults.scales[type].grid = Chart.defaults.scales[type].grid || {};
+            Chart.defaults.scales[type].grid.color = grid;
+            Chart.defaults.scales[type].ticks = Chart.defaults.scales[type].ticks || {};
+            Chart.defaults.scales[type].ticks.color = text;
+          });
+        }
+      }
+      applyChartTheme();
+      var mql = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+      if (mql && mql.addEventListener) mql.addEventListener('change', applyChartTheme);
+      else if (mql && mql.addListener) mql.addListener(applyChartTheme);
+      window.addEventListener('DOMContentLoaded', applyChartTheme);
+    })();
+  </script>
+
+  <!-- ===== Expose key variables & ID registry for other files ===== -->
+  <script nonce="__NONCE__">
+    window.OnTheFlyExports = {
+      version: '1.0.0-rework',
+      ids: {
+        btnChoose:'btnChoose', scriptName:'scriptName', pyPath:'pyPath', btnSetPy:'btnSetPy', btnSaveCkpt:'btnSaveCkpt', btnAutoSave:'btnAutoSave', btnLoad:'btnLoad', btnTestNow: 'btnTestNow',
+        autoForkPanel:'autoForkPanel',
+        afEnabled:'afEnabled',
+        afLossPlateauPatience:'afLossPlateauPatience',
+        afLossPlateauDelta:'afLossPlateauDelta',
+        afPerSampleWindow:'afPerSampleWindow',
+        afKmeansK:'afKmeansK',
+        afDeadClusterZ:'afDeadClusterZ',
+        afHighLossQuantile:'afHighLossQuantile',
+        afSpikeSigma:'afSpikeSigma',
+        afEmaDecay:'afEmaDecay',
+        afMaxParallelChildren:'afMaxParallelChildren',
+        afForkCooldownSteps:'afForkCooldownSteps',
+        afGateEpochs:'afGateEpochs',
+        afPslEvery:'afPslEvery',
+        afPslBudget:'afPslBudget',
+        afMirrorTrain:'afMirrorTrain',
+        afAmpForPsl:'afAmpForPsl',
+        afComputeMargins:'afComputeMargins',
+        afComputeEmbeddings:'afComputeEmbeddings',
+        afEmbedMaxDim:'afEmbedMaxDim',
+        afPlan:'afPlan',
+        afVariantIndex:'afVariantIndex',
+        btnAutoForkOn:'btnAutoForkOn',
+        btnAutoForkApply:'btnAutoForkApply',
+        btnAutoForkExec:'btnAutoForkExec',
+        afMergeOnPlateau:'afMergeOnPlateau',
+        afReunifyEverySteps:'afReunifyEverySteps',
+        afMinChildStepsBeforeMerge:'afMinChildStepsBeforeMerge',
+        afMergeUpliftThreshold:'afMergeUpliftThreshold',
+        afMergeMethodSelector: 'afMergeMethodSelector',
+        afInterForkImprovement:'afInterForkImprovement',
+        afForkBackpressureAlpha:'afForkBackpressureAlpha',
+        runSel:'runSel', btnOpenDag:'btnOpenDag', btnRefreshRuns:'btnRefreshRuns', btnResume:'btnResume', btnPause:'btnPause', btnRewind:'btnRewind', rewindSteps:'rewindSteps',
+        btnPrevModel:'btnPrevModel', btnNextModel:'btnNextModel', btnGenerateReport:'btnGenerateReport', btnManualFork:'btnManualFork', modelLabel:'modelLabel',
+        lossChart:'lossChart', valLossChart:'valLossChart', lossDistChart:'lossDistChart',
+        reportMeta:'reportMeta', reportNote:'reportNote',
+        log:'log',
+        dagOverlay:'dagOverlay', dagSvg:'dagSvg', dagStrategy:'dagStrategy', dagMergeBtn:'dagMergeBtn', dagClose:'dagClose',
+        exportLossBtn:'exportLossBtn', exportValLossBtn:'exportValLossBtn', exportLossDistBtn:'exportLossDistBtn',
+        tabCreate:'tabCreate', tabCompare:'tabCompare',
+        wCompare:'w-compare', columnsWrap:'columnsWrap', compareRail:'compareRail',
+        columnsGrid:'columnsGrid', btnAddColumn:'btnAddColumn', btnClearColumns:'btnClearColumns'
+      },
+      cssVars: ['--bg','--fg','--muted','--panel-bg','--panel-elev','--border','--btn-bg','--btn-fg','--btn-shadow','--btn-shadow-hover','--chart-text','--chart-grid'],
+      widgets: ['w-top','w-autofork','w-runs','w-charts','w-report','w-log','w-compare']
+    };
+
+    window.FS = {
+      el(name){ const id = (window.OnTheFlyExports && window.OnTheFlyExports.ids[name]) || name; return document.getElementById(id); },
+      css(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+    };
+  </script>
+
+  <!-- ===== Layout customizer (drag & drop + persistence) ===== -->
+  <script nonce="__NONCE__">
+    (function(){
+      const grid = document.getElementById('flyGrid');
+      const customBar = document.getElementById('customBar');
+      const list = document.getElementById('customList');
+      const LS_KEY = 'fs.layout.v1';
+
+      function widgets(){ return Array.from(grid.querySelectorAll('.widget')); }
+      function idOf(w){ return w.getAttribute('data-widget-id'); }
+
+      function loadState(){ try { return JSON.parse(localStorage.getItem(LS_KEY)||'{}'); } catch(e){ return {}; } }
+      function saveState(state){ localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+
+      function applyState(){
+        const s = loadState();
+        widgets().forEach(w => { const id = idOf(w); const vis = s.visibility ? s.visibility[id] : true; w.hidden = vis === false; });
+        list.querySelectorAll('input[type="checkbox"]').forEach(cb => {
+          const id = cb.dataset.widget; cb.checked = (s.visibility && s.visibility[id] === false) ? false : true;
+        });
+      }
+
+      function stateFromDOM(){
+        const visibility = {};
+        list.querySelectorAll('input[type="checkbox"]').forEach(cb => { visibility[cb.dataset.widget] = cb.checked; });
+        return { visibility };
+      }
+
+      list.addEventListener('change', () => {
+        const s = stateFromDOM();
+        widgets().forEach(w => { const id = idOf(w); w.hidden = s.visibility[id] === false; });
+        saveState(s);
+      });
+
+      function wireDnD(){
+        widgets().forEach(w => {
+          w.addEventListener('dragstart', onDragStart);
+          w.addEventListener('dragend', onDragEnd);
+        });
+        grid.addEventListener('dragover', onDragOver);
+      }
+
+      applyState();
+      wireDnD();
+    })();
+  </script>
+
+  <!-- ===== Script placeholders injected by host ===== -->
+  <script nonce="__NONCE__" src="__CHART_JS__"></script>
+  <script nonce="__NONCE__" src="__DAG_LAYOUT_JS__"></script>
+
+  <!-- ===== Inline helpers ===== -->
+  <script nonce="__NONCE__">
+  (function () {
+    var btn = document.getElementById('btnGenerateReport');
+    if (!btn || btn.dataset.fsHelpWrapped) return;
+
+    var wrap = document.createElement('span');
+    wrap.className = 'fs-helpWrap';
+    btn.parentElement.insertBefore(wrap, btn);
+    wrap.appendChild(btn);
+
+    var mark = document.createElement('span');
+    mark.className = 'fs-helpMark';
+    mark.textContent = '?';
+    mark.setAttribute('data-tip', 'Generate this report to manually fork.');
+    wrap.appendChild(mark);
+
+    btn.dataset.fsHelpWrapped = '1';
+  })();
+  </script>
+
+  <script nonce="__NONCE__">
+  (function () {
+    function moveAndToggle() {
+      var btn = document.getElementById('btnManualFork');
+      var aside = document.querySelector('.reportSide');
+      if (!btn || !aside) return;
+
+      aside.appendChild(btn);
+      btn.style.display = 'none';
+
+      var meta = document.getElementById('reportMeta');
+      var note = document.getElementById('reportNote');
+
+      function hasReport() {
+        var metaTxt = (meta && meta.textContent || '').trim();
+        var noteTxt = (note && note.textContent || '').trim();
+        return (metaTxt && metaTxt !== '—') || (noteTxt.length > 0);
+      }
+
+      function updateVisibility() { btn.style.display = hasReport() ? '' : 'none'; }
+
+      var gen = document.getElementById('btnGenerateReport');
+      if (gen) gen.addEventListener('click', function () { setTimeout(updateVisibility, 60); });
+
+      var mo = new MutationObserver(updateVisibility);
+      if (meta) mo.observe(meta, { childList: true, characterData: true, subtree: true });
+      if (note) mo.observe(note, { childList: true, characterData: true, subtree: true });
+
+      updateVisibility();
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', moveAndToggle);
+    else moveAndToggle();
+  })();
+  </script>
+
+  <script nonce="__NONCE__">
+  (function () {
+    const byId = (id) => document.getElementById(id);
+    const columnsGrid = byId('columnsGrid');
+    const sessionSel  = byId('sessionSel');
+    const singleCol   = byId('singleSessionCol');
+    const capName     = byId('singleCapName');
+    const summaryBox  = byId('singleSummary');
+
+    if (!columnsGrid || !sessionSel || !singleCol) return;
+
+    let view = localStorage.getItem('fs.compare.view') || 'train';
+    const setSub = () => {
+      const sub = singleCol.querySelector('.capSub');
+      if (sub) sub.textContent = `${view} summary`;
+    };
+    setSub();
+
+    function chooseSession(id, label) {
+      if (!id) return;
+      singleCol.dataset.sessionId = String(id);
+      capName.textContent = label || id;
+      try { if (window.COL_STATE) COL_STATE.set(singleCol, { sessionId: id, runId: '__aggregate__' }); } catch {}
+      try { if (typeof requestSessionRuns === 'function') requestSessionRuns(id); } catch {}
+      try { if (typeof fillSummary === 'function') fillSummary(singleCol, id, '__aggregate__', view); } catch {}
+    }
+
+    sessionSel.addEventListener('change', () => {
+      const opt = sessionSel.selectedOptions[0];
+      chooseSession(opt && opt.value, opt && opt.textContent);
+    });
+
+    const rail = byId('compareRail');
+    if (rail) rail.addEventListener('click', (e) => {
+      const t = e.target.closest('.railTab');
+      if (!t) return;
+      const v = t.getAttribute('data-view');
+      if (v && v !== view) { view = v; setSub(); }
+    });
+
+    window.addEventListener('message', (e) => {
+      const m = e.data;
+      if (m?.type === 'fs.session.list.result') {
+        const sessions = m.sessions || [];
+        sessionSel.innerHTML = sessions.length ? '' : '<option value="">(no sessions)</option>';
+        sessions.forEach(s => {
+          const opt = document.createElement('option');
+          opt.value = s.id;
+          opt.textContent = s.label || s.id;
+          sessionSel.appendChild(opt);
+        });
+        if (sessions.length && !singleCol.dataset.sessionId) {
+          sessionSel.value = sessions[0].id;
+          chooseSession(sessions[0].id, sessions[0].label || sessions[0].id);
+        }
+      }
+      if (m?.type === 'fs.session.summary.get.result') {
+        if (String(m.sessionId) === String(singleCol.dataset.sessionId)) setSub();
+      }
+    });
+
+    try { requestSessionList(); }
+    catch { try { send('fs.session.list'); } catch {} }
+  })();
+  </script>
+
+  <script nonce="__NONCE__" src="__DASHBOARD_JS__"></script>
+</body>
+</html>
