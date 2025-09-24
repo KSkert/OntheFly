@@ -1,0 +1,24 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "build (vscode-onthefly)",
+      "type": "shell",
+      "command": "npm run build",
+      "options": { "cwd": "${workspaceFolder}/vscode-onthefly" },
+      "problemMatcher": "$tsc"
+    },
+    {
+      "label": "watch (vscode-onthefly)",
+      "type": "shell",
+      "command": "npm run watch",
+      "options": { "cwd": "${workspaceFolder}/vscode-onthefly" },
+      "problemMatcher": "$tsc-watch"
+    },
+    { "type": "npm", 
+      "script": "build", 
+      "label": "npm: build", 
+      "problemMatcher": "$tsc", 
+      "group": "build" }
+  ]
+}

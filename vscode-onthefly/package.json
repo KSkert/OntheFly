@@ -1,0 +1,52 @@
+{
+  "name": "onthefly",
+  "displayName": "On the Fly",
+  "description": "Mid-training model adjustment toolkit for PyTorch.",
+  "version": "0.0.1",
+  "publisher": "Luke Skertich",
+  "engines": {
+    "vscode": "^1.87.0"
+  },
+  "activationEvents": [
+    "onCommand:onthefly.showDashboard"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "onthefly.showDashboard",
+        "title": "On the Fly: Show Dashboard"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "On the Fly",
+      "properties": {
+        "onthefly.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python interpreter running OnTheFlySession"
+        },
+        "onthefly.storagePathOverride": {
+          "type": "string",
+          "default": "",
+          "description": "Override path for the SQLite DB (for advanced setups)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.87.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.2.0",
+    "chart.js": "^3.9.1"
+  }
+}

@@ -1,0 +1,53 @@
+onthefly/
+├─ pyproject.toml
+├─ package.json
+├─ pyproject.toml
+├─ README.md
+├─ .vscode/
+│  └─ launch.json
+│  └─ tasks.json
+├─ src/
+│  └─ seamless_modeldev/
+│     └─ mixins/
+│     	├─ autofork_mixin.py
+│     	├─ checkpoint_mixin.py
+│     	├─ events_mixin.py
+│     	├─ feature_mixin.py
+│     	├─ train_mixin.py
+│     ├─ __init__.py
+│     ├─ autofork.py
+│     ├─ checkpoints.py
+│     ├─ ckpt_utils.py
+│     ├─ config.py
+│     ├─ control.py
+│     ├─ data_explorer.py
+│     ├─ device_utils.py
+│     ├─ factory.py
+│     ├─ feature_worker.py
+│     ├─ ids.py
+│     ├─ kmeans_utils.py
+│     ├─ merging.py
+│     ├─ metrics_utils.py
+│     ├─ scale.py
+│     ├─ session.py
+│     ├─ snapshots.py
+│     └─ utils.py
+├─ package-lock.json
+├─ package.json
+├─ vscode-seamless
+│  ├─ .vscode/
+     │  └─ launch.json
+     │  └─ tasks,json
+│  ├─ node_modules/
+│  ├─ tsconfig.json
+│  ├─ package.json
+│  ├─ src/
+│     ├─ package-lock.json
+│     ├─ package.json
+│     ├─ tsconfig.json
+│     ├─ extension.js
+│     ├─ storage.js
+│     ├─ webview/
+├─ dag_layout.js
+├─ dashboard.js
+├─ dashboard.html

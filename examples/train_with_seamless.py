@@ -2,7 +2,7 @@ import torch, torch.nn as nn, torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 from torchvision import datasets, transforms
 
-from seamless_modeldev import SeamlessSession, AutoForkRules
+from onthefly_backend import OnTheFlySession, AutoForkRules
 
 tfm = transforms.Compose([transforms.ToTensor()])
 dataset = datasets.MNIST(root="./data", train=True, download=True, transform=tfm)
@@ -29,7 +29,7 @@ model = MLP()
 optimizer = optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-2)
 loss_fn   = nn.CrossEntropyLoss()
 
-session = SeamlessSession(
+session = OnTheFlySession(
     project="mnist-demo",
     run_name="baseline",
     model=model,

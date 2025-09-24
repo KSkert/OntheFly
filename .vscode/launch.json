@@ -2,17 +2,17 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Run Seamless Extension",
+      "name": "Run On the Fly Extension",
       "type": "extensionHost",
       "request": "launch",
       "runtimeExecutable": "${execPath}",
       "args": [
-        "--extensionDevelopmentPath=${workspaceFolder}/vscode-seamless"
+        "--extensionDevelopmentPath=${workspaceFolder}/vscode-onthefly"
       ],
       "outFiles": [
-        "${workspaceFolder}/vscode-seamless/out/**/*.js"
+        "${workspaceFolder}/vscode-onthefly/out/**/*.js"
       ],
-      "preLaunchTask": "tsc: watch - vscode-seamless"
+      "preLaunchTask": "tsc: watch - vscode-onthefly"
     }
   ]
 }
