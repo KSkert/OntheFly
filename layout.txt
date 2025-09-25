@@ -1,8 +1,8 @@
-seamless-modeldev/
+onthefly/
 ├─ pyproject.toml
 ├─ README.md
 ├─ src/
-│  └─ seamless_modeldev/
+│  └─ onthefly_backend/
 │     ├─ __init__.py
 │     ├─ session.py
 │     ├─ control.py
@@ -15,7 +15,7 @@ seamless-modeldev/
 ├─ package-lock.json
 ├─ package.json
 ├─ pyproject.toml
-├─ vscode-seamless
+├─ vscode-onthefly
 │  ├─ .vscode/
 │  ├─ node_modules/
 │  ├─ src/

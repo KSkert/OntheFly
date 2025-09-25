@@ -1,0 +1,19 @@
+cat > .gitignore <<'EOF'
+# Python build artifacts
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Envs & OS
+.venv/
+.DS_Store
+
+# VS Code extension deps
+vscode-onthefly/node_modules/
+EOF
+
