@@ -170,8 +170,6 @@ type WebMsg =
   | { command: 'setPython'; path: string }
   | { command: 'pause' }
   | { command: 'resume' }
-  | { command: 'rewind'; steps: number }
-  | { command: 'saveCkpt' }
   | { command: 'fork'; payload?: any }
   | { command: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string } }
   | { command: 'exportSession' }
@@ -197,12 +195,7 @@ type WebMsg =
 
   
   | { command: 'requestLogs'; runId: string; phase?: CompareView }
-  | { command: 'requestTestRows'; runId: string }
-
-  // Model Comparison IPC
-  | { command: 'fs.summary.list' }
-  | { command: 'fs.summary.get'; runId: string; view?: CompareView }
-  | { command: 'fs.summary.pick'; current: string };
+  | { command: 'requestTestRows'; runId: string };
 
 
 /* ============================ Control messages to Python ============================ */
@@ -641,31 +634,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       break;
     }
 
-    case 'fs.summary.list': {
-      // Picker removed; return only current session (keeps old UI from breaking if it calls this).
-      const one = currentSessionId ? [{ id: currentSessionId, label: 'Current session' }] : [];
-      post({ type: 'fs.summary.list.result', runs: one });
-      break;
-    }
-
-
-    case 'fs.summary.get': {
-      try {
-        const view = String((m as any).view || 'train');
-        let key = String((m as any).runId || '');
-        if (!key || key === 'CURRENT') key = currentSessionId || '';   // ← default to current session
-        const text = key ? buildSummaryText(key, view) : '(no session yet)';
-        post({ type: 'fs.summary.get.result', runId: key || 'CURRENT', view, text });
-      } catch (e:any) { postErr(e); }
-      break;
-    }
-
-
-    case 'fs.summary.pick': {
-      // Deprecated—no picker anymore.
-      break;
-    }
-
     case 'pause': sendCtl({ cmd: 'pause' }); break;
     case 'resume': {
       try {
@@ -680,8 +648,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       } catch (e: any) { postErr(e); }
       break;
     }
-    case 'rewind': sendCtl({ cmd: 'rewind_steps', steps: Math.max(0, Number(m.steps || 0)) }); break; // updated
-    case 'saveCkpt': sendCtl({ cmd: 'save_ckpt' }); break;
     case 'fork': sendCtl({ cmd: 'fork', payload: (m as any).payload }); break;
 
     case 'merge': {

@@ -13,7 +13,7 @@
  *  7) Streamed Data Model (STATE/PEND, redraw pipeline)
  *  8) Log Ring Buffer
  *  9) IPC Commands & Buttons (send helpers + button handlers)
- * 10) Compare Columns UI (layout, columns, summaries, copy)
+ * 10) Session Navigator (not implemented yet)
  * 11) Window/Message Handlers (all postMessage routes)
  * 12) Select Populators (runs dropdown)
  * 13) Status Gating (running/paused UI)
@@ -128,58 +128,6 @@ const afInterForkImprovement    = byId('afInterForkImprovement');
 const afForkBackpressureAlpha   = byId('afForkBackpressureAlpha');
 const afMergeMethodSelector    = byId('afMergeMethodSelector');
 
-// ===== Model Comparison (Columns) refs =====
-const tabCreate       = byId('tabCreate');
-const tabCompare      = byId('tabCompare');
-const wCompare        = byId('w-compare');
-const columnsWrapEl   = byId('columnsWrap');
-const compareRail     = byId('compareRail');
-const columnsGrid     = byId('columnsGrid');
-const btnAddColumn    = byId('btnAddColumn');
-const btnClearColumns = byId('btnClearColumns');
-const btnUploadSession= byId('btnUploadSession');
-const sessionFilePicker = byId('sessionFilePicker');
-
-
-/* ====================================================================
- * 3) Sessions/Compare: state, helpers, caches
- * --------------------------------------------------------------------
- * Compare view is session-first. Cache keys reflect session+run+view.
- * ==================================================================== */
-
-// ==== NEW: Sessions-first Compare state ====
-const COL_STATE = new Map(); // colEl -> { sessionId, runId }
-const __AGG = '__aggregate__';
-
-// cache now keyed by session + run + view
-function sumKey(sessionId, runId, view){ return `${String(sessionId)}|${String(runId)}:${String(view)}`; }
-
-// requests
-function requestSessionRuns(sessionId) { send('fs.session.runs', { sessionId }); }
-function requestSessionSummary(sessionId, runId, view) {
-  send('fs.session.summary.get', { sessionId, runId, view });
-}
-function getSessionIdForRun(runId) {
-  const row = runsIndex.get(String(runId)) || {};
-  return row.session_id ?? row.sessionId ?? row.session ?? null;
-}
-
-function ensureSessionColumnForRun(runId) {
-  const sid = getSessionIdForRun(runId);
-  if (!sid || !columnsGrid || !btnAddColumn) return false;
-
-  // reuse existing column for this session if present; otherwise create it
-  let col = columnsGrid.querySelector(`.modelCol[data-session-id="${cssAttr(sid)}"]`);
-  if (!col) col = makeColumnForSession({ id: sid, label: sid });
-
-  // lock the column to the session aggregate and (re)fill it
-  COL_STATE.set(col, { sessionId: sid, runId: __AGG });
-  setColumnSubtitle(col, _compareView);
-  fillSummary(col, sid, __AGG, _compareView);
-  const other = _compareView === 'train' ? 'test' : 'train';
-  requestSessionSummary(sid, __AGG, other);  // warm the other view
-  return true;
-}
 
 
 /* ====================================================================
@@ -399,8 +347,6 @@ let manualForkMode = false;
 let forkSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
 let forkOverlay;
 
-
-let _compareView = localStorage.getItem('fs.compare.view') || 'train';
 
 // lineage maps
 // multi-parent lineage
@@ -780,7 +726,6 @@ function computeLossHistogram(values, numBins = 30) {
 
 // Cache: one report per runId
 const REPORT_CACHE = (window.__REPORT_CACHE__ ||= new Map());
-const SUMMARY_CACHE = (window.__SUMMARY_CACHE__ ||= new Map());
 
 
 const cacheKeyFor = (runId) => `${keyOf(runId)}`;
@@ -976,7 +921,7 @@ on(btnResume, 'click', () => {
   send('resume', { runId: rk });
 });
 
-on(btnSaveCkpt, 'click', () => send('saveCkpt'));
+
 on(btnAutoSave, 'click', () => send('exportSession'));
 on(btnLoad, 'click', () => send('loadSession'));
 on(btnReport, 'click', () => {
@@ -1050,13 +995,7 @@ on(btnAutoForkExec, 'click', () => {
 if (btnRefreshRuns) on(btnRefreshRuns, 'click', () => {
  // Alerts are blocked in webviews; ask the extension host to show a native modal.
  send('resetAll');
-  if (columnsGrid) {
-    columnsGrid.querySelectorAll('.modelCol').forEach(n => n.remove());
-    ensureAddTile();
-  }
   const rk = currentPageRunId();
-  if (rk) ensureSessionColumnForRun(rk);
-
 });
 
 on(btnOpenDag, 'click', () => { openDag(); });
@@ -1444,303 +1383,8 @@ function hideMergeBanner() {
   if (el) el.style.display = 'none';
 }
 
-// ===================== Model Comparison (Columns) =====================
-// Clean, text-first columns with a vertical TRAIN/TEST rail.
-// IPC (host):
-//   send('fs.summary.list')        -> type: 'fs.summary.list.result'  { runs:[{id,label}] }
-//   send('fs.summary.get', {runId,view}) -> type: 'fs.summary.get.result' { runId, view, text }
-//   send('fs.summary.pick', {current})    -> type: 'fs.summary.pick.result' { previous, chosen:{id,label} }
-
-// --- elements ---
-const grid       = byId('forgeGrid');
-const compareEl  = (wCompare && (wCompare.closest('.widget') || wCompare)) || null;
-const layoutBar  = byId('customBar') || document.querySelector('.customBar');
-
-// mark the compare card once so CSS can target it
-compareEl?.classList.add('is-compare-card');
-
-// --- CSS installed once ---
-(function installCompareCSS(){
-  if (document.getElementById('compareCSS')) return;
-  const style = document.createElement('style');
-  style.id = 'compareCSS';
-  style.textContent = `
-    /* baseline: never show the compare card unless explicitly in compare mode */
-    #forgeGrid .widget.is-compare-card { display: none !important; }
-
-    /* compare mode: show ONLY the compare card */
-    #forgeGrid[data-mode="compare"] .widget { display: none !important; }
-    #forgeGrid[data-mode="compare"] .widget.is-compare-card { display: block !important; }
-  `;
-  document.head.appendChild(style);
-})();
-
-
-// --- the one setter: updates UI + persists ---
-function setMode(mode) {
-  const isCompare = mode === 'compare';
-  grid?.setAttribute('data-mode', isCompare ? 'compare' : 'create');
-
-  // keep the tabs mutually exclusive
-  tabCreate?.setAttribute('aria-selected', String(!isCompare));
-  tabCompare?.setAttribute('aria-selected', String(isCompare));
-
-  // hide layout bar in compare
-  if (layoutBar) layoutBar.style.display = isCompare ? 'none' : '';
-
-  localStorage.setItem('fs.tab', isCompare ? 'compare' : 'create');
-  if (isCompare) {
-    ensureDefaultCompareColumn();
-    refreshAllColumns();
-  }
-    
-}
-
-// --- wire clicks ---
-on(tabCreate,  'click', () => setMode('create'));
-on(tabCompare, 'click', () => setMode('compare'));
-
-// --- boot (no first-boot dance) ---
-setMode(localStorage.getItem('fs.tab') === 'compare' ? 'compare' : 'create');
-
-
-
-// ---- rail + columns ----
-function ensureAddTile() {
-  if (!columnsGrid || !btnAddColumn) return;
-  // keep the add-tile as the last child
-  columnsGrid.appendChild(btnAddColumn);
-}
-
-// --- Create a run-based column (used for the default/current run) ---
-function makeRunColumn(runId, label) {
-  if (!columnsGrid || !btnAddColumn) return null;
-  const el = document.createElement('article');
-  el.className = 'modelCol';
-  el.dataset.runId = String(runId);
-
-  const head = document.createElement('header');
-  head.className = 'modelCap';
-  const cap = document.createElement('div');
-  cap.className = 'capInner';
-  cap.innerHTML = `
-    <span class="capName">${escapeHtml(label || runId)}</span>
-    <span class="capSub">${escapeHtml(_compareView)} summary</span>
-  `;
-  const copyBtn = makeCopyBtn();
-  head.append(cap, copyBtn);
-
-  const pre = document.createElement('pre');
-  pre.className = 'summaryBox';
-  pre.textContent = '(loading…)';
-
-  el.append(head, pre);
-  columnsGrid.insertBefore(el, btnAddColumn);
-  ensureAddTile();
-  return el;
-}
-
-
-
-function ensureDefaultCompareColumn() {
-  if (!grid || grid.getAttribute('data-mode') !== 'compare') return;
-  if (!columnsGrid) return;
-  if (columnsGrid.querySelector('.modelCol')) return;
-
-  const currentRun = (runSel && runSel.value) || activeRunId;
-  if (!currentRun) return;
-
-  // NEW: if the current run has a session_id, show that session’s aggregate by default
-  if (ensureSessionColumnForRun(currentRun)) return;
-
-  // Fallback: old behavior (run-based column)
-  const label = (runsIndex.get(String(currentRun))?.name) || String(currentRun);
-  makeRunColumn(currentRun, label);
-  requestSummary(currentRun, 'train');
-  requestSummary(currentRun, 'test');
-}
-
-function invalidateCompareSummariesForRun(runKey){
-  if (!runKey) return;
-  ['train','test'].forEach(v => SUMMARY_CACHE.delete(`${runKey}:${v}`));
-}
-
-function invalidateVisibleSessionAggregates(){
-  // Drop cached aggregate for any session columns we currently show
-  columnsGrid?.querySelectorAll('.modelCol[data-session-id]').forEach(col=>{
-    const st = COL_STATE.get(col);
-    if (!st) return;
-    ['train','test'].forEach(v => SUMMARY_CACHE.delete(sumKey(st.sessionId, __AGG, v)));
-  });
-}
-
-
-function requestRunList()   { send('fs.summary.list'); }
-function requestSummary(id, view) { send('fs.summary.get', { runId: id, view }); }
-function requestPick(current)     { send('fs.summary.pick', { current }); }
-
-function escapeHtml(s) { return String(s).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
-function cssAttr(s)    { return String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
-
-function makeColumnForSession(session) {
-  const el = document.createElement('article');
-  el.className = 'modelCol';
-  el.dataset.sessionId = session.id;
-
-  const head = document.createElement('header');
-  head.className = 'modelCap';
-  head.tabIndex = 0;
-  head.title = 'Change session';
-
-
-  const cap = document.createElement('div');
-  cap.className = 'capInner';
-  cap.innerHTML = `
-    <span class="capName">${escapeHtml(session.label || session.id)}</span>
-    <span class="capSub">${escapeHtml(_compareView)} summary</span>
-  `;
-  const copyBtn = makeCopyBtn();
-  head.append(cap, copyBtn);
-
-  const pre = document.createElement('pre');
-  pre.className = 'summaryBox';
-  pre.textContent = '(loading…)';
-
-  el.append(head, pre);
-  columnsGrid.insertBefore(el, btnAddColumn);
-  ensureAddTile();
-
- // Track “aggregate” and fetch immediately
- COL_STATE.set(el, { sessionId: session.id, runId: __AGG });
- setColumnSubtitle(el, _compareView);
- fillSummary(el, session.id, __AGG, _compareView);
- const other = _compareView === 'train' ? 'test' : 'train';
- requestSessionSummary(session.id, __AGG, other);
-
-  return el;
-}
-
-function setColumnSubtitle(colEl, view){
-  const sub = colEl.querySelector('.capSub');
-  if (sub) sub.textContent = `${view} summary`;
-}
-
-function fillSummary(colEl, sessionId, runId, view) {
-  const key = sumKey(sessionId, runId, view);
-  const cached = SUMMARY_CACHE.get(key);
-  if (typeof cached === 'string' && cached.trim()) {
-    const pre = colEl.querySelector('.summaryBox');
-    if (pre) pre.textContent = cached;
-  } else {
-    const pre = colEl.querySelector('.summaryBox');
-    pre.textContent = '(loading…)';
-    requestSessionSummary(sessionId, runId, view);
-  }
-}
-
-function setSummary(runId, view, text) {
-  const key = `${runId}:${view}`;
-  const clean = (typeof text === 'string') ? text : '';
-  if (clean.trim()) SUMMARY_CACHE.set(key, clean);
-  else               SUMMARY_CACHE.delete(key); // don't poison cache with empty
-  const col = columnsGrid?.querySelector(`.modelCol[data-run-id="${cssAttr(runId)}"]`);
-  if (!col) return;
-  const pre = col.querySelector('.summaryBox');
-  const sub = col.querySelector('.capSub');
-  if (pre) pre.textContent = clean.trim() ? clean : '(loading…)'; // show loading until we have real data
-  if (sub) sub.textContent = `${view} summary`;
-}
-
-function refreshAllColumns() {
-  if (!columnsGrid) return;
-
-  // 1) Update session-based columns (tracked in COL_STATE)
-  columnsGrid.querySelectorAll('.modelCol[data-session-id]').forEach(col => {
-    const st = COL_STATE.get(col);
-    if (!st) return;
-    setColumnSubtitle(col, _compareView);
-    fillSummary(col, st.sessionId, __AGG, _compareView);
-  });
-
-  // 2) Update run-based columns (the default “current run” column)
-  columnsGrid.querySelectorAll('.modelCol[data-run-id]').forEach(col => {
-    const runId = col.dataset.runId;
-    const key = `${runId}:${_compareView}`;
-    const pre = col.querySelector('.summaryBox');
-    const cached = SUMMARY_CACHE.get(key);
-    const ready = (typeof cached === 'string') && cached.trim();
-    if (pre) pre.textContent = ready ? cached : '(loading…)';
-    if (!ready) requestSummary(runId, _compareView);
-    const sub = col.querySelector('.capSub');
-    if (sub) sub.textContent = `${_compareView} summary`;
-  });
-}
-
-(function () {
-  const PLACEHOLDER_RE = /^\s*(\(loading…\)|\(loading\.\.\.\)|loading|—|-|no data|n\/a)\s*$/i;
-
-  document.addEventListener('click', async (e) => {
-    const btn = e.target.closest('[data-copy-summary]');
-    if (!btn) return;
-
-    // nearest column (works for single-pane and compare columns)
-    const col = btn.closest('.modelCol') || document.getElementById('singleSessionCol');
-    const pre = col && col.querySelector('.summaryBox');
-    const text = (pre && pre.textContent || '').trim();
-
-    if (!text || PLACEHOLDER_RE.test(text)) return; // nothing to copy
-
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // simple fallback
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      ta.style.position = 'fixed'; ta.style.top = '-10000px';
-      document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
-    }
-    // quick visual feedback
-    const orig = btn.innerHTML;
-    btn.innerHTML = '<svg class="exportIcon" viewBox="0 0 24 24"><path d="M5 13l4 4L19 7" stroke="currentColor" stroke-width="2" fill="none"/></svg>';
-    setTimeout(() => (btn.innerHTML = orig), 800);
-  });
-})();
-
-function makeCopyBtn() {
-  const b = document.createElement('button');
-  b.type = 'button';
-  b.title = 'Copy summary';
-  b.className = 'exportBtn';
-  b.setAttribute('data-copy-summary', '');   // <- picked up by the delegated handler
-  b.innerHTML = `
-    <svg class="exportIcon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-      <path d="M16 3H5a2 2 0 0 0-2 2v11h2V5h11V3zm3 4H9a2 2 0 0 0-2 2v12h12a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2zm0 14H9V9h10v12z" fill="currentColor"/>
-    </svg>`;
-  return b;
-}
-
-
-
-
-// ---- events ----
-
-on(compareRail, 'click', (e) => {
-  const btn = e.target.closest('.railTab');
-  if (!btn) return;
-  const view = btn.dataset.view;
-  if (!view || view === _compareView) return;
-  compareRail.querySelectorAll('.railTab').forEach(b => b.setAttribute('aria-selected', b === btn ? 'true' : 'false'));
-  _compareView = view;
-  localStorage.setItem('fs.compare.view', _compareView);
-  refreshAllColumns();
-});
-
-on(btnClearColumns, 'click', () => {
-  if (!columnsGrid) return;
-  columnsGrid.querySelectorAll('.modelCol').forEach(n => n.remove());
-  ensureAddTile();
-});
-
+// ===================== Session Navigator =====================
+//not implemented yet
 
 /* ====================================================================
  * 11.5) Window Events
@@ -1822,87 +1466,6 @@ window.addEventListener('message', (e) => {
           wireModelNavClicks();
           updateModelNav();
         }
-      break;
-    }
-
-    case 'fs.session.runs.result': {
-      const { sessionId, runs } = m;
-      const col = columnsGrid?.querySelector(`.modelCol[data-session-id="${cssAttr(sessionId)}"]`);
-      if (!col) break;
-      const mini = col.querySelector('.runMiniSel');
-      if (!mini) break;
-
-      const prev = mini.value || __AGG;
-      // const options = [`<option value="${__AGG}">Session overview</option>`]
-      //   .concat((runs||[]).map(r => `<option value="${escapeHtml(r.id)}">${escapeHtml(r.label || r.id)}</option>`));
-      // mini.innerHTML = options.join('');
-      mini.disabled = false;
-
-      // restore old selection if possible
-      const want = Array.from(mini.options).some(o => o.value === prev) ? prev : __AGG;
-      mini.value = want;
-      const st = COL_STATE.get(col);
-      if (st) { st.runId = want; fillSummary(col, st.sessionId, st.runId, _compareView); }
-      break;
-    }
-
-    case 'fs.session.summary.get.result': {
-      const sessionId = String(m.sessionId ?? m.session_id ?? '');
-      const runId     = String(m.runId ?? m.run_id ?? __AGG);
-      const view      = String(m.view ?? _compareView ?? 'train').toLowerCase();
-      const text      = (typeof m.text === 'string') ? m.text : '';
-      const k = sumKey(sessionId, runId, view);
-      if (text.trim()) SUMMARY_CACHE.set(k, text); else SUMMARY_CACHE.delete(k);
-      const col = columnsGrid?.querySelector(`.modelCol[data-session-id="${cssAttr(sessionId)}"]`);
-      if (!col) break;
-
-      const st = COL_STATE.get(col);
-      // Only paint if the column is still showing this run+view
-      if (st && st.runId === runId && _compareView === view) {
-        const pre = col.querySelector('.summaryBox');
-        if (pre) pre.textContent = text.trim() ? text : '(loading…)';
-        setColumnSubtitle(col, view);
-      }
-      break;
-    }
-
-
-
-    case 'fs.summary.get.result': {
-      const runId = String(m.runId ?? m.run_id ?? '');
-      if (!runId) break;
-      const v = String(m.view ?? _compareView ?? 'train').toLowerCase().trim();
-      const txt = (typeof m.text === 'string') ? m.text : '';
-      const key = `${runId}:${v}`;
-      if (txt.trim()) SUMMARY_CACHE.set(key, txt); else SUMMARY_CACHE.delete(key); // cache, but don't poison
-
-      // Only paint if incoming view is the one currently selected in the rail
-      if (v === _compareView) {
-        const col = columnsGrid?.querySelector(`.modelCol[data-run-id="${cssAttr(runId)}"]`);
-        if (col) {
-          const pre = col.querySelector('.summaryBox');
-          if (pre) pre.textContent = txt.trim() ? txt : '(loading…)';
-          setColumnSubtitle(col, v);
-        }
-      }
-      break;
-    }
-
-    case 'fs.summary.pick.result': {
-      // { previous, chosen:{id,label} }
-      const { previous, chosen } = m;
-      if (!columnsGrid || !previous || !chosen?.id) break;
-      const col = columnsGrid.querySelector(`.modelCol[data-run-id="${cssAttr(previous)}"]`);
-      if (col) {
-        col.dataset.runId = chosen.id;
-        const name = col.querySelector('.capName');
-        const pre  = col.querySelector('.summaryBox');
-        const sub  = col.querySelector('.capSub');
-        if (name) name.textContent = chosen.label || chosen.id;
-        if (sub)  sub.textContent  = `${_compareView} summary`;
-        if (pre)  pre.textContent  = '(loading…)';
-        requestSummary(chosen.id, _compareView);
-      }
       break;
     }
 
@@ -2012,12 +1575,6 @@ window.addEventListener('message', (e) => {
       updateModelNav();
       if (dagOverlay && dagOverlay.classList.contains('show')) renderDag();
       updateManualForkGate();
-      // if user is on the Compare tab and no columns yet, add current run by default
-      ensureDefaultCompareColumn();
-      if (grid?.getAttribute('data-mode') === 'compare') {
-        // If any session-aggregate columns are visible, ensure they re-fetch
-        refreshAllColumns();
-      }
       break;
     }
 
@@ -2043,11 +1600,6 @@ window.addEventListener('message', (e) => {
       LAST_PAUSED_STEP.set(rk, Number(m.step) || 0);
       setRunningFor(rk, false);   // <- add this
       setPausedFor(rk, true);
-      if (columnsGrid) {
-        columnsGrid.querySelectorAll('.modelCol').forEach(n => n.remove());
-        ensureAddTile();
-      }
-      ensureSessionColumnForRun(rk);
       if (rk === curRunKey() && btnReport) btnReport.disabled = false;
       break;
     }
@@ -2067,31 +1619,6 @@ window.addEventListener('message', (e) => {
       const rk = keyOf(m.run_id || currentPageRunId());
       setRunningFor(rk, false);
       setPausedFor(rk, false);
-
-      // freshen run-level cache
-      invalidateCompareSummariesForRun(rk);
-      invalidateVisibleSessionAggregates();
-
-      // If Compare is visible, kick off fresh fetches so panes populate right away
-      if (grid?.getAttribute('data-mode') === 'compare' && columnsGrid) {
-        columnsGrid.querySelectorAll('.modelCol').forEach(col => {
-          const st = COL_STATE.get(col);
-          const pre = col.querySelector('.summaryBox');
-          if (pre) pre.textContent = '(loading…)';
-          if (col.dataset.runId === rk) {               // run-based cols
-            requestSummary(rk, 'train');
-            requestSummary(rk, 'test');
-          } else if (st?.sessionId) {                   // session aggregate cols
-            requestSessionSummary(st.sessionId, __AGG, 'train');
-            requestSessionSummary(st.sessionId, __AGG, 'test');
-          }
-        });
-      }
-      if (columnsGrid) {
-        columnsGrid.querySelectorAll('.modelCol').forEach(n => n.remove());
-        ensureAddTile();
-      }
-      ensureSessionColumnForRun(rk);
       break;
     }
 

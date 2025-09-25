@@ -472,30 +472,6 @@ async function onMessage(context, m) {
             }
             break;
         }
-        case 'fs.summary.list': {
-            // Picker removed; return only current session (keeps old UI from breaking if it calls this).
-            const one = currentSessionId ? [{ id: currentSessionId, label: 'Current session' }] : [];
-            post({ type: 'fs.summary.list.result', runs: one });
-            break;
-        }
-        case 'fs.summary.get': {
-            try {
-                const view = String(m.view || 'train');
-                let key = String(m.runId || '');
-                if (!key || key === 'CURRENT')
-                    key = currentSessionId || ''; // ← default to current session
-                const text = key ? buildSummaryText(key, view) : '(no session yet)';
-                post({ type: 'fs.summary.get.result', runId: key || 'CURRENT', view, text });
-            }
-            catch (e) {
-                postErr(e);
-            }
-            break;
-        }
-        case 'fs.summary.pick': {
-            // Deprecated—no picker anymore.
-            break;
-        }
         case 'pause':
             sendCtl({ cmd: 'pause' });
             break;

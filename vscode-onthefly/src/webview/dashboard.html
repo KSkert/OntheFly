@@ -331,164 +331,6 @@
       line-height:1.3; white-space:pre; overflow:auto;
     }
 
-    /* ====== View Tabs (now in header, right-aligned) ====== */
-    .viewTabs{
-      position: static;
-      top: auto;
-      z-index: auto;
-      display: inline-flex;
-      margin-left: auto;
-      margin-bottom: 0;
-      gap: 6px;
-      padding: 6px;
-      border: none;
-      border-radius: 9999px;
-      background: transparent;
-      box-shadow: none;
-    }
-
-    .viewTabBtn {
-      appearance: none;
-      border: 1px solid var(--border);
-      background: var(--btn-bg);
-      color: var(--btn-fg);
-      padding: 6px 10px;
-      border-radius: 9999px;
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 12px;
-      transition: transform 120ms var(--ease), outline-width 120ms var(--ease), background-color .15s var(--ease), border-color .15s var(--ease);
-      will-change: transform;
-    }
-
-    .viewTabBtn:hover:not(:disabled){
-      transform: translateY(-1px) scale(1.02);
-      filter: brightness(1.02);
-      background: var(--btn-bg-hover);
-    }
-
-    .viewTabBtn:active:not(:disabled){
-      transform: translateY(0) scale(0.98);
-      filter: brightness(.98);
-    }
-
-    .viewTabBtn[aria-selected="true"]{
-      background: var(--btn-bg);
-      color: var(--btn-fg);
-      outline: 2px solid var(--focus);
-      outline-offset: 2px;
-      transform: scale(1.06);
-      z-index: 1;
-    }
-
-    .viewTabBtn[aria-selected="true"]:hover,
-    .viewTabBtn[aria-selected="true"]:active,
-    .viewTabBtn[aria-selected="true"]:focus-visible{
-      outline-width: 3px;
-      transform: scale(1.07);
-    }
-
-
-    @media (prefers-reduced-motion: reduce){
-      .viewTabBtn{ transition: none; }
-      .viewTabBtn[aria-selected="true"]{ transform: none; }
-      .viewTabBtn[aria-selected="true"]:hover,
-      .viewTabBtn[aria-selected="true"]:active,
-      .viewTabBtn[aria-selected="true"]:focus-visible{ transform: none; }
-    }
-
-    /* ====== Comparison Panel ====== */
-    .columnsWrap {
-      display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: stretch;
-      min-height: 360px;
-    }
-    .columnsRail {
-      border: 1px solid var(--border); border-radius: 8px;
-      background: var(--panel-bg);
-      display: flex; flex-direction: column; align-items: stretch; padding: 6px;
-    }
-    .railTab {
-      writing-mode: vertical-rl; transform: rotate(180deg);
-      border: 1px solid var(--border); border-radius: 8px;
-      background: var(--panel-bg);
-      color: var(--fg); font-weight: 700; letter-spacing: .6px;
-      padding: 10px 6px; margin: 4px 0; cursor: pointer;
-    }
-    .railTab[aria-selected="true"] { background: var(--vscode-editor-background); box-shadow: inset 0 0 0 1px var(--border); }
-    .railTab:focus { outline: none; box-shadow: 0 0 0 1px var(--focus); }
-
-    .columnsScroller {
-      overflow: auto; padding: 2px; border-radius: 8px;
-      background: var(--panel-bg);
-      border: 1px solid var(--border);
-    }
-    .columnsGrid {
-      display: grid; gap: 12px;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      padding: 10px;
-    }
-
-    .modelCol {
-      border: 1px solid var(--border); border-radius: 8px; background: var(--panel-bg);
-      box-shadow: none; display: flex; flex-direction: column; min-height: 220px;
-    }
-
-    .modelCap {
-      position: relative; padding: 10px 12px; border-bottom: 1px solid var(--border);
-      cursor: pointer; user-select: none;
-      background: var(--panel-bg);
-    }
-    .modelCap::before, .modelCap::after { content: none; }
-    .modelCap:focus { outline: none; box-shadow: 0 0 0 1px var(--focus); }
-    .capInner { display:flex; flex-direction:column; gap:2px; }
-    .capName { font-weight: 700; }
-    .capSub  { color: var(--muted); font-size: 12px; }
-
-    .summaryBox {
-      flex: 1; margin: 10px; border: 1px dashed var(--border); border-radius: 6px;
-      background: var(--vscode-editor-background);
-      padding: 10px; color: var(--vscode-editor-foreground, var(--fg));
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      white-space: pre-wrap; overflow: auto; line-height: 1.35; font-size: 12px;
-    }
-
-    .addColTile {
-      display: grid; place-items: center; min-height: 140px;
-      border: 1px dashed var(--border) !important; border-radius: 8px;
-      background: var(--panel-bg) !important; color: var(--muted) !important; box-shadow: none;
-    }
-    .addColTile:hover { filter: brightness(1.02); }
-    .addCol:focus { outline: none; box-shadow: 0 0 0 1px var(--focus); }
-
-    .modelCol .runMiniSel { margin-left: auto; max-width: 60%; }
-    #columnsGrid.dropping { outline: 2px dashed var(--btn-bg); outline-offset: 6px; }
-
-    /* === Single-pane Compare layout === */
-    .sessionPane {
-      display: grid; grid-template-rows: auto 1fr; gap: 8px; min-height: 340px;
-      border: 1px solid var(--border); border-radius: 8px; background: var(--panel-bg); padding: 8px;
-    }
-    .sessionToggle {
-      display: flex; align-items: center; gap: 8px; padding: 6px 8px;
-      border: 1px solid var(--border); border-radius: 6px; background: var(--panel-bg);
-    }
-    .sessionToggle .sessionSel { min-width: 220px; max-width: 100%; }
-
-    #singleSessionCol { display: flex; flex-direction: column; min-height: 220px; position: relative; }
-    #columnsWrap { display: grid; grid-template-columns: 48px 1fr; gap: 12px; align-items: stretch; }
-    #columnsGrid { padding: 0; overflow: hidden; }
-    #btnAddColumn.addColTile { display: none !important; }
-
-    .exportBtn.copied { filter: brightness(1.05); }
-
-    header .modelCap > #btnCopySummary,
-    header .modelCap > .modelCapCopy {
-      opacity: 1 !important; z-index: 10 !important;
-      background: var(--panel-bg) !important; border-color: var(--border) !important; box-shadow: none !important;
-    }
-
-    #btnCopySummary .exportIcon * { vector-effect: non-scaling-stroke; }
-
     /* ====== AutoFork ON/OFF toggles: persistent white ring ====== */
     .afToggleBtn { transition: transform 120ms ease; }
     .afToggleBtn.is-active{
@@ -527,10 +369,6 @@
         <div class="brandTitle">On the Fly</div>
         <div class="sr-only" aria-live="polite">VS Code–native dashboard for model forking and training</div>
       </div>
-      <section class="viewTabs" id="viewTabs" role="tablist" aria-label="View mode">
-        <button id="tabCreate" class="viewTabBtn" role="tab" aria-selected="true">Model Creation</button>
-        <button id="tabCompare" class="viewTabBtn" role="tab" aria-selected="false">Model Comparison</button>
-      </section>
     </div>
   </header>
 
@@ -541,83 +379,15 @@
       <div class="customList" id="customList" aria-live="polite">
         <label><input type="checkbox" data-widget="w-top" checked> Workspace</label>
         <label><input type="checkbox" data-widget="w-autofork" checked> AutoFork</label>
-        <label><input type="checkbox" data-widget="w-runs" checked> Experimenting</label>
-        <label><input type="checkbox" data-widget="w-charts" checked> Charts</label>
-        <label><input type="checkbox" data-widget="w-report" checked> Analysis</label>
+        <label><input type="checkbox" data-widget="w-runs" checked> Models & Controls</label>
+        <label><input type="checkbox" data-widget="w-charts" checked> Training Metrics</label>
+        <label><input type="checkbox" data-widget="w-report" checked> Loss Distribution by Sample</label>
         <label><input type="checkbox" data-widget="w-log" checked> Logs</label>
       </div>
     </section>
 
     <!-- ===== Grid layout ===== -->
     <section id="flyGrid" class="grid" aria-label="Dashboard widgets">
-
-      <!-- === Widget: Model Comparison (starts hidden) === -->
-      <div class="widget col-12" data-widget-id="w-compare" id="w-compare" style="display:none">
-        <div class="panel comparePanel">
-          <div class="widgetHeader">
-            <div class="widgetTitle">Model Comparison</div>
-            <button id="btnClearColumns" class="ghostBtn" type="button" title="Remove all model columns">Clear Columns</button>
-            <div class="row" style="margin-left:auto;gap:8px">
-              <button id="btnUploadSession" class="ghostBtn" type="button" title="Upload a saved On the Fly session file">Upload Session…</button>
-              <input id="sessionFilePicker" type="file"
-                     accept=".json,.yml,.yaml,.fsession,.fsess,.forksmith,application/json"
-                     style="display:none" />
-            </div>
-          </div>
-
-          <div class="compareWrap" id="columnsWrap">
-            <!-- Left vertical rail: train/test -->
-            <aside class="compareRail" id="compareRail" aria-label="Choose view">
-              <button class="railTab" data-view="train" aria-selected="true"  type="button">train</button>
-              <button class="railTab" data-view="test"  aria-selected="false" type="button">test</button>
-            </aside>
-
-            <!-- Right: single-pane session viewer (keep id=columnsGrid for JS compatibility) -->
-            <div class="sessionPane" id="columnsGrid">
-              <!-- Session toggle (top) -->
-              <div class="sessionToggle" id="sessionToggle" aria-label="Choose session">
-                <label for="sessionSel">Session</label>
-                <select id="sessionSel" class="sessionSel">
-                  <option value="">This Session</option>
-                </select>
-              </div>
-
-              <!-- Content pane (one “column” that fills the area) -->
-              <article class="modelCol" id="singleSessionCol" data-session-id="" data-run-id="__aggregate__">
-                <header class="modelCap">
-                  <div class="capInner">
-                    <span class="capName" id="singleCapName">Current session</span>
-                    <span class="capSub">train summary</span>
-                  </div>
-
-                  <!-- Copy button (always top-right of the cap) -->
-                  <button id="btnCopySummary" class="exportBtn modelCapCopy" title="Copy to clipboard" aria-label="Copy summary">
-                    <svg class="exportIcon" viewBox="0 0 24 24" aria-hidden="true">
-                      <defs>
-                        <mask id="copy-cut">
-                          <rect x="0" y="0" width="24" height="24" fill="#fff"/>
-                          <rect x="8.5" y="8.5" width="10" height="10" rx="2.25" fill="#000"/>
-                        </mask>
-                      </defs>
-                      <rect x="3.5" y="3.5" width="10" height="10" rx="2.25"
-                            fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
-                            opacity=".55" mask="url(#copy-cut)"/>
-                      <rect x="8.5" y="8.5" width="10" height="10" rx="2.25" fill="currentColor" opacity=".08"/>
-                      <rect x="8.5" y="8.5" width="10" height="10" rx="2.25" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-                      <path d="M18.5 8.5h-2.9a.6.6 0 0 0-.6.6v0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity=".8"/>
-                      <path d="M18.5 8.5 L18.5 11.4 L15.6 11.4 Z" fill="currentColor" opacity=".15"/>
-                    </svg>
-                  </button>
-                </header>
-                <pre class="summaryBox" id="singleSummary">(loading…)</pre>
-              </article>
-
-              <!-- legacy node kept for JS that expects it; hidden by CSS -->
-              <button id="btnAddColumn" class="addColTile" type="button" title="Add a model column">+ Add Model</button>
-            </div>
-          </div>
-        </div>
-      </div>
 
       <!-- === Widget: Top Controls === -->
       <div class="widget col-12" data-widget-id="w-top">
@@ -748,7 +518,7 @@
       <!-- === Widget: Runs & Controls === -->
       <div class="widget col-12" data-widget-id="w-runs">
         <div class="panel">
-          <div class="widgetHeader"><div class="widgetTitle">Experimenting</div></div>
+          <div class="widgetHeader"><div class="widgetTitle">Models & Controls</div></div>
 
           <div class="row" style="margin-bottom:8px">
             <div class="modelArrows" style="display:flex; gap:8px;">
@@ -973,13 +743,10 @@
         reportMeta:'reportMeta', reportNote:'reportNote',
         log:'log',
         dagOverlay:'dagOverlay', dagSvg:'dagSvg', dagStrategy:'dagStrategy', dagMergeBtn:'dagMergeBtn', dagClose:'dagClose',
-        exportLossBtn:'exportLossBtn', exportValLossBtn:'exportValLossBtn', exportLossDistBtn:'exportLossDistBtn',
-        tabCreate:'tabCreate', tabCompare:'tabCompare',
-        wCompare:'w-compare', columnsWrap:'columnsWrap', compareRail:'compareRail',
-        columnsGrid:'columnsGrid', btnAddColumn:'btnAddColumn', btnClearColumns:'btnClearColumns'
+        exportLossBtn:'exportLossBtn', exportValLossBtn:'exportValLossBtn', exportLossDistBtn:'exportLossDistBtn'
       },
       cssVars: ['--bg','--fg','--muted','--panel-bg','--panel-elev','--border','--btn-bg','--btn-fg','--btn-shadow','--btn-shadow-hover','--chart-text','--chart-grid'],
-      widgets: ['w-top','w-autofork','w-runs','w-charts','w-report','w-log','w-compare']
+      widgets: ['w-top','w-autofork','w-runs','w-charts','w-report','w-log']
     };
 
     window.FS = {
@@ -1093,72 +860,6 @@
 
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', moveAndToggle);
     else moveAndToggle();
-  })();
-  </script>
-
-  <script nonce="__NONCE__">
-  (function () {
-    const byId = (id) => document.getElementById(id);
-    const columnsGrid = byId('columnsGrid');
-    const sessionSel  = byId('sessionSel');
-    const singleCol   = byId('singleSessionCol');
-    const capName     = byId('singleCapName');
-    const summaryBox  = byId('singleSummary');
-
-    if (!columnsGrid || !sessionSel || !singleCol) return;
-
-    let view = localStorage.getItem('fs.compare.view') || 'train';
-    const setSub = () => {
-      const sub = singleCol.querySelector('.capSub');
-      if (sub) sub.textContent = `${view} summary`;
-    };
-    setSub();
-
-    function chooseSession(id, label) {
-      if (!id) return;
-      singleCol.dataset.sessionId = String(id);
-      capName.textContent = label || id;
-      try { if (window.COL_STATE) COL_STATE.set(singleCol, { sessionId: id, runId: '__aggregate__' }); } catch {}
-      try { if (typeof requestSessionRuns === 'function') requestSessionRuns(id); } catch {}
-      try { if (typeof fillSummary === 'function') fillSummary(singleCol, id, '__aggregate__', view); } catch {}
-    }
-
-    sessionSel.addEventListener('change', () => {
-      const opt = sessionSel.selectedOptions[0];
-      chooseSession(opt && opt.value, opt && opt.textContent);
-    });
-
-    const rail = byId('compareRail');
-    if (rail) rail.addEventListener('click', (e) => {
-      const t = e.target.closest('.railTab');
-      if (!t) return;
-      const v = t.getAttribute('data-view');
-      if (v && v !== view) { view = v; setSub(); }
-    });
-
-    window.addEventListener('message', (e) => {
-      const m = e.data;
-      if (m?.type === 'fs.session.list.result') {
-        const sessions = m.sessions || [];
-        sessionSel.innerHTML = sessions.length ? '' : '<option value="">(no sessions)</option>';
-        sessions.forEach(s => {
-          const opt = document.createElement('option');
-          opt.value = s.id;
-          opt.textContent = s.label || s.id;
-          sessionSel.appendChild(opt);
-        });
-        if (sessions.length && !singleCol.dataset.sessionId) {
-          sessionSel.value = sessions[0].id;
-          chooseSession(sessions[0].id, sessions[0].label || sessions[0].id);
-        }
-      }
-      if (m?.type === 'fs.session.summary.get.result') {
-        if (String(m.sessionId) === String(singleCol.dataset.sessionId)) setSub();
-      }
-    });
-
-    try { requestSessionList(); }
-    catch { try { send('fs.session.list'); } catch {} }
   })();
   </script>
 

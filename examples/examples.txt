@@ -1,0 +1,41 @@
+CO2
+elnino
+Macrodata
+nile
+sunspots
+data/stocks.csv
+
+CO2:
+MoE Test - MSE (scaled): 0.009182, DirAcc: 0.3619, RMSE: 3.3945, MAE: 3.0200
+Baseline Test - MSE (scaled): 0.039457, DirAcc: 0.3619, RMSE: 6.8630, MAE: 5.5167
+
+elnino:
+MoE Test - MSE (scaled): 0.002410, DirAcc(level): 0.8958, RMSE(sst): 0.4860, MAE(sst): 0.4026
+Baseline Test - MSE (scaled): 0.003073, DirAcc(level): 0.8750, RMSE(sst): 0.5671, MAE(sst): 0.4423
+
+Macrodata:
+MoE Test - MSE (scaled): 0.014852, DirAcc(growth): 0.8250, RMSE(growth %): 0.7226, MAE(growth %): 0.4931
+Baseline Test - MSE (scaled): 0.134564, DirAcc(growth): 0.1750, RMSE(growth %): 2.2492, MAE(growth %): 2.1396
+
+nile:
+MoE Test - MSE (scaled): 0.017694, DirAcc(level): 0.7000, RMSE(volume): 121.5780, MAE(volume): 96.5683
+Baseline Test - MSE (scaled): 0.024640, DirAcc(level): 0.7000, RMSE(volume): 157.0981, MAE(volume): 134.6385
+
+sunspots:
+MoE Test - MSE (scaled): 0.022330, DirAcc: 0.9032, RMSE: 23.0721, MAE: 16.7610
+Baseline Test - MSE (scaled): 0.022841, DirAcc: 0.8548, RMSE: 24.0856, MAE: 17.6891
+
+data/stocks.csv:
+MoE Test - MSE (scaled): 0.005153, DirAcc: 0.4113, RMSE: 40.6944, MAE: 35.2698
+Baseline Test - MSE (scaled): 0.020845, DirAcc: 0.4681, RMSE: 76.5357, MAE: 60.4087
+
+
+
+| Dataset     |      MSE %Δ |    DirAcc %Δ |     RMSE %Δ |      MAE %Δ |
+| ----------- | ----------: | -----------: | ----------: | ----------: |
+| CO2         |   -76.73%   |    0.00%     |    -50.54%  |   -45.26%   |
+| elnino      |   -21.58%   |   +2.38%     |    -14.30%  |    -8.98%   |
+| Macrodata   |   -88.96%   |   +371.43%   |    -67.87%  |   -76.95%   |
+| nile        |   -28.19%   |    0.00%     |    -22.61%  |   -28.28%   |
+| sunspots    |    -2.24%   |    +5.66%    |    -4.21%   |    -5.25%   |
+| data/stocks |   -75.28%   |    -12.13%   |    -46.83%  |   -41.61%   |
