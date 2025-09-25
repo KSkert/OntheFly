@@ -411,7 +411,7 @@ def train_gate(gate, experts, train_loader, val_loader, hp: HParams, criterion):
 
 def main():
     # Hardcoded path (as requested)
-    path = '../data/S&P.csv'
+    path = '../data/sp.csv'
     if not os.path.exists(path):
         raise FileNotFoundError(path)
 
