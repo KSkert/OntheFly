@@ -1,6 +1,8 @@
 ## On the Fly
 
-The tool is a **VS Code dashboard** that orchestrates a new kind of ML workflow. Your Python side just calls `quickstart(...)` to open a session; **everything else happens in the dashboard**:
+The tool is a **VS Code dashboard** that orchestrates a new kind of ML workflow. Your Python side just calls `quickstart(...)` to open a session; **everything else happens in the dashboard**.
+
+![On-the-Fly overview](./docs/images/onthefly-dashboard.png)
 
 * **One-click control:** ▶ Play, ⏸ Pause, ⟲ Refresh to clean everything out. Complementing tools like W&B or MLFlow, this beta version aims to help you achieve better performance as quickly as possible. This doesn't eradicate effort in hypertuning and model choice, but it can be the third factor that pushes the model over the gap. You no longer have to train models all the way to the end to analyze model performance. Performance analysis happens mid-training.
 * **Fork & merge without scripts:** Manually fork from loss regions or accept **AutoFork** plan cards; merge specialists back via **SWA / Distill / Fisher-Soup / Adapter-Fuse**.
