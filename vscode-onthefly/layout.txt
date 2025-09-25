@@ -1,7 +1,6 @@
 onthefly/
 ├─ pyproject.toml
 ├─ package.json
-├─ pyproject.toml
 ├─ README.md
 ├─ .vscode/
 │  └─ launch.json

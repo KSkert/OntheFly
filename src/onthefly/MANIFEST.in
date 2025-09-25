@@ -1,0 +1,4 @@
+include README.md
+prune vscode-onthefly
+prune node_modules
+global-exclude __pycache__ *.py[cod] *.log

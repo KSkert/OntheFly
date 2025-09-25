@@ -65,11 +65,7 @@ Most models (from ARIMA to LSTMs) assume one set of dynamics. Real data (macro/m
 ## Install
 
 ```bash
-pip install onthefly
-# or
-uv pip install onthefly
-# or with CUDA wheels pinned:
-pip install torch==2.2.* onthefly -f https://download.pytorch.org/whl/cu121
+pip install onthefly-ai
 ```
 
 > **Note:** If your published import name differs from the PyPI package, adjust the `import` statements below.
@@ -81,7 +77,7 @@ pip install torch==2.2.* onthefly -f https://download.pytorch.org/whl/cu121
 ```python
 import torch, torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from onthefly import quickstart  # confirm this matches your package layout
+from onthefly import quickstart
 
 # tiny toy dataset
 X = torch.randn(4096, 28*28)
