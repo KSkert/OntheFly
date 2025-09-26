@@ -1,6 +1,6 @@
 # src/onthefly/data_explorer.py
 from __future__ import annotations
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
@@ -150,26 +150,21 @@ def compute_per_sample_losses(
     mirror_train_semantics: bool = False,
     amp_enabled: Optional[bool] = None,
     should_stop: Optional[Callable[[], bool]] = None,
-) -> List[float]:
+) -> Tuple[List[float], List[int]]:
     """
-    Compute one scalar per sample whose *plain average* reflects a simple mean of
-    per-sample means, while masking ignored elements like training.
-
-    Core rule:
-      raw = criterion(pred, target) with reduction='none'
-      mask = (target != ignore_index) if supported, else all True
-      per_sample[i] = sum(raw_i[mask]) / count(mask_i)
-
-    Notes:
-      • We do NOT reapply class weights. For PyTorch losses (e.g., CrossEntropyLoss),
-        class weights are already baked into `raw` when reduction='none'.
-      • If `mirror_train_semantics=True`, we enable dropout and BN as in training
-        but freeze BN buffers (no running-stat mutations).
-      • AMP is only enabled when `amp_enabled` is True and device is CUDA.
+    Returns:
+      (losses, sample_indices) where len(losses) == len(sample_indices)
     """
     model.to(device)
 
-    ds = Subset(dataset, indices) if (indices is not None and len(indices) > 0) else dataset
+    # Build the iteration dataset and the *base* index mapping we’ll consume in order.
+    if indices is not None and len(indices) > 0:
+        ds = Subset(dataset, indices)
+        base_indices = list(indices)  # original dataset indices, in order
+    else:
+        ds = dataset
+        base_indices = list(range(len(dataset)))
+
     loader = DataLoader(
         ds,
         batch_size=batch_size,
@@ -179,8 +174,10 @@ def compute_per_sample_losses(
     )
 
     all_losses: List[float] = []
+    all_indices: List[int] = []
+    cursor = 0  # points into base_indices
 
-    # AMP context: enable only on CUDA when requested; otherwise a no-op.
+    # AMP context
     if amp_enabled and ("cuda" in str(device).lower()):
         amp_ctx = torch.cuda.amp.autocast
     else:
@@ -195,12 +192,10 @@ def compute_per_sample_losses(
     else:
         from contextlib import ExitStack
         outer_ctx = ExitStack()
-        # Ensure eval mode (don’t mutate training mode) and no grad
         was_training = model.training
         model.eval()
         outer_ctx.enter_context(torch.inference_mode())
 
-    # Helper: temporarily set an attribute (e.g., reduction='none')
     from contextlib import contextmanager
     @contextmanager
     def _tmp_attr(obj, name, value):
@@ -217,73 +212,75 @@ def compute_per_sample_losses(
                 except Exception:
                     pass
 
+    def _consume_batch_indices(n: int):
+        nonlocal cursor
+        batch_idx = base_indices[cursor:cursor + n]
+        all_indices.extend(int(i) for i in batch_idx)
+        cursor += n
+
     with outer_ctx:
         for batch in loader:
             if should_stop and should_stop():
-                return []
+                return [], []
             if not (isinstance(batch, (list, tuple)) and len(batch) >= 2):
                 raise RuntimeError("Unexpected batch format; expected (inputs, targets, *...).")
 
             x, y = batch[0], batch[1]
             x = x.to(device)
             y = y.to(device) if isinstance(y, torch.Tensor) else y
+            batch_size_now = int(x.shape[0])
 
             with amp_ctx():
-                # Prefer a single pass with reduction='none'
+                # Prefer reduction='none'
                 with _tmp_attr(criterion, "reduction", "none") as could_set:
                     if could_set:
-                        raw = criterion(x if getattr(criterion, "_expects_input", False) else model(x), y)  # uncommon case
-                        # In normal usage criterion(model(x), y):
-                        if not could_set or not isinstance(raw, torch.Tensor):
-                            # Fallback: compute raw after we have logits
+                        raw = criterion(x if getattr(criterion, "_expects_input", False) else model(x), y)
+                        if not isinstance(raw, torch.Tensor):
                             logits = model(x)
                             raw = criterion(logits, y)
                     else:
-                        # Criterion doesn't support reduction override; compute logits and fall back
                         logits = model(x)
                         try:
                             with _tmp_attr(criterion, "reduction", "none") as could:
                                 if could:
                                     raw = criterion(logits, y)
                                 else:
-                                    # Last-resort fallback: call loss per example (batch size 1)
-                                    # so internal masking/weights apply exactly.
                                     from .utils import per_sample_loss
                                     loss_vec = per_sample_loss(criterion, logits, y).reshape(-1)
                                     all_losses.extend(loss_vec.detach().cpu().tolist())
+                                    _consume_batch_indices(batch_size_now)
                                     continue
                         except Exception:
                             from .utils import per_sample_loss
                             loss_vec = per_sample_loss(criterion, logits, y).reshape(-1)
                             all_losses.extend(loss_vec.detach().cpu().tolist())
+                            _consume_batch_indices(batch_size_now)
                             continue
 
-                # If a custom loss returned a scalar even under 'none', replicate per-sample
+                # Scalar fallback under 'none': replicate
                 if not isinstance(raw, torch.Tensor):
                     out = float(torch.as_tensor(raw).item())
-                    all_losses.extend([out] * int(x.shape[0]))
+                    all_losses.extend([out] * batch_size_now)
+                    _consume_batch_indices(batch_size_now)
                     continue
 
-                # Build mask from ignore_index if available; else include all elements.
+                # Mask & per-sample mean
                 mask = _build_effective_mask(criterion, y if isinstance(y, torch.Tensor) else None, raw.shape)
                 if mask is None:
                     mask = torch.ones_like(raw, dtype=torch.bool)
 
-                # Per-sample mean over valid elements
-                raw_f = _flatten_nonbatch(raw)                      # [N, M]
-                m_f = _flatten_nonbatch(mask.to(raw.device))        # [N, M]
+                raw_f = _flatten_nonbatch(raw)               # [N, M]
+                m_f = _flatten_nonbatch(mask.to(raw.device)) # [N, M]
 
-                num_i = (raw_f * m_f).sum(dim=1)                    # [N]
-                cnt_i = m_f.sum(dim=1)                              # [N]
-
-                # Avoid division by zero; set empty samples to 0.0 (or choose NaN if preferred)
+                num_i = (raw_f * m_f).sum(dim=1)             # [N]
+                cnt_i = m_f.sum(dim=1)                       # [N]
                 safe_cnt = cnt_i.clamp(min=1)
                 per_sample = num_i / safe_cnt
                 per_sample = torch.where(cnt_i > 0, per_sample, torch.zeros_like(per_sample))
 
                 all_losses.extend(per_sample.detach().cpu().tolist())
+                _consume_batch_indices(batch_size_now)
 
-    # Restore train mode if we forced eval in the simple path
     if not mirror_train_semantics:
         try:
             if was_training:
@@ -291,8 +288,7 @@ def compute_per_sample_losses(
         except NameError:
             pass
 
-    return all_losses
-
+    return all_losses, all_indices
 # -----------------------------
 # Lightweight subset exporter
 # -----------------------------

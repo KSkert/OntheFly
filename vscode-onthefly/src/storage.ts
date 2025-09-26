@@ -171,32 +171,35 @@ function ensureSchema(d: BetterSqlite3Types.Database) {
 
   // ---- Reports table migration ----
   {
-    const infoStmt = d.prepare('PRAGMA table_info(\'report_loss_dist\')');
+    const infoStmt = db.prepare("PRAGMA table_info('report_loss_dist')");
     const cols = infoStmt.all() as Array<{ name: string }>;
-    const hasTable = cols.length > 0;
-    const hasKind = cols.some(c => c.name === 'kind');
+    const hasTable  = cols.length > 0;
+    const hasKind   = cols.some(c => c.name === 'kind');
     const hasLosses = cols.some(c => c.name === 'losses');
+    const hasSample = cols.some(c => c.name === 'sample_indices');
 
-    if (!hasTable || hasKind || !hasLosses) {
-      d.exec(
+    if (!hasTable || hasKind || !hasLosses || !hasSample) {
+      db.exec(
         ''
           + 'DROP TABLE IF EXISTS report_loss_dist;'
           + 'DROP INDEX IF EXISTS idx_report_loss_dist_run;'
           + 'CREATE TABLE IF NOT EXISTS report_loss_dist ('
-          + '  run_id     TEXT NOT NULL,'
-          + '  subset_on  TEXT NOT NULL,'
-          + '  losses     TEXT NOT NULL,'
-          + '  note       TEXT,'
-          + '  at_step    INTEGER,'
-          + '  at_epoch   INTEGER,'
-          + '  samples    INTEGER,'
-          + "  created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
+          + '  run_id          TEXT NOT NULL,'
+          + '  subset_on       TEXT NOT NULL,'
+          + '  losses          TEXT NOT NULL,'
+          + "  sample_indices  TEXT NOT NULL DEFAULT '[]',"
+          + '  note            TEXT,'
+          + '  at_step         INTEGER,'
+          + '  at_epoch        INTEGER,'
+          + '  samples         INTEGER,'
+          + "  created_at      INTEGER NOT NULL DEFAULT (strftime('%s','now')),"
           + '  PRIMARY KEY (run_id, subset_on)'
           + ');'
           + 'CREATE INDEX IF NOT EXISTS idx_report_loss_dist_run ON report_loss_dist(run_id);'
       );
     }
   }
+
 }
 
 // Make a byte-for-byte copy of the current DB to targetPath.
@@ -426,29 +429,39 @@ export function upsertSummary(
   }
 }
 
+
 export function upsertReportLossDist(
   run_id: string,
   subset_on: 'train' | 'val',
-  payload: { losses: number[]; note?: string; at_step?: number | null; at_epoch?: number | null; samples?: number | null }
+  payload: {
+    losses: number[];
+    sample_indices: number[];
+    note?: string;
+    at_step?: number | null;
+    at_epoch?: number | null;
+    samples?: number | null;
+  }
 ) {
-  const samples = payload.samples ?? (Array.isArray(payload.losses) ? payload.losses.length : 0);
+  const samples = payload.samples ?? payload.losses.length;
   const lossesJson = JSON.stringify(payload.losses || []);
-
+  const idxJson = JSON.stringify((payload.sample_indices || []).map(v => Math.trunc(Number(v))));
   db.prepare(
     ''
-      + 'INSERT INTO report_loss_dist(run_id, subset_on, losses, note, at_step, at_epoch, samples, created_at) '
-      + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?) '
+      + 'INSERT INTO report_loss_dist(run_id, subset_on, losses, sample_indices, note, at_step, at_epoch, samples, created_at) '
+      + 'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) '
       + 'ON CONFLICT(run_id, subset_on) DO UPDATE SET '
-      + '  losses     = excluded.losses, '
-      + '  note       = excluded.note, '
-      + '  at_step    = excluded.at_step, '
-      + '  at_epoch   = excluded.at_epoch, '
-      + '  samples    = excluded.samples, '
-      + '  created_at = excluded.created_at'
+      + '  losses         = excluded.losses, '
+      + '  sample_indices = excluded.sample_indices, '
+      + '  note           = excluded.note, '
+      + '  at_step        = excluded.at_step, '
+      + '  at_epoch       = excluded.at_epoch, '
+      + '  samples        = excluded.samples, '
+      + '  created_at     = excluded.created_at'
   ).run(
     run_id,
     subset_on,
     lossesJson,
+    idxJson,
     payload.note ?? null,
     payload.at_step ?? null,
     payload.at_epoch ?? null,
@@ -457,35 +470,50 @@ export function upsertReportLossDist(
   );
 }
 
+
 export function getReportLossDist(run_id: string, subset_on: 'train' | 'val') {
   try {
     const row = db.prepare(
-      'SELECT run_id, subset_on, losses, note, at_step, at_epoch, samples FROM report_loss_dist WHERE run_id=? AND subset_on=?'
+      'SELECT run_id, subset_on, losses, sample_indices, note, at_step, at_epoch, samples FROM report_loss_dist WHERE run_id=? AND subset_on=?'
     ).get(run_id, subset_on) as any;
 
     if (!row) return null;
 
     let losses: number[] = [];
+    let sample_indices: number[] = [];
+
     try {
       const arr = JSON.parse(row.losses);
       if (Array.isArray(arr)) losses = arr.map(Number).filter(Number.isFinite);
     } catch {}
 
+    try {
+      const arr = JSON.parse(row.sample_indices);
+      if (Array.isArray(arr)) {
+        sample_indices = arr.map((v: any) => Math.trunc(Number(v)))
+                            .filter((v: number) => Number.isFinite(v) && v >= 0);
+      }
+    } catch {}
+
+    if (sample_indices.length !== losses.length) {
+      sample_indices = Array.from({ length: losses.length }, (_, i) => i);
+    }
+
     return {
-      run_id: run_id,
-      subset_on: subset_on,
-      losses: losses,
+      run_id,
+      subset_on,
+      losses,
+      sample_indices,
       note: row.note ?? '',
       at_step: row.at_step ?? null,
       at_epoch: row.at_epoch ?? null,
-      samples: Number.isFinite(row.samples) ? row.samples : (losses ? losses.length : 0),
+      samples: Number.isFinite(row.samples) ? row.samples : losses.length,
     };
   } catch (e: any) {
     if (String(e && e.message || e).includes('no such table')) return null;
     throw e;
   }
 }
-
 /* ─────────────────────────── Subset helpers ─────────────────────────── */
 export function setRunSubset(run_id: string, indices: number[]) {
   const payload = JSON.stringify(Array.from(indices || []));

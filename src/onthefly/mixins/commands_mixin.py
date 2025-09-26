@@ -3,6 +3,7 @@ from __future__ import annotations
 import os, json, random
 from typing import Any, Dict, List
 import torch
+import math
 
 from ..control import CommandRouter, serve_commands
 from ..ckpt_utils import _parse_step
@@ -272,7 +273,7 @@ class CommandsMixin:
                 # -----------------------------------------
 
                 # Compute per-sample losses
-                losses = compute_per_sample_losses(
+                losses, sample_indices = compute_per_sample_losses(
                     model=report_model,
                     dataset=ds,
                     collate_fn=cf,
@@ -301,6 +302,7 @@ class CommandsMixin:
 
             return {
                 "losses": losses,
+                "sample_indices": sample_indices,
                 "owner_run_id": owner,
                 "reqId": req_id,
                 "meta": {
@@ -379,7 +381,7 @@ class CommandsMixin:
             out = {"rules": dict(new_rules.__dict__), "sampling": dict(self._af_cfg), "runtime": dict(self._af_rt)}
             self._event({"type": "autofork_rules_set", "config": out})
             return out
-
+        
         @self._router.on("export_subset")
         def _export_subset(payload):
             run_id = str(payload.get("run_id") or self.cfg.run_name)
@@ -391,26 +393,113 @@ class CommandsMixin:
             if ds is None:
                 return {"ok": False, "error": "root training dataset not available", "run_id": run_id}
 
+            # --- helpers -------------------------------------------------------------
+            def _len_ds():
+                try:
+                    from collections.abc import Sized
+                    return len(ds) if isinstance(ds, Sized) else None
+                except Exception:
+                    return None
+
+            def _normalize_indices(obj, nmax=None):
+                """
+                Accepts list/tuple/set/numpy array/torch tensor -> returns sorted unique ints >=0 and < nmax (if given).
+                """
+                if obj is None:
+                    return None
+                try:
+                    # handle numpy/torch
+                    try:
+                        import numpy as _np
+                        if hasattr(obj, "tolist"):
+                            obj = obj.tolist()
+                        elif isinstance(obj, _np.ndarray):
+                            obj = obj.astype("int64").tolist()
+                    except Exception:
+                        pass
+                    try:
+                        import torch as _torch
+                        if isinstance(obj, _torch.Tensor):
+                            obj = obj.detach().cpu().long().tolist()
+                    except Exception:
+                        pass
+                    # now obj should be an iterable
+                    ints = []
+                    for x in obj:
+                        if x is None:
+                            continue
+                        try:
+                            v = int(x)
+                        except Exception:
+                            continue
+                        if v < 0:
+                            continue
+                        if nmax is not None and v >= nmax:
+                            continue
+                        ints.append(v)
+                    if not ints:
+                        return []
+                    # unique + sorted
+                    ints = sorted(set(ints))
+                    return ints
+                except Exception:
+                    return []
+            # ------------------------------------------------------------------------
+
+            ds_len = _len_ds()
+
+            payload_indices = payload.get("subset_indices", None)
+            have_payload_indices = payload_indices is not None  # distinguish “absent” vs “present but empty”
+
+            indices = _normalize_indices(payload_indices, nmax=ds_len) if have_payload_indices else None
+
+            # If caller explicitly provided indices but they normalize to empty -> don't silently export all.
+            if have_payload_indices and (indices is None or len(indices) == 0):
+                return {
+                    "ok": False,
+                    "error": "No valid subset_indices provided (after normalization). Aborting export to avoid exporting all rows.",
+                    "run_id": run_id,
+                    "received_indices": 0,
+                    "format": fmt,
+                }
+
             export_all = False
-            try:
-                indices = self._reconstruct_subset_indices_for_run(run_id)
-                if not indices:
+
+            # No indices provided in payload -> try reconstruct; else export-all fallback.
+            if indices is None:
+                try:
+                    indices = self._reconstruct_subset_indices_for_run(run_id)
+                    indices = _normalize_indices(indices, nmax=ds_len)
+                    if not indices:
+                        export_all = True
+                        indices = None
+                except Exception as e:
+                    if "run.json not found" in str(e):
+                        export_all = True
+                        indices = None
+                    else:
+                        self._event({"type": "log", "level": "error",
+                                    "text": f"export_subset({run_id}): {e}"})
+                        return {"ok": False, "error": str(e), "run_id": run_id}
+
+            if indices is None:
+                # Final fallback: explicit export-all only if dataset is sized
+                if ds_len is not None:
+                    indices = list(range(ds_len))
                     export_all = True
-                    indices = None
-            except Exception as e:
-                if "run.json not found" in str(e):
-                    export_all = True
-                    indices = None
                 else:
-                    self._event({"type": "log", "level": "error",
-                                "text": f"export_subset({run_id}): {e}"})
-                    return {"ok": False, "error": str(e), "run_id": run_id}
+                    return {"ok": False, "error": "Dataset has no known length; cannot export-all safely.", "run_id": run_id}
 
             run_dir = os.path.join(self.cfg.save_dir, run_id)
             os.makedirs(run_dir, exist_ok=True)
             default_name = f"subset_indices.{('parquet' if fmt=='parquet' else ('feather' if fmt=='feather' else 'csv'))}"
             chosen = str(payload.get("out_path") or os.path.join(run_dir, default_name))
             out_path = os.path.abspath(chosen)
+
+            # small trace log
+            self._event({"type": "log", "level": "info",
+                        "text": f"export_subset run={run_id} recv_payload={'yes' if have_payload_indices else 'no'} "
+                                f"final_len={len(indices)} export_all={export_all} fmt={fmt} out={out_path}"})
 
             result = export_subset_table(
                 dataset=ds,
@@ -421,22 +510,22 @@ class CommandsMixin:
 
             result_path = os.path.abspath(result.get("out_path") or out_path)
             rows = int(result.get("rows") or 0)
-            if rows == 0 and export_all:
-                try:
-                    from collections.abc import Sized
-                    if isinstance(ds, Sized):
-                        rows = len(ds)
-                except Exception:
-                    pass
+            if rows == 0 and export_all and ds_len is not None:
+                rows = ds_len
 
-            self._event({
-                "type": "artifact_created",
+            self._event({"type": "artifact_created", "run_id": run_id, "path": result_path, "rows": rows})
+
+            return {
+                "ok": True,
                 "run_id": run_id,
-                "path": result_path,
-                "rows": rows
-            })
-            return {"ok": True, "run_id": run_id, "out_path": result_path, "rows": rows}
-        
+                "out_path": result_path,
+                "rows": rows,
+                "format": fmt,
+                "received_indices": len(indices),
+                "export_all": bool(export_all),
+            }
+
+
         @self._router.on("spill_all")
         def _spill_all(payload):
             """
@@ -476,18 +565,6 @@ class CommandsMixin:
             # do the spill
             recs = self._snapshots.spill_all(d, latest_only=latest_only)
 
-            # IMPORTANT: we *do not* emit 'checkpoint_saved' events here to avoid
-            # double-inserting rows on the extension side. The extension takes the
-            # returned records and calls insertCheckpoint(...) itself before bundling.
-            #
-            # If you *do* want UI noise/logs, you can uncomment this loop:
-            # for r in recs:
-            #     try:
-            #         self._event({"type": "log", "level": "info",
-            #                      "text": f"Spilled {r['owner']}@{r['step']} → {r['path']}"})
-            #     except Exception:
-            #         pass
-
             return recs
 
         @self._router.on("prepare_export")
@@ -498,11 +575,10 @@ class CommandsMixin:
 
             Why this exists:
               - If the user stopped at a weird step (e.g. 73) and never paused,
-                they might have *no* ring ckpt and *no* snapshot in memory.
-              - Export should still “just work”.
+                they might have no ring ckpt and no snapshot in memory.
 
             Contract:
-              - We *do not* pause. This is quick enough to do live.
+              - We do not pause. This is quick enough to do live.
               - We write a ring checkpoint for the *current* run (nice to have).
               - We push a snapshot for the *current* run so spill_all has at least one.
               - Then we call spill_all(latest_only) to materialize .pt files.

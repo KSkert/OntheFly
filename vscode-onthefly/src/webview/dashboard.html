@@ -166,7 +166,7 @@
     }
 
     /* Hide Manual Fork where it currently sits; we relocate it into the report */
-    #modelNavRow #btnManualFork { display: none !important; }
+    #modelNavRow #btnSelectRegion { display: none !important; }
 
     /* --- Help badge for the Model Loss Distribution button --- */
     .fs-helpWrap { position: relative; display: inline-block; }
@@ -543,7 +543,7 @@
             </button>
             <button id="btnTestNow" title="Test Model">Test Model</button>
             <button id="btnGenerateReport" title="Compute per-sample losses">Show Model Loss Distribution</button>
-            <button id="btnManualFork" title="Fork using selected loss region">Manual Fork This Model</button>
+            <button id="btnSelectRegion" title="Select a region on the per-sample loss distribution">Select Sample Region</button>
             <span id="modelLabel" style="font-weight:700"></span>
           </div>
 
@@ -738,7 +738,7 @@
         afInterForkImprovement:'afInterForkImprovement',
         afForkBackpressureAlpha:'afForkBackpressureAlpha',
         runSel:'runSel', btnOpenDag:'btnOpenDag', btnRefreshRuns:'btnRefreshRuns', btnResume:'btnResume', btnPause:'btnPause', btnRewind:'btnRewind', rewindSteps:'rewindSteps',
-        btnPrevModel:'btnPrevModel', btnNextModel:'btnNextModel', btnGenerateReport:'btnGenerateReport', btnManualFork:'btnManualFork', modelLabel:'modelLabel',
+        btnPrevModel:'btnPrevModel', btnNextModel:'btnNextModel', btnGenerateReport:'btnGenerateReport', btnSelectRegion:'btnSelectRegion', modelLabel:'modelLabel',
         lossChart:'lossChart', valLossChart:'valLossChart', lossDistChart:'lossDistChart',
         reportMeta:'reportMeta', reportNote:'reportNote',
         log:'log',
@@ -830,7 +830,7 @@
   <script nonce="__NONCE__">
   (function () {
     function moveAndToggle() {
-      var btn = document.getElementById('btnManualFork');
+      var btn = document.getElementById('btnSelectRegion');
       var aside = document.querySelector('.reportSide');
       if (!btn || !aside) return;
 

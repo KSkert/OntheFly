@@ -174,7 +174,7 @@ function buildSummaryText(key, view) {
       ────────────────────────────────`;
         return [header, ...recent].join('\n');
     }
-    // --- NEW: session aggregation ---
+    // ---  session aggregation ---
     const runIds = (0, storage_1.runsForSession)(key);
     // aggregate series
     const rowsAll = runIds.flatMap(id => (0, storage_1.getRunRows)(id));
@@ -444,6 +444,69 @@ async function onMessage(context, m) {
             }
             break;
         }
+        case 'exportSubset': {
+            try {
+                const runId = m.runId || currentRunId;
+                if (!runId) {
+                    vscode.window.showWarningMessage('No run selected.');
+                    break;
+                }
+                const trace = m._trace || 'no-trace';
+                const fromWebview = m.subset_indices;
+                const fmtRaw = String(m.format || 'parquet').toLowerCase();
+                const fmt = fmtRaw === 'csv' ? 'csv' : (fmtRaw === 'feather' ? 'feather' : 'parquet');
+                const initialDir = getInitialExportDir(context);
+                const defName = `subset_${runId}.${fmt === 'feather' ? 'feather' : fmt}`;
+                const defaultUri = vscode.Uri.file(path.join(initialDir, defName));
+                const label = fmt === 'csv' ? 'CSV' : fmt === 'feather' ? 'Feather' : 'Parquet';
+                const ext = fmt === 'csv' ? 'csv' : fmt === 'feather' ? 'feather' : 'parquet';
+                const filters = { [label]: [ext] };
+                const picked = await vscode.window.showSaveDialog({ title: 'Export subset', defaultUri, filters });
+                if (!picked)
+                    break;
+                await context.globalState.update(LAST_EXPORT_DIR_KEY, path.dirname(picked.fsPath));
+                const payload = {
+                    run_id: String(runId),
+                    format: fmt,
+                    out_path: picked.fsPath,
+                    _trace: trace,
+                };
+                // --- Primary path: trust webview indices ---
+                if (Array.isArray(fromWebview) && fromWebview.length > 0) {
+                    const norm = Array.from(new Set(fromWebview.map(n => Number(n) | 0).filter(n => Number.isFinite(n) && n >= 0))).sort((a, b) => a - b);
+                    if (norm.length > 0)
+                        payload.subset_indices = norm;
+                }
+                // --- Fallbacks (optional) ---
+                if (!payload.subset_indices) {
+                    const region = m.region;
+                    const stored = (0, storage_1.getRunSubset)(String(runId)) || [];
+                    const haveStored = Array.isArray(stored) && stored.length > 0;
+                    if (region && Number.isFinite(region.minLoss) && Number.isFinite(region.maxLoss)) {
+                        try {
+                            const indices = await getSelectedRegionIndices(String(runId), region.minLoss, region.maxLoss);
+                            if (indices.length)
+                                payload.subset_indices = indices;
+                            else if (haveStored)
+                                payload.subset_indices = stored.map((n) => Number(n) | 0);
+                        }
+                        catch {
+                            if (haveStored)
+                                payload.subset_indices = stored.map((n) => Number(n) | 0);
+                        }
+                    }
+                    else if (haveStored) {
+                        payload.subset_indices = stored.map((n) => Number(n) | 0);
+                    }
+                }
+                const data = await sendReq('export_subset', payload, 10 * 60 * 1000);
+                post({ type: 'subsetExported', run_id: String(runId), ...data });
+            }
+            catch (e) {
+                postErr(e);
+            }
+            break;
+        }
         case 'modelNav.select': {
             const id = String(m.runId || '').trim();
             if (id) {
@@ -493,12 +556,6 @@ async function onMessage(context, m) {
             }
             break;
         }
-        case 'rewind':
-            sendCtl({ cmd: 'rewind_steps', steps: Math.max(0, Number(m.steps || 0)) });
-            break; // updated
-        case 'saveCkpt':
-            sendCtl({ cmd: 'save_ckpt' });
-            break;
         case 'fork':
             sendCtl({ cmd: 'fork', payload: m.payload });
             break;
@@ -526,25 +583,40 @@ async function onMessage(context, m) {
                     owner_run_id: runId,
                     run_id: runId,
                     subset_indices: subset.length ? subset : undefined,
-                    subset_on, // always 'train'
+                    subset_on,
                     reqId
                 });
                 const losses = Array.isArray(data?.losses)
                     ? data.losses.map(Number).filter(Number.isFinite)
                     : [];
+                let sample_indices = Array.isArray(data?.sample_indices)
+                    ? data.sample_indices.map(v => Math.trunc(Number(v)))
+                        .filter(v => Number.isFinite(v) && v >= 0)
+                    : [];
+                if (sample_indices.length !== losses.length) {
+                    sample_indices = Array.from({ length: losses.length }, (_, i) => i);
+                }
                 const meta = data?.meta || {};
                 const stepNum = Number(meta?.at_step);
                 const epochNum = Number(meta?.at_epoch);
                 const at_step = Number.isFinite(stepNum) ? stepNum : null;
                 const at_epoch = Number.isFinite(epochNum) ? epochNum : null;
                 const note = (typeof meta?.note === 'string' ? meta.note : '') || '';
-                (0, storage_1.upsertReportLossDist)(String(runId), subset_on, { losses, note, at_step, at_epoch, samples: losses.length });
+                (0, storage_1.upsertReportLossDist)(String(runId), subset_on, {
+                    losses,
+                    sample_indices,
+                    note,
+                    at_step,
+                    at_epoch,
+                    samples: losses.length
+                });
                 post({
                     type: 'reportData',
                     run_id: String(runId),
                     owner_run_id: String(runId),
                     reqId,
                     losses,
+                    sample_indices,
                     meta: { ...meta, at_step, at_epoch, subset_on, samples: losses.length, note }
                 });
             }
@@ -608,7 +680,7 @@ async function onMessage(context, m) {
                     selection: plan.selection || undefined,
                     hparams: chosen || {},
                     run_name: plan.proposed_run_name || undefined,
-                    // NEW: execute the fork FROM the exact checkpoint the plan used
+                    //  execute the fork FROM the exact checkpoint the plan used
                     parent_ckpt_path: initFrom,
                 };
                 const data = await sendReq('fork', payload, 120000);
@@ -835,33 +907,37 @@ async function onMessage(context, m) {
                 }
                 const fmtRaw = String(m.format || 'parquet').toLowerCase();
                 const fmt = fmtRaw === 'csv' ? 'csv' : (fmtRaw === 'feather' ? 'feather' : 'parquet');
-                // Suggest a filename + remember the last dir
                 const initialDir = getInitialExportDir(context);
                 const defName = `subset_${runId}.${fmt === 'feather' ? 'feather' : fmt}`;
                 const defaultUri = vscode.Uri.file(path.join(initialDir, defName));
                 const label = fmt === 'csv' ? 'CSV' : fmt === 'feather' ? 'Feather' : 'Parquet';
                 const ext = fmt === 'csv' ? 'csv' : fmt === 'feather' ? 'feather' : 'parquet';
-                // Explicit type avoids the union-of-literals problem
                 const filters = { [label]: [ext] };
-                const picked = await vscode.window.showSaveDialog({
-                    title: 'Export subset',
-                    defaultUri,
-                    filters,
-                });
+                const picked = await vscode.window.showSaveDialog({ title: 'Export subset', defaultUri, filters });
                 if (!picked)
                     break;
                 await context.globalState.update(LAST_EXPORT_DIR_KEY, path.dirname(picked.fsPath));
-                // RPC into Python (longer timeout; it recomputes indices & writes the file)
-                const data = await sendReq('export_subset', {
+                const incoming = m.subset_indices;
+                let subset_indices = Array.isArray(incoming)
+                    ? incoming.map(v => Math.trunc(Number(v))).filter(v => Number.isFinite(v) && v >= 0)
+                    : undefined;
+                if (!subset_indices || subset_indices.length === 0) {
+                    const stored = (0, storage_1.getRunSubset)(String(runId)) || [];
+                    if (Array.isArray(stored) && stored.length > 0) {
+                        subset_indices = stored.map((n) => Number(n) | 0).filter(n => Number.isFinite(n) && n >= 0);
+                    }
+                }
+                const payload = {
                     run_id: String(runId),
                     format: fmt,
                     out_path: picked.fsPath,
-                }, 10 * 60 * 1000); // up to 10 min for large datasets
-                // Python returns: { ok, out_path, rows, format, columns }
+                };
+                if (subset_indices && subset_indices.length)
+                    payload.subset_indices = subset_indices;
+                const data = await sendReq('export_subset', payload, 10 * 60 * 1000);
                 const outPath = String(data?.out_path || picked.fsPath);
                 const rows = Number(data?.rows || 0);
                 const effFmt = String(data?.format || fmt).toUpperCase();
-                // UX: info + quick "Reveal"
                 const choice = await vscode.window.showInformationMessage(`Subset exported (${rows} rows, ${effFmt}): ${outPath}`, 'Reveal in Finder/Explorer');
                 if (choice)
                     vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(outPath));
@@ -995,7 +1071,7 @@ async function startRun(context, mode) {
             cwd: path.dirname(script),
             env: envBlock,
             stdio: ['pipe', 'pipe', 'pipe'],
-            // NEW: make it a group leader so we can kill the entire tree on POSIX
+            //  make it a group leader so we can kill the entire tree on POSIX
             detached: process.platform !== 'win32',
         });
     }
@@ -1437,6 +1513,18 @@ async function runDataExplorer(context, subArgs) {
             }
         });
     });
+}
+async function getSelectedRegionIndices(runId, minLoss, maxLoss) {
+    const data = await sendReq('get_selected_region_indices', {
+        run_id: String(runId),
+        min_loss: Number(minLoss),
+        max_loss: Number(maxLoss),
+    }, 60_000);
+    const arr = Array.isArray(data?.indices) ? data.indices : [];
+    // normalize to ints
+    return arr
+        .map((n) => Number(n) | 0)
+        .filter((n) => Number.isFinite(n) && n >= 0);
 }
 // auto fork helper
 function normalizeRulesForServer(cfg) {

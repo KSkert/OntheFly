@@ -67,7 +67,7 @@ const btnLoad = byId('btnLoad');
 const btnTestNow = byId('btnTestNow');
 const btnReport = byId('btnGenerateReport') || byId('btnReport');
 const reportNote = byId('reportNote');
-const btnManualFork = byId('btnManualFork');
+const btnSelectRegion = byId('btnSelectRegion');
 
 const btnPrevModel = byId('btnPrevModel');
 const btnNextModel = byId('btnNextModel');
@@ -129,6 +129,10 @@ const afForkBackpressureAlpha   = byId('afForkBackpressureAlpha');
 const afMergeMethodSelector    = byId('afMergeMethodSelector');
 
 
+const btnExportSelectedSubset = byId('btnExportSelectedSubset');
+const btnExportSubset = byId('btnExportSubset');
+const exportSubsetFmt = byId('exportSubsetFmt');
+
 
 /* ====================================================================
  * 4) Autofork Defaults & UI
@@ -172,8 +176,18 @@ const AF_DEFAULTS = {
 };
 
 // --- subset export UI ---
-const btnExportSubset = byId('btnExportSubset');
-const exportSubsetFmt = byId('exportSubsetFmt');
+function selectedIndicesForRun(runId, lo, hi) {
+  const c = REPORT_CACHE.get(cacheKeyFor(runId));
+  if (!c || !c.lossesRaw || !c.indexMap) return [];
+  const a = Math.min(lo, hi), b = Math.max(lo, hi);
+  const out = [];
+  const L = c.lossesRaw.length;
+  for (let i = 0; i < L; i++) {
+    const v = c.lossesRaw[i];
+    if (Number.isFinite(v) && v >= a && v <= b) out.push(c.indexMap[i]);
+  }
+  return out;
+}
 
 on(btnExportSubset, 'click', () => {
   const runId = currentPageRunId();
@@ -183,22 +197,51 @@ on(btnExportSubset, 'click', () => {
   vscode.postMessage({ command: 'exportSubset', runId, format });
 });
 
+
 // toast when the extension finishes
 window.addEventListener('message', (e) => {
   const m = e.data;
   if (m?.type === 'subsetExported') {
     const rows = Number(m.rows || 0);
     const fmt  = (m.format || '').toUpperCase();
-    notify(`Subset exported (${rows} rows, ${fmt}).`);
   }
 });
+if (btnSelectRegion) {
+  on(btnSelectRegion, 'click', () => {
+    if (!lossDistChart) { notify('Report chart not ready yet.', 'warn'); return; }
+    const points = (lossDistChart.data?.datasets?.[0]?.data?.length) || 0;
+    if (!points) { notify('Generate the report first.', 'warn'); return; }
+
+    regionSelectMode = true;
+    regionSel.active = true;
+    regionSel.dragging = null;
+
+    const s = lossDistChart.scales.x;
+    if (s && Number.isFinite(s.min) && Number.isFinite(s.max)) {
+      const span = (s.max - s.min) || 1;
+      if (regionSel.aVal == null) regionSel.aVal = s.min + 0.25 * span;
+      if (regionSel.bVal == null) regionSel.bVal = s.min + 0.75 * span;
+    }
+
+    ensureRegionOverlay();      // new name (see next section)
+    regionOverlay.style.display = 'block';
+    btnSelectRegion.style.display = 'none';
+    lossDistChart.update('none');
+    updateSelectedExportGate();
+    if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate()
+  });
+}
 
 function _set(el, v) { if (el) { if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v); } }
 function _num(el)    { const n = el ? Number(el.value) : NaN; return Number.isFinite(n) ? n : NaN; }
 function _bool(el)   { return !!(el && el.checked); }
 function setAutoModeUI(isAuto) {
   // Hide any manual-only actions in auto mode
-  [btnManualFork, btnAutoForkExec].forEach(b => { if (!b) return; b.style.display = isAuto ? 'none' : ''; b.disabled = !!isAuto; });
+  [btnSelectRegion, btnAutoForkExec].forEach(b => {
+    if (!b) return;
+    b.style.display = isAuto ? 'none' : '';
+    b.disabled = !!isAuto;
+  });
   // make the plan <pre> read-only or relabel
   if (afPlanBox) afPlanBox.closest('.card')?.classList.toggle('readonly', isAuto);
 }
@@ -246,7 +289,6 @@ function prefillAutoforkUi() {
   _set(afMergeMethodSelector,     AF_DEFAULTS.rules.merge_method);
 
 }
-
 
 function readAutoForkConfig() {
   return {
@@ -343,9 +385,9 @@ wireAfTabs();
  * Lineage maps, run status/flags, follow behavior, model nav arrows.
  * ==================================================================== */
 
-let manualForkMode = false;
-let forkSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
-let forkOverlay;
+let regionSelectMode = false;
+let regionSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
+let regionOverlay;
 
 
 // lineage maps
@@ -375,25 +417,26 @@ function reportMatchesPause(runKey = curRunKey()) {
   return Number.isFinite(atStep) && Number.isFinite(pausedAt) && atStep === pausedAt;
 }
 
-function updateManualForkGate() {
-  if (!btnManualFork) return;
+function updateSelectRegionGate() {
+  if (!btnSelectRegion) return;
   const hasReport = !!REPORT_CACHE.get(cacheKeyFor(curRunKey()));
-  const st = RUN_STATE.get(curRunKey()) || {};
-  const allowed = !!st.paused && hasReport && reportMatchesPause();
-
-
-  btnManualFork.disabled = !allowed;
-
-  if (!hasReport) {
-    btnManualFork.title = 'Generate a report (while paused) to enable manual fork.';
-  } else if (!reportMatchesPause()) {
-    const cache = REPORT_CACHE.get(cacheKeyFor(curRunKey()));
-    const paused = LAST_PAUSED_STEP.get(curRunKey());
-    btnManualFork.title = `Report is from step ${cache?.at_step ?? '—'}, current pause is step ${paused ?? '—'}. Re-run report to fork.`;
-  } else {
-    btnManualFork.title = '';
-  }
+  // Availability rule: only requires a report to exist on the current page.
+  btnSelectRegion.disabled = !hasReport;
+  btnSelectRegion.style.display = hasReport ? '' : 'none';
+  btnSelectRegion.title = hasReport
+    ? ''
+    : 'Generate a report to select a region.';
 }
+
+function updateSelectedExportGate() {
+  if (!btnExportSelectedSubset) return;
+  const available = !!regionSelectMode && !!regionSel.active;
+  btnExportSelectedSubset.disabled = !available;
+  btnExportSelectedSubset.style.display = available ? '' : 'none';
+  btnExportSelectedSubset.title = available ? '' : 'Click “Select Region” first.';
+}
+
+
 
 const selectedForMerge = new Set();
 function pickPrimaryParent(childId) {
@@ -441,7 +484,8 @@ function gotoPageByIndex(i) {
   send('requestReport', { runId });   // if cached, showReportFor will display immediately
   showReportFor(runId);
 
-  updateManualForkGate();
+  updateSelectRegionGate();
+  updateSelectedExportGate();
   updateModelNav();
 }
 
@@ -515,15 +559,15 @@ const forkSelectionPlugin = {
   id: 'forkSelection',
   afterDraw(chart) {
     if (!chart || chart.canvas.id !== 'lossDistChart') return;
-    if (!manualForkMode || !forkSel.active) return;
+    if (!regionSelectMode || !regionSel.active) return;
 
     const scaleX = chart.scales?.x;
     const area = chart.chartArea;
     if (!scaleX || !area) return;
 
-    if (forkSel.aVal == null || forkSel.bVal == null) return;
-    const aXraw = scaleX.getPixelForValue(forkSel.aVal);
-    const bXraw = scaleX.getPixelForValue(forkSel.bVal);
+    if (regionSel.aVal == null || regionSel.bVal == null) return;
+    const aXraw = scaleX.getPixelForValue(regionSel.aVal);
+    const bXraw = scaleX.getPixelForValue(regionSel.bVal);
     const clamp = (x) => Math.max(area.left, Math.min(area.right, x));
     const aX = clamp(aXraw);
     const bX = clamp(bXraw);
@@ -751,11 +795,12 @@ function showReportFor(runId) {
   if (reportNote) reportNote.textContent = cache.note || '';
   if (reportMeta)  reportMeta.textContent  = formatWhen(cache.at_step, cache.at_epoch);
 
-  manualForkMode = false;
-  forkSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
-  if (forkOverlay) forkOverlay.style.display = 'none';
+  regionSelectMode = false;
+  regionSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
+  if (regionOverlay) regionOverlay.style.display = 'none';
   lossDistChart.$ownerKey = cacheKeyFor(runId);
   lossDistChart.update('none');
+  updateSelectedExportGate();
 }
 
 
@@ -1211,9 +1256,9 @@ function clearReportChart() {
   if (reportMeta) reportMeta.textContent = '';
   if (reportNote) reportNote.textContent = '';
 
-  manualForkMode = false;
-  forkSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
-  if (forkOverlay) forkOverlay.style.display = 'none';
+  regionSelectMode = false;
+  regionSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
+  if (regionOverlay) regionOverlay.style.display = 'none';
   lossDistChart.update('none');
 }
 
@@ -1417,6 +1462,7 @@ window.addEventListener('message', (e) => {
 
         clearCharts();
         clearReportChart();
+        updateSelectedExportGate();
 
         if (runSel) runSel.innerHTML = '';
         activeRunId = null;
@@ -1426,9 +1472,9 @@ window.addEventListener('message', (e) => {
         setRunning(false);
         updateModelNav();
 
-        manualForkMode = false;
-        forkSel = { active:false, aVal:null, bVal:null, dragging:null, activeHandle:'a' };
-        if (forkOverlay) forkOverlay.style.display = 'none';
+        regionSelectMode = false;
+        regionSel = { active:false, aVal:null, bVal:null, dragging:null, activeHandle:'a' };
+        if (regionOverlay) regionOverlay.style.display = 'none';
 
         log('Session reset.');
       } catch (e) {
@@ -1574,7 +1620,8 @@ window.addEventListener('message', (e) => {
       wireModelNavClicks();     // ensure listeners exist if buttons were late
       updateModelNav();
       if (dagOverlay && dagOverlay.classList.contains('show')) renderDag();
-      updateManualForkGate();
+      updateSelectRegionGate();
+      updateSelectedExportGate();
       break;
     }
 
@@ -1636,7 +1683,7 @@ window.addEventListener('message', (e) => {
       break;
 
     case 'reportData': {
-      const { losses, meta, reqId, owner_run_id } = m;
+      const { losses, sample_indices, meta, reqId, owner_run_id } = m;
 
       // Require reqId to route the response; ignore anything else.
       if (reqId == null || !reportReqToRun.has(reqId)) {
@@ -1659,10 +1706,11 @@ window.addEventListener('message', (e) => {
 
       const cacheKey = cacheKeyFor(intendedRunKey);
 
-      const reportCache =
-      (window.__REPORT_CACHE__ = window.__REPORT_CACHE__ || new Map()); // key: runId -> { ... }
+      function writeCache(bars, line, xmin, xmax, note, meta, losses, sample_indices) {
+        const n = Array.isArray(losses) ? losses.length : 0;
+        let idx = Array.isArray(sample_indices) ? sample_indices.slice(0, n) : [];
+        if (idx.length !== n) idx = Array.from({ length: n }, (_, i) => i);
 
-      function writeCache(bars, line, xmin, xmax, note, meta) {
         REPORT_CACHE.set(cacheKey, {
           bars: cloneXY(bars),
           line: cloneXY(line),
@@ -1671,6 +1719,8 @@ window.addEventListener('message', (e) => {
           note: note || '',
           at_step: meta?.at_step ?? null,
           at_epoch: meta?.at_epoch ?? null,
+          lossesRaw: new Float32Array((losses || []).map(Number)),
+          indexMap:  new Uint32Array(idx.map(v => (Number(v) | 0))),
         });
       }
 
@@ -1684,7 +1734,7 @@ window.addEventListener('message', (e) => {
         ({ bars, line, xmin, xmax, edges } = computeLossHistogram(losses, 30));
       }
       lossDistChart.$ownerKey = cacheKey;
-      writeCache(bars, line, xmin, xmax, note, meta);
+      writeCache(bars, line, xmin, xmax, note, meta, losses || [], sample_indices || []);
 
       const isVisible = (keyOf(currentPageRunId()) === intendedRunKey);
       if (isVisible && lossDistChart) {
@@ -1714,7 +1764,8 @@ window.addEventListener('message', (e) => {
           lossDistChart.update('none');
         });
       }
-      updateManualForkGate();
+      updateSelectRegionGate();
+      updateSelectedExportGate();
       break;
     }
 
@@ -1756,7 +1807,8 @@ window.addEventListener('message', (e) => {
           lossDistChart.update('none');
         });
       }
-      updateManualForkGate();
+      updateSelectRegionGate();
+      updateSelectedExportGate();
       break;
     }
 
@@ -1841,7 +1893,8 @@ function setRunning(running) {
   if (btnSetPy)  btnSetPy.disabled  = running;
 
   if (btnReport) btnReport.disabled = running;
-  updateManualForkGate();
+  updateSelectRegionGate();
+  updateSelectedExportGate();
 }
 
 
@@ -1872,7 +1925,8 @@ function setPausedFor(runKey, paused) {
     // If paused, UI should look not-running; if unpaused, reflect per-run running state.
     const effectiveRunning = !paused && !!st.running;
     setRunning(effectiveRunning);
-    updateManualForkGate();
+    updateSelectRegionGate();
+    updateSelectedExportGate();
   }
 }
 
@@ -1885,7 +1939,7 @@ function setPausedFor(runKey, paused) {
  * manual fork. Selection count pill, keyboard nudge, overlay form.
  * ==================================================================== */
 
-let forkCountPill = null;
+let regionCountPill = null;
 
 function computeSelectedSampleCount(minLoss, maxLoss) {
   if (!lossDistChart) return 0;
@@ -1903,46 +1957,19 @@ function computeSelectedSampleCount(minLoss, maxLoss) {
 }
 
 function updateSelectedCountPill() {
-  if (!forkCountPill || !manualForkMode || !forkSel.active) return;
-  if (forkSel.aVal == null || forkSel.bVal == null) {
-    forkCountPill.textContent = 'Total Samples Selected: 0';
+  if (!regionCountPill || !regionSelectMode || !regionSel.active) return;
+  if (regionSel.aVal == null || regionSel.bVal == null) {
+    regionCountPill.textContent = 'Total Samples Selected: 0';
     return;
   }
-  const n = computeSelectedSampleCount(forkSel.aVal, forkSel.bVal);
-  forkCountPill.textContent = `Total Samples Selected: ${n}`;
+  const n = computeSelectedSampleCount(regionSel.aVal, regionSel.bVal);
+  regionCountPill.textContent = `Total Samples Selected: ${n}`;
 }
 
 function notify(text, level = 'info') {
   vscode.postMessage({ command: 'notify', level, text });
 }
 
-
-if (btnManualFork) {
-  on(btnManualFork, 'click', () => {
-    if (!lossDistChart) { notify('Report chart not ready yet.', 'warn'); return; }
-    if (!reportMatchesPause()) {
-      notify('Report is stale vs current checkpoint. Pause and re-generate the report to fork.', 'warn');
-      return;
-    }
-    const points = (lossDistChart.data?.datasets?.[0]?.data?.length) || 0;
-    if (!points) { notify('Generate the report first.', 'warn'); return; }
-
-    manualForkMode = true;
-    forkSel.active = true;
-    forkSel.dragging = null;
-    const s = lossDistChart.scales.x;
-    if (s && Number.isFinite(s.min) && Number.isFinite(s.max)) {
-      const span = (s.max - s.min) || 1;
-      if (forkSel.aVal == null) forkSel.aVal = s.min + 0.25 * span;
-      if (forkSel.bVal == null) forkSel.bVal = s.min + 0.75 * span;
-    }
-
-    ensureForkOverlay();
-    forkOverlay.style.display = 'block';
-    if (btnManualFork) btnManualFork.style.display = 'none';
-    lossDistChart.update('none');
-  });
-}
 
 function enableDragOnReportChart() {
   const canvas = byId('lossDistChart');
@@ -1962,9 +1989,9 @@ function enableDragOnReportChart() {
     const rect = canvas.getBoundingClientRect();
     const xPix = evt.clientX - rect.left;
     const scaleX = lossDistChart.scales.x;
-    if (forkSel.aVal == null || forkSel.bVal == null) return null;
-    const aPix = scaleX.getPixelForValue(forkSel.aVal);
-    const bPix = scaleX.getPixelForValue(forkSel.bVal);
+    if (regionSel.aVal == null || regionSel.bVal == null) return null;
+    const aPix = scaleX.getPixelForValue(regionSel.aVal);
+    const bPix = scaleX.getPixelForValue(regionSel.bVal);
     const hitRadius = 8;
     if (Math.abs(xPix - aPix) <= hitRadius) return 'a';
     if (Math.abs(xPix - bPix) <= hitRadius) return 'b';
@@ -1972,39 +1999,39 @@ function enableDragOnReportChart() {
   };
 
   on(canvas, 'mousedown', (e) => {
-    if (!manualForkMode || !forkSel.active) return;
+    if (!regionSelectMode || !regionSel.active) return;
     const h = nearHandle(e);
     if (h) { 
-      forkSel.dragging = h;
-      forkSel.activeHandle = h;
+      regionSel.dragging = h;
+      regionSel.activeHandle = h;
     }
   });
 
   on(canvas, 'click', (e) => {
-    if (!manualForkMode || !forkSel.active) return;
+    if (!regionSelectMode || !regionSel.active) return;
     setActiveHandleFromEvent(e);
     const v = valFromEvent(e);
-    if (forkSel.activeHandle === 'a') forkSel.aVal = v; else forkSel.bVal = v;
+    if (regionSel.activeHandle === 'a') regionSel.aVal = v; else regionSel.bVal = v;
     lossDistChart.update('none');
   });
 
   on(window, 'mousemove', (e) => {
-    if (!manualForkMode || !forkSel.active || !forkSel.dragging) return;
+    if (!regionSelectMode || !regionSel.active || !regionSel.dragging) return;
     const v = valFromEvent(e);
-    if (forkSel.dragging === 'a') forkSel.aVal = v; else forkSel.bVal = v;
+    if (regionSel.dragging === 'a') regionSel.aVal = v; else regionSel.bVal = v;
     lossDistChart.update('none');
   });
 
-  on(window, 'mouseup', () => { forkSel.dragging = null; });
+  on(window, 'mouseup', () => { regionSel.dragging = null; });
 }
 
 
 function bumpHandle(which, delta) {
-  if (!lossDistChart || !manualForkMode || !forkSel.active) return;
+  if (!lossDistChart || !regionSelectMode || !regionSel.active) return;
   const scaleX = lossDistChart.scales.x;
   const step = (scaleX.max - scaleX.min) / 100;
-  if (which === 'a') forkSel.aVal = clampValue((forkSel.aVal ?? scaleX.min) + delta * step);
-  else               forkSel.bVal = clampValue((forkSel.bVal ?? scaleX.max) + delta * step);
+  if (which === 'a') regionSel.aVal = clampValue((regionSel.aVal ?? scaleX.min) + delta * step);
+  else               regionSel.bVal = clampValue((regionSel.bVal ?? scaleX.max) + delta * step);
   lossDistChart.update('none');
 }
 
@@ -2014,15 +2041,15 @@ function setActiveHandleFromEvent(evt) {
   const rect = canvas.getBoundingClientRect();
   const xPix = evt.clientX - rect.left;
   const scaleX = lossDistChart.scales.x;
-  if (forkSel.aVal == null || forkSel.bVal == null) return;
-  const aPix = scaleX.getPixelForValue(forkSel.aVal);
-  const bPix = scaleX.getPixelForValue(forkSel.bVal);
-  forkSel.activeHandle = Math.abs(xPix - aPix) <= Math.abs(xPix - bPix) ? 'a' : 'b';
+  if (regionSel.aVal == null || regionSel.bVal == null) return;
+  const aPix = scaleX.getPixelForValue(regionSel.aVal);
+  const bPix = scaleX.getPixelForValue(regionSel.bVal);
+  regionSel.activeHandle = Math.abs(xPix - aPix) <= Math.abs(xPix - bPix) ? 'a' : 'b';
 }
 
 window.addEventListener('keydown', (e) => {
-  if (!manualForkMode || !forkSel.active) return;
-  const which = forkSel.dragging || forkSel.activeHandle || 'a';
+  if (!regionSelectMode || !regionSel.active) return;
+  const which = regionSel.dragging || regionSel.activeHandle || 'a';
   if (e.key === 'ArrowLeft')  { bumpHandle(which, -1); e.preventDefault(); }
   if (e.key === 'ArrowRight') { bumpHandle(which, +1); e.preventDefault(); }
 });
@@ -2033,10 +2060,10 @@ function clampValue(v) {
   return Math.max(s.min, Math.min(s.max, v));
 }
 
-function ensureForkOverlay() {
-  if (forkOverlay) return;
-  forkOverlay = document.createElement('div');
-  Object.assign(forkOverlay.style, {
+function ensureRegionOverlay() {
+  if (regionOverlay) return;
+  regionOverlay = document.createElement('div');
+  Object.assign(regionOverlay.style, {
     position: 'static',
     background: '#334155',
     border: '1px solid #ddd',
@@ -2049,34 +2076,94 @@ function ensureForkOverlay() {
 
   const chartWrap = byId('lossDistChart')?.closest('.chartWrap');
   if (chartWrap && chartWrap.parentNode) {
-    chartWrap.parentNode.insertBefore(forkOverlay, chartWrap.nextSibling);
+    chartWrap.parentNode.insertBefore(regionOverlay, chartWrap.nextSibling);
   } else {
-    document.body.appendChild(forkOverlay);
+    document.body.appendChild(regionOverlay);
   }
 
-  forkOverlay.innerHTML = `
+  // Keep the existing #forkOk button ID and fields exactly as-is:
+  regionOverlay.innerHTML = `
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <span id="forkCountPill"
         style="
-          padding:4px 10px;
-          border-radius:9999px;
-          background:var(--btn-bg);
-          color:var(--btn-fg);
-          font-weight:600;
-          font-size:12px;
-          box-shadow:var(--btn-shadow);
-          user-select:none;
+          padding:4px 10px;border-radius:9999px;background:var(--btn-bg);color:var(--btn-fg);
+          font-weight:600;font-size:12px;box-shadow:var(--btn-shadow);user-select:none;
         "
       >Total Samples Selected: 0</span>
 
       <label>LR <input id="forkLR" type="number" step="0.0001" value="0.001" style="width:90px"></label>
       <label>Batch <input id="forkBS" type="number" step="1" value="32" style="width:80px"></label>
       <label>Patience <input id="forkPat" type="number" step="1" value="5" style="width:80px"></label>
+
       <button id="forkOk">Okay, fork</button>
       <button id="forkCancel">Cancel</button>
+
+      <label for="exportSelectedSubsetFmt">Format</label>
+      <select id="exportSelectedSubsetFmt" aria-label="Export format (selected subset)">
+        <option value="parquet">Parquet (.parquet)</option>
+        <option value="csv">CSV (.csv)</option>
+        <option value="feather">Feather (.feather)</option>
+      </select>
+      <button id="btnExportSelectedSubset" title="Export only the currently selected samples">
+        Export selected subset
+      </button>
     </div>`;
 
-  forkCountPill = byId('forkCountPill');
+
+
+
+
+  const btnExportSelectedSubset = byId('btnExportSelectedSubset');
+  const overlayFmt = byId('exportSelectedSubsetFmt');
+
+  // 2a) Keep overlay format in sync with the main dropdown
+  if (overlayFmt) {
+    overlayFmt.value = (exportSubsetFmt && exportSubsetFmt.value) || 'parquet';
+    on(overlayFmt, 'change', () => { if (exportSubsetFmt) exportSubsetFmt.value = overlayFmt.value; });
+    if (exportSubsetFmt) on(exportSubsetFmt, 'change', () => { overlayFmt.value = exportSubsetFmt.value; });
+  }
+
+  // 2b) Export only the selected region, using exportSubsetFmt
+  on(btnExportSelectedSubset, 'click', () => {
+    const runId = currentPageRunId();
+    if (!runId) { notify('No run selected.', 'warn'); return; }
+    if (!regionSelectMode || !regionSel.active) {
+      notify('Click “Select Region” first, then pick a range.', 'warn');
+      return;
+    }
+    if (regionSel.aVal == null || regionSel.bVal == null) {
+      notify('Selection handles are not set yet. Click/drag on the chart.', 'warn');
+      return;
+    }
+
+    const format = (exportSubsetFmt && exportSubsetFmt.value) || 'parquet';
+    const minLoss = Math.min(regionSel.aVal, regionSel.bVal);
+    const maxLoss = Math.max(regionSel.aVal, regionSel.bVal);
+
+    const subset_indices = selectedIndicesForRun(runId, minLoss, maxLoss);
+    if (!subset_indices.length) {
+      notify('No samples in the selected range.', 'warn');
+      return;
+    }
+
+    vscode.postMessage({
+      command: 'exportSubset',
+      runId,
+      format,
+      subset_indices,
+    });
+
+    notify(`Exporting selected region (${subset_indices.length} samples, ${format.toUpperCase()})…`);
+  });
+
+  // 2c) Let your already-defined gate set visibility/enabled state
+  if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate();
+
+
+
+
+  
+  regionCountPill = byId('forkCountPill');
   updateSelectedCountPill();
 
   on(byId('forkOk'), 'click', () => {
@@ -2084,46 +2171,43 @@ function ensureForkOverlay() {
     const bs  = parseInt(byId('forkBS').value || '32', 10);
     const pat = parseInt(byId('forkPat').value || '5', 10);
 
-    if (forkSel.aVal == null || forkSel.bVal == null) {
+    if (regionSel.aVal == null || regionSel.bVal == null) {
       notify('Selection handles not set. Click/drag on the chart first.', 'warn');
       return;
     }
-    const minLoss = Math.min(forkSel.aVal, forkSel.bVal);
-    const maxLoss = Math.max(forkSel.aVal, forkSel.bVal);
-    console.log('[UI] forkSel.aVal =', forkSel.aVal, 'forkSel.bVal =', forkSel.bVal);
+    const minLoss = Math.min(regionSel.aVal, regionSel.bVal);
+    const maxLoss = Math.max(regionSel.aVal, regionSel.bVal);
 
     send('manualFork', {
       runId: currentPageRunId(),
       region: { minLoss, maxLoss },
       hparams: { lr, batch_size: bs, patience: pat }
     });
-    if (minLoss == null || maxLoss == null) {
-      notify('No loss region available. Generate the report first.', 'warn');
-      return;
-    }
-    
-    forkSel.aVal = null;
-    forkSel.bVal = null;
-    forkSel.activeHandle = 'a';
-    manualForkMode = false;
-    forkSel.active = false;
-    forkOverlay.style.display = 'none';
+
+    regionSel.aVal = null;
+    regionSel.bVal = null;
+    regionSel.activeHandle = 'a';
+    regionSelectMode = false;
+    regionSel.active = false;
+    regionOverlay.style.display = 'none';
     if (lossDistChart) lossDistChart.update('none');
+    if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate()
   });
 
   on(byId('forkCancel'), 'click', () => {
-    manualForkMode = false;
-    forkSel.active = false;
-    forkOverlay.style.display = 'none';
-    if (btnManualFork) btnManualFork.style.display = '';
+    regionSelectMode = false;
+    regionSel.active = false;
+    regionOverlay.style.display = 'none';
+    if (btnSelectRegion) btnSelectRegion.style.display = '';
     if (lossDistChart) lossDistChart.update('none');
+    if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate()
   });
 }
 
-on(byId('forkALeft'),  'click', () => { forkSel.dragging = 'a'; bumpHandle('a', -1); });
-on(byId('forkARight'), 'click', () => { forkSel.dragging = 'a'; bumpHandle('a', +1); });
-on(byId('forkBLeft'),  'click', () => { forkSel.dragging = 'b'; bumpHandle('b', -1); });
-on(byId('forkBRight'), 'click', () => { forkSel.dragging = 'b'; bumpHandle('b', +1); });
+on(byId('forkALeft'),  'click', () => { regionSel.dragging = 'a'; bumpHandle('a', -1); });
+on(byId('forkARight'), 'click', () => { regionSel.dragging = 'a'; bumpHandle('a', +1); });
+on(byId('forkBLeft'),  'click', () => { regionSel.dragging = 'b'; bumpHandle('b', -1); });
+on(byId('forkBRight'), 'click', () => { regionSel.dragging = 'b'; bumpHandle('b', +1); });
 
 
 /* ====================================================================
