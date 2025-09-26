@@ -1,85 +1,133 @@
-## On the Fly
+```md
+# On the Fly
 
-The tool is a **VS Code dashboard** that orchestrates a new kind of ML workflow. Your Python side just calls `quickstart(...)` to open a session; **everything else happens in the dashboard**.
+A **VS Code dashboard** and Python API for orchestrating a hard-sample–guided Mixture-of-Experts (MoE) training workflow. From Python, call `quickstart(...)` to open a session; monitoring and controls live in the dashboard.
 
 ![On-the-Fly overview](./docs/images/onthefly-dashboard.png)
 
-* **One-click control:** ▶ Play, ⏸ Pause, ⟲ Refresh to clean everything out. Complementing tools like W&B or MLFlow, this beta version aims to help you achieve better performance as quickly as possible. This doesn't eradicate effort in hypertuning and model choice, but it can be the third factor that pushes the model over the gap. You no longer have to train models all the way to the end to analyze model performance. Performance analysis happens mid-training.
-* **Fork & merge without scripts:** Manually fork from loss regions or accept **AutoFork** plan cards; merge specialists back via **SWA / Distill / Fisher-Soup / Adapter-Fuse**.
-# Manual Mode (Analyst-in-the-Loop)
+---
 
-Keep full control. With **Automode OFF**, the dashboard turns into a surgical console: you can **pause runs**, **inspect evidence**, **download data subsets** for offline analysis, then **fork and merge** based on what you learn.
+## Overview
 
-## What you can do in Manual Mode
-
-* **Pause/Resume anytime** — freeze the trainer to take a clean snapshot of metrics, checkpoints, and buffers.
-* **Inspect before you act** — dive into per-sample loss histograms, slice reports, cluster previews (auto-k), gate loads, and expert ancestry.
-* **Download subsets for analysis** — export **indices or rows** for any slice/cluster/high-loss tail to **CSV/Parquet/JSON** for notebooks, SQL, or BI tools.
-* **Approve or edit plan cards** — each suggested **Fork/Merge** arrives as a card you can **Apply / Snooze / Ignore** (and tweak LR/WD, budgets, or recipes).
-* **Compare experts side-by-side** — validate lifts on your target slices before you merge.
-* **Merge on your terms** — choose **SWA / Distill / Fisher-Soup / Adapter-Fuse** with configurable cadence and safeguards.
-
-## Typical analyst loop
-
-1. **Pause** when you spot drift or a stubborn slice.
-2. **Inspect** loss tails, clusters, and slice deltas to form a hypothesis.
-3. **Download** a subset (e.g., `region=APAC & volatility>p90`) for a quick notebook deep-dive.
-4. **Fork** a specialist from that subset (short budget).
-5. **Evaluate** on target slices; iterate if needed.
-6. **Merge** improvements back into the generalist and **resume** training.
-
-## Automode toggle (rewrite)
-
-* **OFF — Manual Mode:** Plans appear as cards you can **Apply / Snooze / Ignore**. You can **Pause**, inspect views, and **download subsets** before deciding to **Fork** or **Merge**.
-* **ON — Automode:** Plans execute immediately with built-in safeguards; you can still intervene at any time.
-
-
-
-# Hard-Sample–Guided Mixture-of-Experts
-
-> This is a training workflow that finds hard samples on the fly, clusters them into regimes, trains specialists, and learns a gating network—yielding a unified Mixture-of-Experts (MoE) that adapts to regime shifts.
-
-* Mines hard examples mid-training
-* Clusters them into candidate regimes
-* Trains per-regime specialists
-* Learns a gating network to route inputs
-* Exports a single MoE for inference
+- Start a run from Python; control and inspect it in VS Code.
+- Pause/resume safely and snapshot metrics/checkpoints/buffers.
+- Fork short-budget specialists from hard samples or slices.
+- Merge improvements back using SWA, distillation, Fisher Soup, or adapter fusion.
+- Run fully manual or enable an automated planner with safeguards.
 
 ---
 
-## Why
-
-Most models (from ARIMA to LSTMs) assume one set of dynamics. Real data (macro/markets/climate) shifts: booms vs. recessions, volatility spikes vs. calm, structural breaks. A single global model smooths over structure. **On-the-Fly makes regime specialization explicit.**
-
----
-
-## Requirements
-
-* Python ≥ 3.9
-* PyTorch ≥ 2.2 (CUDA 12.x optional)
-* OS: Linux, macOS, or Windows
-* VS Code optional (for the dashboard)
+> [!IMPORTANT]
+> **Project status: Beta.** APIs, UI flows, and file formats may change without notice before v1.0.
+> Expect rough edges and please report issues and ideas.
 
 ---
 
-## Install
+## Features
+
+- **Mid-training analysis:** Inspect per-sample loss histograms, slice reports, cluster previews, gate loads, and expert ancestry without waiting for full epochs.
+- **Fork & merge tools:** Create specialists from residual clusters or loss tails; compare experts side-by-side before merging.
+- **Data export:** Download indices or rows for any slice/cluster/high-loss tail to CSV/Parquet/JSON for notebooks, SQL, or BI tools.
+- **Planner cards:** Suggested Fork/Merge actions appear as editable “plan cards” (apply / snooze / ignore) with tunable LR/WD, budgets, and recipes.
+
+---
+
+## Modes
+
+### Manual mode (analyst-in-the-loop)
+
+Keep full control with **Automode OFF**. You can pause runs, inspect evidence, export subsets, then decide when to fork or merge.
+
+**What you can do**
+
+- **Pause/Resume** at any time to take a clean snapshot.
+- **Inspect before acting**: loss tails, clusters (auto-k), slices, and routing/gate loads.
+- **Export subsets** for offline analysis.
+- **Approve or edit plan cards** prior to execution.
+- **Compare experts** on target slices.
+- **Merge on your terms** via SWA / Distill / Fisher-Soup / Adapter-Fuse.
+
+**Typical manual loop**
+
+1. Pause when drift or a weak slice appears.
+2. Inspect loss tails, clusters, and slice deltas.
+3. Export a subset (e.g., `region=APAC & volatility>p90`) for a quick notebook check.
+4. Fork a short-budget specialist.
+5. Evaluate on target slices; iterate if needed.
+6. Merge improvements and resume training.
+
+### Automode (automated planner)
+
+With **Automode ON**, plans execute immediately with built-in safeguards. You can intervene at any time.
+
+Automode monitors the run and proposes/executes plans such as:
+
+- **Stabilize on instability:** Detect NaNs/Inf, loss/grad spikes, sharpness/GNS alerts; try LR↓, WD↑, gradient clipping, bf16; optional SAM/EMA.
+- **Mine hard samples:** Stream per-sample loss (optionally grad norm, margin, small embeddings) with robust quantiles.
+- **Cluster residuals (auto-k):** Tag high-loss clusters; fall back to top-q loss tails when appropriate.
+- **Specialize with budgets:** Launch short ASHA/Successive-Halving rungs for candidate specialists.
+- **Route with a gate:** Train a small router (`switch_softmax` by default; temperature + load-balance aux).
+- **Explore on plateaus:** Trend tests (Theil–Sen + Mann–Kendall; Page–Hinkley aware) trigger small HPO sweeps with early stop.
+- **Target weak slices:** If you report per-slice validation metrics, persistent underperformers trigger slice-focused forks.
+- **Merge on cadence:** Periodically unify via SWA / Distill / Fisher-Soup / Adapter-Fuse; parent remains catch-all.
+- **Pacing & limits:** Adaptive cooldowns; cap parallel children; show lightweight diagnostics in the UI.
+
+**Planner card (summary fields)**
+
+```
+
+action: fork | merge
+reason: instability_spike | residual_cluster | high_loss_tail | loss_plateau | slice_underperformance
+selection: {kind: all | quantile | kmeans | indices, ...}
+training_recipe: small set of variants + early stopping
+gate_recipe: tiny router (if specializing)
+merge_recipe: swa | distill | fisher_soup | adapter_fuse
+budget_steps: short (ASHA first rung)
+cooldown_steps: adaptive
+diagnostics: lightweight numbers for the UI
+
+````
+
+**Selection cheatsheet**
+
+- `all` — global stabilize/explore
+- `quantile` — top-q loss tail (e.g., 0.85–1.0)
+- `kmeans` — cluster IDs from auto-k residual clustering
+- `indices` — exact sample IDs (if provided)
+
+---
+
+## Method (at a glance)
+
+> Train a generalist, mine and cluster hard samples into regimes, train specialists, learn a gating network, and export a unified MoE for inference.
+
+1. Train a compact **generalist** on all data.
+2. **Hard-sample mining** flags high-loss examples online.
+3. **Clustering** groups hard samples into candidate regimes.
+4. Train **per-regime specialists**.
+5. Learn a **gating network** to mix experts.
+6. **Benchmark fairly** against a monolithic baseline with matched compute.
+
+---
+
+## Installation
 
 ```bash
 pip install onthefly-ai
-```
+````
 
-> **Note:** If your published import name differs from the PyPI package, adjust the `import` statements below.
+> If your published import name differs from the PyPI package, adjust the imports below.
 
 ---
 
-## TL;DR quickstart (runnable)
+## Quickstart (runnable)
 
 ```python
 import torch, torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
 from onthefly import quickstart
 
-# tiny toy dataset
+# toy dataset
 X = torch.randn(4096, 28*28)
 y = (X[:, :50].sum(dim=1) > 0).long()
 ds = TensorDataset(X, y)
@@ -108,14 +156,14 @@ quickstart(
 
 ---
 
-## Dashboard (VS Code)
+## VS Code dashboard
 
 1. Open VS Code → Command Palette (`Ctrl/Cmd + Shift + P`).
 2. Run **“On the Fly: Show Dashboard.”**
 3. Select your Python interpreter and training script.
 4. Press **▶ Run** to start/monitor training, inspect clusters, and compare experts.
 
-> Prefer headless? Use the CLI:
+Prefer headless? Use the CLI:
 
 ```bash
 onthefly run --script path/to/train.py --python /path/to/python
@@ -125,62 +173,18 @@ onthefly quickstart --config configs/mnist.yaml
 
 ---
 
-## Method (at a glance)
+## Requirements
 
-1. **Generalist** — Train a compact base model on all data.
-2. **Hard-sample mining** — Flag examples with high loss online.
-3. **Clustering** — Group hard samples (e.g., K-Means) into regimes.
-4. **Specialists** — Train one model per cluster.
-5. **Gating network** — An LSTM (or transformer) reads recent history and outputs mixture weights.
-6. **Fair comparison** — Benchmark vs. a monolithic baseline with matched compute.
-
-> Each component (hard-example mining, curriculum/self-paced learning, dynamic routing) is known; **On-the-Fly** combines them into a practical workflow for regime-switching data.
-
-In the dashboard automode, this will look like:
-
-1. Press play to begin training the baseline.
-2. On the dashboard, all of this is customizable, and under the hood, **AutoFork**:
-
-* **Watching for instability.** If it sees NaNs/Inf, sharp loss/grad spikes, or sharpness/GNS alarms, it auto-spawns **stabilize** variants (LR↓, WD↑, grad clip, bf16; optional SAM/EMA) and keeps the best.
-* **Mining hard samples.** It streams per-sample loss (optionally grad norm, margin, tiny embeddings) and maintains robust quantiles (t-digest fallback to rolling).
-* **Clustering residuals (auto-k).** It clusters the pool (built-in K-Means; optional sklearn KMeans/GMM / HDBSCAN) and tags **dead/high-loss clusters**. If none clearly stand out, it targets the **high-loss tail** (e.g., top-q quantile).
-* **Specializing.** For each targeted cluster/tail, it launches a **specialist** child with a short, budgeted schedule (ASHA/Successive-Halving first rung).
-* **Routing.** When a child is viable, it trains a tiny **gate** (`switch_softmax` by default; temp & load-balance aux) to mix the parent with its new specialists.
-* **Exploring on plateaus.** When trend tests (Theil–Sen + Mann–Kendall; Page–Hinkley aware) say you’re flat, it runs a **small HPO sweep** (optimizer/LR/WD, optional SAM) with early stop.
-* **Fixing weak slices.** If you report `val` metrics per slice, persistent underperformers trigger slice-focused forks.
-* **Merging on cadence.** It periodically **re-unifies** (or earlier if a child plateaus/improves ≥0.5% vs its first eval), using **SWA / Distill / Fisher-Soup / Adapter-Fuse**. Parent stays as catch-all.
-* **Pacing itself.** Cooldowns expand/contract with regime change; parallel children are capped; diagnostics (z-scores, trends, budgets) are shown in the panel.
-
-**What a plan looks like (summarized in the dashboard card):**
-
-```
-action: fork | merge
-reason: instability_spike | residual_cluster | high_loss_tail | loss_plateau | slice_underperformance
-selection: {kind: all | quantile | kmeans | indices, ...}
-training_recipe: small set of variants + early stopping
-gate_recipe: tiny router (if specializing)
-merge_recipe: swa | distill | fisher_soup | adapter_fuse
-budget_steps: short (ASHA first rung)
-cooldown_steps: adaptive
-diagnostics: lightweight numbers for the UI
-```
-
-**Selection cheatsheet**
-
-* `all` — global stabilize/explore.
-* `quantile` — top-q loss tail (e.g., 0.85–1.0).
-* `kmeans` — target cluster IDs from auto-k residual clustering.
-* `indices` — exact sample IDs (if you pass them; enables precise forks).
-
-That’s it—the dashboard executes these automatically with **Automode ON**, or shows them as plan suggestion cards with **Automode OFF**.
-
+* Python ≥ 3.9
+* PyTorch ≥ 2.2 (CUDA 12.x optional)
+* OS: Linux, macOS, or Windows
+* VS Code optional (for the dashboard)
 
 ---
 
-## Reproducible benchmarks
+## Reproducible examples
 
-To get an idea of how this methodology works and how effective it can be with—**no hyper-tuning**, 
-there are example training scripts providd in examples/.
+Example training scripts are provided in `examples/` to illustrate the workflow without hyper-parameter tuning.
 
 ---
 
@@ -204,8 +208,11 @@ If you use this project in research, please cite:
 ```bibtex
 @software{onthefly2025,
   title        = {On-the-Fly: Hard-Sample–Guided Mixture-of-Experts},
-  author       = {Your Name and Coauthors},
+  author       = {Luke Skertich},
   year         = {2025},
   url          = {https://github.com/yourorg/onthefly}
 }
+```
+
+```
 ```

@@ -2096,17 +2096,18 @@ function ensureRegionOverlay() {
       <label>Patience <input id="forkPat" type="number" step="1" value="5" style="width:80px"></label>
 
       <button id="forkOk">Okay, fork</button>
-      <button id="forkCancel">Cancel</button>
+      
 
       <label for="exportSelectedSubsetFmt">Format</label>
       <select id="exportSelectedSubsetFmt" aria-label="Export format (selected subset)">
-        <option value="parquet">Parquet (.parquet)</option>
-        <option value="csv">CSV (.csv)</option>
-        <option value="feather">Feather (.feather)</option>
+        <option value="parquet">.parquet</option>
+        <option value="csv">.csv</option>
+        <option value="feather">.feather</option>
       </select>
       <button id="btnExportSelectedSubset" title="Export only the currently selected samples">
-        Export selected subset
+        Export subset
       </button>
+      <button id="forkCancel">Cancel</button>
     </div>`;
 
 
