@@ -348,7 +348,6 @@ function buildSummaryText(key: string, view: string): string {
   return [header, ...recent].join('\n');
 }
 
-
 /* ============================ Panel & HTML ============================ */
 
 function openPanel(context: vscode.ExtensionContext) {
@@ -406,7 +405,6 @@ function openPanel(context: vscode.ExtensionContext) {
   panel.webview.onDidReceiveMessage((m: any) => { onMessage(context, m); });
 
   panel.webview.html = getHtml(context, panel.webview, nonce);
-  setTimeout(() => panel?.webview.postMessage({ type: 'log', text: 'Webview ready.' }), 50);
 }
 
 function getHtml(context: vscode.ExtensionContext, webview: vscode.Webview, nonce: string) {

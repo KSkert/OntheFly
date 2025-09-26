@@ -2,7 +2,7 @@ onthefly/
 ├─ pyproject.toml
 ├─ README.md
 ├─ src/
-│  └─ onthefly_backend/
+│  └─ onthefly/
 │     ├─ __init__.py
 │     ├─ session.py
 │     ├─ control.py
@@ -12,16 +12,10 @@ onthefly/
 │     ├─ data_explorer.py
 │     ├─ metrics.py
 │     └─ utils.py
-├─ package-lock.json
-├─ package.json
-├─ pyproject.toml
 ├─ vscode-onthefly
-│  ├─ .vscode/
-│  ├─ node_modules/
+│  ├─ package.json
+│  ├─ tsconfig.json
 │  ├─ src/
-│     ├─ package-lock.json
-│     ├─ package.json
-│     ├─ tsconfig.json
 │     ├─ extension.js
 │     ├─ storage.js
 │     ├─ webview/

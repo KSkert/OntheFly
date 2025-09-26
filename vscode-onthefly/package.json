@@ -5,7 +5,7 @@
   "version": "0.0.1",
   "publisher": "Luke Skertich",
   "engines": {
-    "vscode": "^1.87.0"
+    "vscode": "^1.102.0"
   },
   "activationEvents": [
     "onCommand:onthefly.showDashboard"
@@ -38,12 +38,15 @@
   "scripts": {
     "vscode:prepublish": "npm run build",
     "build": "tsc -p ./",
-    "watch": "tsc -w -p ./"
+    "watch": "tsc -w -p ./",
+    "rebuild:electron": "electron-rebuild -f -v 35.6.0 --arch=arm64"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.87.0",
-    "typescript": "^5.4.0"
+    "@electron/rebuild": "^4.0.1",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.102.0",
+    "typescript": "^5.9.2"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",

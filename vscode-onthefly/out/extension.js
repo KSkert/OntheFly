@@ -261,7 +261,6 @@ function openPanel(context) {
     });
     panel.webview.onDidReceiveMessage((m) => { onMessage(context, m); });
     panel.webview.html = getHtml(context, panel.webview, nonce);
-    setTimeout(() => panel?.webview.postMessage({ type: 'log', text: 'Webview ready.' }), 50);
 }
 function getHtml(context, webview, nonce) {
     const htmlPath = [

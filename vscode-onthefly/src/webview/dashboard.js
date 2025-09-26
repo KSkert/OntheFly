@@ -1093,7 +1093,6 @@ if (runSel) {
 /* ========= CHART INIT ========= */
 (function waitForChart() {
   if (typeof Chart !== 'undefined') {
-    log(`✅ Chart.js ${Chart.version || ''} loaded`);
     initCharts();
 
     wireModelNavClicks();
@@ -1104,13 +1103,12 @@ if (runSel) {
   const started = Date.now();
   const tick = () => {
     if (typeof Chart !== 'undefined') {
-      log(`✅ Chart.js ${Chart.version || ''} loaded`);
       initCharts();
 
       wireModelNavClicks();
       updateModelNav();
     } else if (Date.now() - started > 3000) {
-      log('❌ Chart.js not loaded. Ensure chart.js is resolved and injected.');
+      log('Chart.js not loaded. Ensure chart.js is resolved and injected.');
       ['lossChart','val_lossChart','lossDistChart'].forEach(id => {
         const el = byId(id);
         if (el && el.parentElement) el.parentElement.style.display = 'none';
