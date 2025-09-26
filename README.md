@@ -162,14 +162,6 @@ quickstart(
 3. Select your Python interpreter and training script.
 4. Press **▶ Run** to start/monitor training, inspect clusters, and compare experts.
 
-Prefer headless? Use the CLI:
-
-```bash
-onthefly run --script path/to/train.py --python /path/to/python
-# or drive with a config file:
-onthefly quickstart --config configs/mnist.yaml
-```
-
 ---
 
 ## Requirements
