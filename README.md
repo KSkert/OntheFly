@@ -1,4 +1,3 @@
-```md
 # On the Fly
 
 A **VS Code dashboard** and Python API for orchestrating a hard-sample–guided Mixture-of-Experts (MoE) training workflow. From Python, call `quickstart(...)` to open a session; monitoring and controls live in the dashboard.
@@ -210,9 +209,6 @@ If you use this project in research, please cite:
   title        = {On-the-Fly: Hard-Sample–Guided Mixture-of-Experts},
   author       = {Luke Skertich},
   year         = {2025},
-  url          = {https://github.com/yourorg/onthefly}
+  url          = {https://github.com/KSkert/onthefly}
 }
-```
-
-```
 ```
