@@ -148,7 +148,7 @@ class FeatureWorker(threading.Thread):
             indices = None
 
         # per-sample losses (preempt if a newer snapshot arrives)
-        losses = compute_per_sample_losses(
+        losses, __ = compute_per_sample_losses(
             model, self._ds, self._collate, self._loss_fn,
             device=self._aux_device, batch_size=self._bs,
             indices=indices,

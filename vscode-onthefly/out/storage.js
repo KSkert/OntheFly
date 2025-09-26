@@ -56,6 +56,7 @@ exports.insertLog = insertLog;
 exports.getLogs = getLogs;
 exports.insertTestMetric = insertTestMetric;
 exports.getTestRows = getTestRows;
+exports.listSessions = listSessions;
 exports.runsForSession = runsForSession;
 exports.getLogsBySession = getLogsBySession;
 exports.latestCheckpointForRun = latestCheckpointForRun;
@@ -535,11 +536,9 @@ function insertTestMetric(run_id, step, loss) {
 function getTestRows(run_id) {
     return db.prepare('SELECT step, loss FROM test_metrics WHERE run_id=? ORDER BY step ASC').all(run_id);
 }
-// export function listSessions() {
-//   return db.prepare(
-//     'SELECT session_id, MAX(ts) AS last_ts, COUNT(DISTINCT run_id) AS run_count FROM logs WHERE session_id IS NOT NULL GROUP BY session_id ORDER BY last_ts DESC'
-//   ).all() as Array<{ session_id: string; last_ts: number; run_count: number }>;
-// }
+function listSessions() {
+    return db.prepare('SELECT session_id, MAX(ts) AS last_ts, COUNT(DISTINCT run_id) AS run_count FROM logs WHERE session_id IS NOT NULL GROUP BY session_id ORDER BY last_ts DESC').all();
+}
 function runsForSession(session_id) {
     return db.prepare('SELECT DISTINCT run_id FROM logs WHERE session_id=? AND run_id IS NOT NULL').all(session_id).map((r) => String(r.run_id));
 }

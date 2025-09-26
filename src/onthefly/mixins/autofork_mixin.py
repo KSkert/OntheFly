@@ -389,7 +389,7 @@ class AutoForkMixin:
         if (selection or region) and self._train_root_ds is not None:
             ds = self._train_root_ds
             cancel = (lambda: (not self._running)) if allow_when_paused else (lambda: (not self._running) or self._paused or self._halt_evt.is_set())
-            tr_losses = compute_per_sample_losses(
+            tr_losses, __ = compute_per_sample_losses(
                 self.model, ds, getattr(self.train_loader, 'collate_fn', None), self.raw_loss_fn,
                 device=self.device, batch_size=getattr(self.train_loader, 'batch_size', 256),
                 indices=None, mirror_train_semantics=True,
@@ -496,7 +496,7 @@ class AutoForkMixin:
         bs = getattr(self.train_loader, "batch_size", 256)
         cf = getattr(self.train_loader, "collate_fn", None)
 
-        losses = compute_per_sample_losses(
+        losses, __ = compute_per_sample_losses(
             tmp_model, ds, cf, self.raw_loss_fn,
             device=self.device, batch_size=bs,
             indices=None,

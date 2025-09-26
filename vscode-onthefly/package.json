@@ -2,11 +2,24 @@
   "name": "onthefly",
   "displayName": "On the Fly",
   "description": "Mid-training model adjustment toolkit for PyTorch.",
-  "version": "0.0.1",
-  "publisher": "Luke Skertich",
+  "version": "0.1.0",
+  "publisher": "lukeskertich",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KSkert/OntheFly"
+  },
+  "homepage": "https://github.com/KSkert/OntheFly",
+  "bugs": {
+    "url": "https://github.com/KSkert/OntheFly/issues"
+  },
   "engines": {
     "vscode": "^1.102.0"
   },
+  "categories": [
+    "Other"
+  ],
+  "icon": "images/icon.png",
   "activationEvents": [
     "onCommand:onthefly.showDashboard"
   ],
@@ -25,12 +38,17 @@
         "onthefly.pythonPath": {
           "type": "string",
           "default": "python",
-          "description": "Path to Python interpreter running OnTheFlySession"
+          "description": "Path to Python interpreter running OnTheFlySession (>=3.9)."
         },
         "onthefly.storagePathOverride": {
           "type": "string",
           "default": "",
-          "description": "Override path for the SQLite DB (for advanced setups)"
+          "description": "Override path for the SQLite DB (advanced)."
+        },
+        "onthefly.minPythonPackage": {
+          "type": "string",
+          "default": "0.0.3.post1",
+          "description": "Minimum onthefly-ai version required by the extension."
         }
       }
     }
@@ -45,11 +63,13 @@
     "@electron/rebuild": "^4.0.1",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
+    "@types/semver": "^7.7.1",
     "@types/vscode": "^1.102.0",
     "typescript": "^5.9.2"
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
-    "chart.js": "^3.9.1"
+    "chart.js": "^3.9.1",
+    "semver": "^7.7.2"
   }
 }

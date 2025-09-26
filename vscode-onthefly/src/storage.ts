@@ -619,11 +619,11 @@ export function getTestRows(run_id: string) {
   ).all(run_id);
 }
 
-// export function listSessions() {
-//   return db.prepare(
-//     'SELECT session_id, MAX(ts) AS last_ts, COUNT(DISTINCT run_id) AS run_count FROM logs WHERE session_id IS NOT NULL GROUP BY session_id ORDER BY last_ts DESC'
-//   ).all() as Array<{ session_id: string; last_ts: number; run_count: number }>;
-// }
+export function listSessions() {
+  return db.prepare(
+    'SELECT session_id, MAX(ts) AS last_ts, COUNT(DISTINCT run_id) AS run_count FROM logs WHERE session_id IS NOT NULL GROUP BY session_id ORDER BY last_ts DESC'
+  ).all() as Array<{ session_id: string; last_ts: number; run_count: number }>;
+}
 
 export function runsForSession(session_id: string) {
   return db.prepare(

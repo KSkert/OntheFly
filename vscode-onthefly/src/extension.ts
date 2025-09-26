@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import * as crypto from 'crypto';
+import * as semver from 'semver';
 import {
   initStorage,
   insertRun,
@@ -22,11 +23,126 @@ import {
   getLogs,
   runsForSession,
   getLogsBySession,
+  listSessions,
   exportBundle as storageExportBundle,
   loadBundle as storageLoadBundle,
   latestCheckpointForRun
 } from './storage';
 import * as os from 'os';
+
+
+// ───────────────────────── Ensure onthefly-ai in a private venv ─────────────────────────
+
+async function ensureOntheflyInPrivateVenv(
+  context: vscode.ExtensionContext,
+  opts?: { askBeforeInstall?: boolean }
+): Promise<{ python: string; sitePackages: string }> {
+  const ask = opts?.askBeforeInstall ?? true;
+
+  const storageDir = context.globalStorageUri.fsPath;
+  fs.mkdirSync(storageDir, { recursive: true });
+  const venvDir = path.join(storageDir, 'pyenv');
+
+  // Pick a launcher to create the venv if it doesn't exist yet. Prefers newer versions.
+  function pickLauncher(): string {
+    const candidates = ['python3.12', 'python3.11', 'python3.10', 'python3.9', 'python3', 'python'];
+    const cp = require('child_process');
+    for (const c of candidates) {
+      try { cp.execFileSync(c, ['--version'], { stdio: 'ignore' }); return c; } catch {}
+    }
+    return 'python';
+  }
+
+
+  const pyBin = process.platform === 'win32'
+    ? path.join(venvDir, 'Scripts', 'python.exe')
+    : path.join(venvDir, 'bin', 'python');
+
+  
+  if (!fs.existsSync(pyBin)) {
+    // Create venv
+    require('child_process').execFileSync(pickLauncher(), ['-m', 'venv', venvDir], { stdio: 'inherit' });
+  }
+
+  try {
+    const v = require('child_process')
+      .execFileSync(pyBin, ['-c', 'import sys; print(".".join(map(str, sys.version_info[:3])))'], { encoding: 'utf8' })
+      .trim();
+    const [maj, min] = v
+      .split('.')
+      .map((s: string) => parseInt(s, 10)) as [number, number];
+    if (maj < 3 || (maj === 3 && min < 9)) {
+      throw new Error(`Python ${v} found in extension venv; need >= 3.9. Please install Python 3.9+ and try again.`);
+    }
+  } catch (e:any) {
+    vscode.window.showErrorMessage(e?.message || String(e));
+    throw e; // abort ensureOntheflyInPrivateVenv
+  }
+
+  // Try to upgrade pip quietly
+  try {
+    require('child_process').execFileSync(pyBin, ['-m', 'pip', 'install', '--upgrade', 'pip'], { stdio: 'ignore' });
+  } catch {}
+
+  // Read configured minimum version
+  const cfg = vscode.workspace.getConfiguration('onthefly');
+  const minVersion = String(cfg.get('minPythonPackage') || '0.0.3.post1');
+
+  // Discover installed version (if any)
+  let installed: string | null = null;
+  try {
+    installed = require('child_process')
+      .execFileSync(
+        pyBin,
+        ['-c',
+        'import sys\n' +
+        'try:\n' +
+        '  import importlib.metadata as m\n' +
+        'except Exception:\n' +
+        '  import importlib_metadata as m\n' +
+        'print(m.version("onthefly-ai"))'
+        ],
+        { encoding: 'utf8' }
+      ).trim();
+  } catch {
+    // not installed
+  }
+
+  const needInstall = !installed;
+  // for future upgrades, 0.0.3.post2 will not be possible because 
+  // semver.coerce('0.0.3.post2') === '0.0.3', so post1 vs post 2 won't be distinguished
+  const needUpgrade = installed ? semver.lt(semver.coerce(installed)!, semver.coerce(minVersion)!) : false; 
+
+  if (needInstall) {
+    if (!ask || (await vscode.window.showInformationMessage(
+      `Install onthefly-ai ${minVersion}+ for this extension?`, 'Install', 'Cancel')) === 'Install') {
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Installing onthefly-ai' }, async () => {
+        require('child_process').execFileSync(pyBin, ['-m', 'pip', 'install', `onthefly-ai>=${minVersion}`], { stdio: 'inherit' });
+      });
+    } else {
+      throw new Error('onthefly-ai is required but was not installed.');
+    }
+  } else if (needUpgrade) {
+    if (!ask || (await vscode.window.showInformationMessage(
+      `Upgrade onthefly-ai to at least ${minVersion}? (found ${installed})`, 'Upgrade', 'Skip')) === 'Upgrade') {
+      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Upgrading onthefly-ai' }, async () => {
+        require('child_process').execFileSync(pyBin, ['-m', 'pip', 'install', `onthefly-ai>=${minVersion}`, '-U'], { stdio: 'inherit' });
+      });
+    }
+  }
+
+  // Return interpreter + site-packages (if I ever need to import/inspect)
+  let site: string = '';
+  try {
+    site = require('child_process').execFileSync(
+      pyBin, ['-c', 'import sysconfig, json; print(sysconfig.get_paths()["purelib"])'],
+      { encoding: 'utf8' }
+    ).trim();
+  } catch {}
+
+  return { python: pyBin, sitePackages: site };
+}
+
 
 /* ============================ AutoFork config ============================ */
 
@@ -144,10 +260,10 @@ function sendReq(cmd: string, payload: any = {}, timeoutMs = 15000): Promise<any
 
 
 function isRunImportedForThisSession(runId: string): boolean {
-  if (nativeRunsThisSession.has(runId)) return false;
-  if (!currentSessionId) return true; // no session yet → treat as imported
-  const seen = (runsForSession(currentSessionId) || []).some(id => String(id) === runId);
-  return !seen;
+  // Imported == NOT created/touched by the current live Python session.
+  // If there is no live session yet, treat EVERYTHING as imported.
+  if (!proc || !proc.stdin || !proc.stdin.writable) return true;
+  return !nativeRunsThisSession.has(runId);
 }
 
 
@@ -190,18 +306,15 @@ type WebMsg =
   | { command: 'applyAutoForkRules'; config: AutoForkConfig }
   | { command: 'executeAutoForkPlan'; plan: any; variantIndex?: number; runId?: string }
   | { command: 'resetAll' }
-  | { command: 'exportSubset'; runId?: string; format?: 'parquet' | 'csv' | 'feather' }
-
-  
   | { command: 'requestLogs'; runId: string; phase?: CompareView }
   | { command: 'requestTestRows'; runId: string }
   | {
       command: 'exportSubset';
       runId?: string;
       format?: 'parquet' | 'csv' | 'feather';
-      region?: { minLoss: number; maxLoss: number };  // <- NEW
+      region?: { minLoss: number; maxLoss: number };
+      subset_indices?: number[];
     };
-
 
 /* ============================ Control messages to Python ============================ */
 
@@ -229,8 +342,6 @@ let panel: vscode.WebviewPanel | null = null;
 let proc: ChildProcessWithoutNullStreams | null = null;
 const CHILD_KILL_TIMEOUT_MS = 1500;
 let lastMode: 'single' | 'sweep' = 'single';   ///////////////
-let pythonConfirmed = false;
-let scriptConfirmed = false;
 let currentRunId: string | null = null;
 const seenRuns = new Set<string>();
 let currentSessionId: string | null = null;   // sticky session id for log stamping
@@ -264,93 +375,16 @@ export function deactivate() {
 
 /* ============================ Model Comparison Compact Text-Only Column ============================ */
 
-function fmt(n: any, p = 6) {
-  const x = Number(n);
-  return Number.isFinite(x) ? x.toFixed(p).replace(/\.?0+$/,'') : '—';
-}
-
-function buildSummaryText(key: string, view: string): string {
-  // Heuristic: if this key matches any run_id we know, treat as run; otherwise treat as session_id.
-  const allRuns = listRuns() as Array<{ run_id: string; created_at?: number; name?: string | null }>;
-  const isRun = allRuns.some(r => String(r.run_id) === key);
-
-  const phase = (view === 'test' ? 'test' : (view === 'info' ? 'info' : 'train')) as 'train'|'test'|'info';
-
-  if (isRun) {
-    // --- existing per-run behavior (unchanged) ---
-    const rows  = getRunRows(key)  as Array<{ step:number; loss:number|null; val_loss:number|null }>;
-    const tests = getTestRows(key) as Array<{ step:number; loss:number|null }>;
-    const logs  = getLogs(key, phase) as Array<{ text:string; ts:number; step:number|null; epoch:number|null; level:string }>;
-
-    const steps = rows.map(r => r.step);
-    const train = rows.map(r => Number(r.loss)).filter(Number.isFinite);
-    const vals  = rows.map(r => Number(r.val_loss)).filter(Number.isFinite);
-    const tsts  = tests.map(r => Number(r.loss)).filter(Number.isFinite);
-
-    const lastStep  = steps.length ? steps[steps.length - 1] : null;
-    const bestTrain = train.length ? Math.min(...train) : null;
-    const bestVal   = vals.length  ? Math.min(...vals)  : null;
-    const bestTest  = tsts.length  ? Math.min(...tsts)  : null;
-
-    const recent = logs.slice(-30).map(l => {
-      const tag  = l.level ? l.level.toUpperCase() : 'LOG';
-      const step = Number.isFinite(l.step as any)  ? ` s=${l.step}` : '';
-      const ep   = Number.isFinite(l.epoch as any) ? ` e=${l.epoch}`: '';
-      return `[${tag}]${step}${ep}  ${String(l.text || '').trim()}`;
-    });
-
-    const header =
-      `Run: ${key}
-      Last step: ${lastStep ?? '—'}
-      Best train: ${fmt(bestTrain)}
-      Best val:   ${fmt(bestVal)}
-      Best test:  ${fmt(bestTest)}
-      View: ${phase.toUpperCase()}
-      ────────────────────────────────`;
-
-    return [header, ...recent].join('\n');
-  }
-
-  // ---  session aggregation ---
-  const runIds = runsForSession(key);
-  // aggregate series
-  const rowsAll  = runIds.flatMap(id => getRunRows(id)  as Array<{ step:number; loss:number|null; val_loss:number|null }>);
-  const testsAll = runIds.flatMap(id => getTestRows(id) as Array<{ step:number; loss:number|null }>);
-  const logsAll  = getLogsBySession(key, phase) as Array<{ text:string; ts:number; step:number|null; epoch:number|null; level:string }>;
-
-  const steps = rowsAll.map(r => r.step).sort((a,b)=>a-b);
-  const train = rowsAll.map(r => Number(r.loss)).filter(Number.isFinite);
-  const vals  = rowsAll.map(r => Number(r.val_loss)).filter(Number.isFinite);
-  const tsts  = testsAll.map(r => Number(r.loss)).filter(Number.isFinite);
-
-  const lastStep  = steps.length ? steps[steps.length - 1] : null;
-  const bestTrain = train.length ? Math.min(...train) : null;
-  const bestVal   = vals.length  ? Math.min(...vals)  : null;
-  const bestTest  = tsts.length  ? Math.min(...tsts)  : null;
-
-  const recent = logsAll.slice(-30).map(l => {
-    const tag  = l.level ? l.level.toUpperCase() : 'LOG';
-    const step = Number.isFinite(l.step as any)  ? ` s=${l.step}` : '';
-    const ep   = Number.isFinite(l.epoch as any) ? ` e=${l.epoch}`: '';
-    return `[${tag}]${step}${ep}  ${String(l.text || '').trim()}`;
-  });
-
-  const header =
-    `Session: ${key}
-    Runs in session: ${runIds.length}
-    Last step: ${lastStep ?? '—'}
-    Best train: ${fmt(bestTrain)}
-    Best val:   ${fmt(bestVal)}
-    Best test:  ${fmt(bestTest)}
-    View: ${phase.toUpperCase()}
-    ────────────────────────────────`;
-
-  return [header, ...recent].join('\n');
-}
+//deprecated
 
 /* ============================ Panel & HTML ============================ */
 
-function openPanel(context: vscode.ExtensionContext) {
+async function openPanel(context: vscode.ExtensionContext) {
+
+  try { await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: true }); } catch (e) {
+    console.warn('[onthefly] backend not ready yet:', e);
+  }
+
   if (panel) { panel.reveal(vscode.ViewColumn.Active); return; }
 
   const nonce = getNonce();
@@ -396,9 +430,6 @@ function openPanel(context: vscode.ExtensionContext) {
     // fresh ephemeral storage
     try { closeStorage(); } catch {}
     initStorage(context);
-
-    pythonConfirmed = false;
-    scriptConfirmed = false;
     panel = null;
   });
 
@@ -501,6 +532,21 @@ function postCurrentSession() {
   if (currentSessionId) post({ type: 'fs.session.current', id: currentSessionId });
 }
 
+function havePython(context: vscode.ExtensionContext): boolean {
+  const p = (context.workspaceState.get(Keys.PythonPath) as string | undefined)?.trim();
+  if (!p) return false;
+  try { require('child_process').execFileSync(p, ['--version'], { stdio: 'ignore' }); return true; }
+  catch { return false; }
+}
+
+function haveScript(context: vscode.ExtensionContext): boolean {
+  const s = (context.workspaceState.get(Keys.ScriptPath) as string | undefined)?.trim();
+  return !!s && fs.existsSync(s);
+}
+
+
+
+
 const LAST_EXPORT_DIR_KEY = 'onthefly.lastExportDir';
 
 function ensurePng(name: string) {
@@ -544,6 +590,27 @@ function timestampSlug() {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 
+type UiLogLike = { text?: string; step?: number | null; ts?: number | null };
+
+function isUiLogLike(v: unknown): v is UiLogLike & Record<string, any> {
+  return !!v && typeof v === 'object';
+}
+// clean up `ts` logs -- python needs more explicit logs but user doesn't
+export function stripUiOnlyFields(rows: unknown): unknown {
+  const cleanOne = (r: unknown): unknown => {
+    if (!isUiLogLike(r)) return r;
+    const { ts, ...rest } = r; // drop ts
+
+    if (typeof rest.text === 'string') {
+      const mentionsStep = /\bstep\b\s*(?:[:#]\s*)?\d+(?:\s*[:#])?/i.test(rest.text);
+      if (mentionsStep) delete (rest as any).step; // drop step to suppress [s:N]
+    }
+    return rest;
+  };
+
+  return Array.isArray(rows) ? rows.map(cleanOne) : cleanOne(rows);
+}
+
 /* ============================ Message handling ============================ */
 
 async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
@@ -560,7 +627,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       if (!picked || !picked[0]) return;
       const p = picked[0].fsPath;
       await ws.update(Keys.ScriptPath, p);
-      scriptConfirmed = true;
       vscode.window.showInformationMessage(`Training script selected: ${path.basename(p)}`);
       post({ type: 'scriptChosen', file: p });
       break;
@@ -569,7 +635,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'setPython': {
       const chosen = m.path || 'python';
       await ws.update(Keys.PythonPath, chosen);
-      pythonConfirmed = true;
       post({ type: 'log', text: `Python set to: ${chosen}` });
       vscode.window.showInformationMessage(`Python interpreter set to: ${chosen}`);
       break;
@@ -674,12 +739,19 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       break;
     }
 
-
     case 'modelNav.select': {
       const id = String((m as any).runId || '').trim();
       if (id) {
         modelNavSelectedRunId = id;
+
         post({ type: 'log', text: `[modelNav] selected: ${id}` });
+
+        try {
+          const rows = getLogs(id); // all phases
+          post({ type: 'logs', run_id: id, rows: stripUiOnlyFields(rows) });
+        } catch (e:any) {
+          console.warn('[onthefly] failed to load logs for selected run', id, e);
+        }
       }
       break;
     }
@@ -687,8 +759,17 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
     case 'requestLogs': {
       try {
-        const rows = getLogs(String((m as any).runId), (m as any).phase);
-        post({ type: 'logs', run_id: String((m as any).runId), rows });
+        const phase = (m as any).phase;
+        const requested = String((m as any).runId || '').trim();
+        const selected = modelNavSelectedRunId && modelNavSelectedRunId.trim();
+        const active   = currentRunId && currentRunId.trim();
+
+        const rid = requested || selected || active || '';
+        let rows = rid ? getLogs(rid, phase) : [];
+        if ((!rows || rows.length === 0) && currentSessionId) {
+          rows = getLogsBySession(currentSessionId, phase);
+        }
+        post({ type: 'logs', run_id: rid || null, rows: stripUiOnlyFields(rows) });
       } catch (e:any) { postErr(e); }
       break;
     }
@@ -706,15 +787,31 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       try {
         const rk = String((m as any).runId || '').trim();
         if (rk) modelNavSelectedRunId = rk;
+
         if (proc) {
           sendCtl({ cmd: 'resume' });
-        } else {
-          post({ type: 'log', text: 'Starting training (via Resume)...' });
-          await startRun(context, lastMode);
+          break;
         }
-      } catch (e: any) { postErr(e); }
+
+        // Use persisted state as source of truth
+        if (!havePython(context)) {
+          vscode.window.showErrorMessage('Set a Python interpreter first.');
+          postStatus(false);
+          break;
+        }
+        if (!haveScript(context)) {
+          vscode.window.showErrorMessage('Choose a Python training script first.');
+          postStatus(false);
+          break;
+        }
+
+        // Only now announce and start
+        post({ type: 'log', text: 'Starting training (via Resume)...' });
+        await startRun(context, lastMode);
+      } catch (e: any) { postErr(e); postStatus(false); }
       break;
     }
+
     case 'fork': sendCtl({ cmd: 'fork', payload: (m as any).payload }); break;
 
     case 'merge': {
@@ -917,7 +1014,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         fs.mkdirSync(bundleDir, { recursive: true });
 
         // NOTE: "modelNav" → we don't keep a separate nav map here; the DB is source of truth.
-        // Grab *every* run_id we know and treat that as the nav list.
+        // Grab every run_id we know and treat that as the nav list.
         const allRuns = (listRuns() as Array<{ run_id: string }>).map(r => String(r.run_id));
         const owners = Array.from(new Set(allRuns)).filter(Boolean);
 
@@ -968,7 +1065,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           // 4) paranoia: ensure every owner has at least *one* checkpoint row pre-bundle.
           //    if any run is missing, scan the save_dir heuristically and backfill.
           try {
-            // best guess at the training script's dir → usually where save_dir lives or near it
             const scriptPath = (context.workspaceState.get(Keys.ScriptPath) as string) || '';
             const saveDirGuess = scriptPath ? path.dirname(scriptPath) : process.cwd();
             const files = fs.existsSync(saveDirGuess) ? fs.readdirSync(saveDirGuess) : [];
@@ -1017,127 +1113,83 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       break;
     }
 
-    case 'loadSession': {
-      try {
-        // Let the user pick either a bundle FOLDER or bundle.json FILE.
-        const initialDir = getInitialExportDir(context);
-        const picked = await vscode.window.showOpenDialog({
-          title: 'Load bundle',
-          canSelectMany: false,
-          canSelectFiles: true,   // allow picking bundle.json directly
-          canSelectFolders: true, // or the bundle directory
-          defaultUri: vscode.Uri.file(initialDir),
-          // No sqlite/db filters — bundles only
-          openLabel: 'Load',
-        });
-        if (!picked || !picked[0]) break;
+  case 'loadSession': {
+    try {
+      const initialDir = getInitialExportDir(context);
+      const picked = await vscode.window.showOpenDialog({
+        title: 'Load bundle',
+        canSelectMany: false,
+        canSelectFiles: true,
+        canSelectFolders: true,
+        defaultUri: vscode.Uri.file(initialDir),
+        openLabel: 'Load',
+      });
+      if (!picked || !picked[0]) break;
 
-        const chosen = picked[0].fsPath;
-        const isDir = fs.existsSync(chosen) && fs.statSync(chosen).isDirectory();
-        await context.globalState.update(
-          LAST_EXPORT_DIR_KEY,
-          isDir ? chosen : path.dirname(chosen)
-        );
+      const chosen = picked[0].fsPath;
+      const isDir = fs.existsSync(chosen) && fs.statSync(chosen).isDirectory();
+      await context.globalState.update(LAST_EXPORT_DIR_KEY, isDir ? chosen : path.dirname(chosen));
 
-        let bundleDir: string | null = null;
-
-        if (isDir) {
-          // Expect bundle.json inside the directory
-          const manifestPath = path.join(chosen, 'bundle.json');
-          if (!fs.existsSync(manifestPath)) {
-            vscode.window.showErrorMessage(`No bundle.json found in folder:\n${chosen}`);
-            break;
-          }
-          bundleDir = chosen;
-        } else {
-          // If a file was picked, it must be bundle.json
-          const base = path.basename(chosen).toLowerCase();
-          if (base !== 'bundle.json') {
-            vscode.window.showErrorMessage(
-              'Unsupported selection. Pick a bundle folder (with bundle.json) or bundle.json itself.'
-            );
-            break;
-          }
-          bundleDir = path.dirname(chosen);
+      let bundleDir: string | null = null;
+      if (isDir) {
+        const manifestPath = path.join(chosen, 'bundle.json');
+        if (!fs.existsSync(manifestPath)) {
+          vscode.window.showErrorMessage(`No bundle.json found in folder:\n${chosen}`);
+          break;
         }
-
-        // Load bundle: copies sqlite into live db folder and rewrites ckpt paths
-        storageLoadBundle(bundleDir, context);
-
-        post({ type: 'sessionLoaded' });
-        post({ type: 'runs', rows: listRuns() });
-
-        const choice = await vscode.window.showInformationMessage(
-          `Bundle loaded from: ${bundleDir}`,
-          'Reveal in Finder/Explorer'
-        );
-        if (choice) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(bundleDir));
-
-      } catch (e: any) {
-        postErr(e);
-      }
-      break;
-    }
-
-    case 'exportSubset': {
-      try {
-        const runId = (m as any).runId || currentRunId;
-        if (!runId) { vscode.window.showWarningMessage('No run selected.'); break; }
-
-        const fmtRaw = String((m as any).format || 'parquet').toLowerCase();
-        const fmt: 'parquet'|'csv'|'feather' =
-          fmtRaw === 'csv' ? 'csv' : (fmtRaw === 'feather' ? 'feather' : 'parquet');
-
-        const initialDir = getInitialExportDir(context);
-        const defName = `subset_${runId}.${fmt === 'feather' ? 'feather' : fmt}`;
-        const defaultUri = vscode.Uri.file(path.join(initialDir, defName));
-        const label = fmt === 'csv' ? 'CSV' : fmt === 'feather' ? 'Feather' : 'Parquet';
-        const ext   = fmt === 'csv' ? 'csv' : fmt === 'feather' ? 'feather' : 'parquet';
-        const filters: { [name: string]: string[] } = { [label]: [ext] };
-
-        const picked = await vscode.window.showSaveDialog({ title: 'Export subset', defaultUri, filters });
-        if (!picked) break;
-
-        await context.globalState.update(LAST_EXPORT_DIR_KEY, path.dirname(picked.fsPath));
-
-        const incoming = (m as any).subset_indices as number[] | undefined;
-        let subset_indices: number[] | undefined =
-          Array.isArray(incoming)
-            ? incoming.map(v => Math.trunc(Number(v))).filter(v => Number.isFinite(v) && v >= 0)
-            : undefined;
-
-        if (!subset_indices || subset_indices.length === 0) {
-          const stored = getRunSubset(String(runId)) || [];
-          if (Array.isArray(stored) && stored.length > 0) {
-            subset_indices = stored.map((n: any) => Number(n) | 0).filter(n => Number.isFinite(n) && n >= 0);
-          }
+        bundleDir = chosen;
+      } else {
+        const base = path.basename(chosen).toLowerCase();
+        if (base !== 'bundle.json') {
+          vscode.window.showErrorMessage(
+            'Unsupported selection. Pick a bundle folder (with bundle.json) or bundle.json itself.'
+          );
+          break;
         }
-
-        const payload: any = {
-          run_id: String(runId),
-          format: fmt,
-          out_path: picked.fsPath,
-        };
-        if (subset_indices && subset_indices.length) payload.subset_indices = subset_indices;
-
-        const data = await sendReq('export_subset', payload, 10 * 60 * 1000);
-
-        const outPath  = String(data?.out_path || picked.fsPath);
-        const rows     = Number(data?.rows || 0);
-        const effFmt   = String(data?.format || fmt).toUpperCase();
-
-        const choice = await vscode.window.showInformationMessage(
-          `Subset exported (${rows} rows, ${effFmt}): ${outPath}`,
-          'Reveal in Finder/Explorer'
-        );
-        if (choice) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(outPath));
-
-        post({ type: 'subsetExported', run_id: String(runId), ...data });
-      } catch (e:any) {
-        postErr(e);
+        bundleDir = path.dirname(chosen);
       }
-      break;
+
+      // Load the bundle into the live DB
+      storageLoadBundle(bundleDir, context);
+
+      for (const s of listSessions()) {
+        post({ type: 'log', text: `[print] session ${s.session_id}: ${getLogsBySession(String(s.session_id)).length} logs` });
+      }
+
+      // Notify UI & refresh runs
+      post({ type: 'sessionLoaded' });
+      const runs = listRuns() as Array<{ run_id: string }>;
+      post({ type: 'runs', rows: runs });
+      try {
+        const sessions = listSessions();
+        post({ type: 'fs.session.list', items: sessions });
+
+        
+        
+
+      } catch {}
+
+      // Hydrate logs for each run so the webview has something to render immediately
+      for (const r of runs) {
+        try {
+          const rows = getLogs(String(r.run_id)); // all phases
+          post({ type: 'logs', run_id: String(r.run_id), rows: stripUiOnlyFields(rows) });
+        } catch (e:any) {
+          console.warn('[onthefly] failed to load logs for run', r.run_id, e);
+        }
+      }
+
+      const choice = await vscode.window.showInformationMessage(
+        `Bundle loaded from: ${bundleDir}`,
+        'Reveal in Finder/Explorer'
+      );
+      if (choice) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(bundleDir));
+
+    } catch (e: any) {
+      postErr(e);
     }
+    break;
+  }
 
 
     case 'resetAll': {
@@ -1170,6 +1222,8 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         // 3) Clear in-memory extension state
         currentRunId = null;
         seenRuns.clear();
+        currentSessionId = null;
+        nativeRunsThisSession.clear();
 
         // 4) Reset storage: close and re-init a fresh DB
         try { closeStorage(); } catch {}
@@ -1211,21 +1265,25 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'sweep') {
   if (proc) { vscode.window.showWarningMessage('A run is already active.'); return; }
 
-  // Require explicit confirmation in *this* panel session
-  if (!pythonConfirmed) {
-    vscode.window.showErrorMessage('Set a Python interpreter first (gear icon).');
+  // Ensure onthefly-ai is available in our private venv (required)
+  try {
+    await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: true });
+  } catch (e: any) {
+    vscode.window.showErrorMessage(`Backend not available: ${e?.message || e}`);
+    postStatus(false);
     return;
   }
-  if (!scriptConfirmed) {
-    vscode.window.showErrorMessage('Choose a Python training script first.');
-    return;
-  }
+
+  // hydrate confirmations from persisted values
+  if (!havePython(context)) { vscode.window.showErrorMessage('Set a Python interpreter first.'); postStatus(false); return; }
+  if (!haveScript(context)) { vscode.window.showErrorMessage('Choose a Python training script first.'); postStatus(false); return; }
+
 
   const ws = context.workspaceState;
   const python = (ws.get(Keys.PythonPath) as string | undefined)?.trim();
   const script = (ws.get(Keys.ScriptPath) as string | undefined)?.trim();
 
-  if (!python) { vscode.window.showErrorMessage('Set a Python interpreter first (gear icon).'); return; }
+  if (!python) { vscode.window.showErrorMessage('Set a Python interpreter first.'); return; }
   if (!script) { vscode.window.showErrorMessage('Choose a Python training script first.'); return; }
   if (!fs.existsSync(script)) {
     vscode.window.showErrorMessage(`Training script not found: ${script}`);
@@ -1233,7 +1291,7 @@ async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'swee
     return;
   }
 
-  const args = ['-u', script, '--seamless'];
+  const args = ['-u', script];
   post({ type: 'log', text: `Spawning: ${python} ${args.join(' ')}` });
 
   const resumeRunId =
@@ -1242,7 +1300,7 @@ async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'swee
     null;
 
   const imported = resumeRunId ? isRunImportedForThisSession(resumeRunId) : false;
-  const resume = imported && resumeRunId ? latestCheckpointForRun(resumeRunId) : null;
+  const resume   = resumeRunId ? latestCheckpointForRun(resumeRunId) : null;
 
   console.log('[onthefly] starting run', { mode, resumeRunId, imported });
   console.log('[onthefly] resume lookup', { resumeRunId, resume });
@@ -1250,8 +1308,9 @@ async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'swee
   const envBlock = {
     ...process.env,
     ONTHEFLY_MODE: mode,
-    ...(imported && resumeRunId ? { ONTHEFLY_RESUME_RUN_ID: resumeRunId } : {}),
-    ...(imported && resume && resume.path ? {
+    // If we have a resume candidate, provide it. Imported heuristic helps, but isn't mandatory.
+    ...(resumeRunId ? { ONTHEFLY_RESUME_RUN_ID: resumeRunId } : {}),
+    ...(resume && resume.path ? {
       ONTHEFLY_INIT_CKPT: resume.path,
       ONTHEFLY_INIT_STEP: String(resume.step ?? 0),
     } : {}),
@@ -1462,7 +1521,7 @@ function handleLine(line: string) {
     const tsMs = (Number(obj.ts) > 0 ? Math.round(Number(obj.ts) * 1000) : Date.now());
 
     // If the raw text already includes "step N", don't also render the UI "s: N" badge.
-    const hasStepInText = /\bstep\s*[:#]?\s*\d+/i.test(text);
+    const hasStepInText = /\bstep\b\s*(?:[:#]\s*)?\d+(?:\s*[:#])?/i.test(text);
     const stepForUI = hasStepInText ? null : step;
 
     try {
@@ -1471,7 +1530,7 @@ function handleLine(line: string) {
     } catch {}
 
     // suppress redundant "s:" in the webview
-    post({ type: 'log', run_id, session_id, level, text, phase, step: stepForUI, epoch, ts: tsMs });
+    post({ type: 'log', run_id, session_id, level, text, phase, step: stepForUI, epoch });
     return;
   }
 

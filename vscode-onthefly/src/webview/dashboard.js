@@ -1484,6 +1484,20 @@ window.addEventListener('message', (e) => {
       if (scriptName) scriptName.textContent = `Chosen Python Script: ${m.file}`;
       break;
 
+    case 'logs': {
+      const rows = Array.isArray(m.rows) ? m.rows : [];
+      // optional: only clear if the run changed
+      clearLogs();
+      for (const r of rows) {
+        const ts  = r.ts ? new Date(r.ts).toLocaleTimeString() : '';
+        const stp = Number.isFinite(r.step) ? ` [s:${r.step}]` : '';
+        const msg = r.text || '';
+        log(`${ts}${stp} ${msg}`.trim());
+      }
+      break;
+    }
+
+
     case 'session_started':
       if (m.run_id) pendingSelectRunId = m.run_id;
       send('requestRuns');

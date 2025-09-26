@@ -57,12 +57,6 @@ class TrainMixin:
                 # Older torch: no weights_only kw → just try normal load
                 blob = torch.load(path, map_location=self.device)
         except Exception as e_safe:
-            # Let the UI know we’re retrying with the unsafe path (trusted checkpoints only)
-            try:
-                self._event({"type":"log","level":"warn",
-                            "text": f"[resume.debug] weights_only/normal load failed, retrying full unpickle for trusted ckpt: {e_safe}"})
-            except Exception:
-                pass
             # Fall back to a full unpickle. Only do this for your own, trusted files.
             if _supports_weights_only:
                 blob = torch.load(path, map_location=self.device, weights_only=False)
@@ -184,16 +178,10 @@ class TrainMixin:
         init_ckpt     = os.getenv("ONTHEFLY_INIT_CKPT") or None
         init_step_env = os.getenv("ONTHEFLY_INIT_STEP") or None
 
-        # DEBUG: echo what we saw from the environment
-        self._event({"type":"log","level":"info",
-                    "text": f"[resume.debug] env: RESUME_RUN_ID={resume_run!r} INIT_CKPT={init_ckpt!r} INIT_STEP={init_step_env!r}"})
-
         # If the UI asked us to resume under a specific run id, adopt it *before* emitting anything.
         if resume_run:
             prev = getattr(self.cfg, "run_name", None)
             self.cfg.run_name = str(resume_run)
-            self._event({"type":"log","level":"info",
-                        "text": f"[resume.debug] adopting run_name from env: {prev!r} → {self.cfg.run_name!r}"})
 
         # Try to restore from the provided checkpoint (if any).
         if init_ckpt:
@@ -213,24 +201,11 @@ class TrainMixin:
                                 "text": f"[resume] restored from {os.path.basename(init_ckpt)}  step={self.step}  epoch={getattr(self,'epoch',0)}"})
                     self._event({"type":"checkpoint_loaded","path": init_ckpt, "step": int(self.step)})
 
-                    # Extra DEBUG: confirm effective values
-                    self._event({"type":"log","level":"info",
-                                "text": f"[resume.debug] post-load: step={self.step} epoch={getattr(self,'epoch',0)} last_val={getattr(self,'_last_val_loss',None)}"})
                 except Exception as e:
                     self._event({"type":"log","level":"error", "text": f"[resume] failed: {e}"})
-            else:
-                # explicit debug if we were told a path that doesn’t exist
-                self._event({"type":"log","level":"warn",
-                            "text": f"[resume.debug] INIT_CKPT provided but missing on disk: {init_ckpt}"})
-        else:
-            self._event({"type":"log","level":"info",
-                        "text": "[resume.debug] no INIT_CKPT provided → cold start"})
 
         # --- 2) Session header & run identity (unchanged) ---
         self._event({"type":"session_started","project": self.cfg.project, "run_name": self.cfg.run_name})
-
-        _main_wall_start = time.perf_counter()
-        _total_compute_s = 0.0
 
         self._event({"type":"log","level":"info","text": f"model session_id={self.session_id}"})
         self._event({"type":"log","level":"info","text": "training"})
@@ -253,11 +228,6 @@ class TrainMixin:
                 self._event({"type": "log", "level": "info", "text": f"epoch {self.epoch}"})
                 self._drain_feature_queue()
 
-                _steps_per_epoch = len(self.train_loader)
-                _slice_size = 50
-                _local_step = 0
-                _slice_accum_compute = 0.0
-
                 for batch in self.train_loader:
                     self._maybe_handle_commands()
                     if not self._running:
@@ -277,14 +247,8 @@ class TrainMixin:
                         break
                     # -------------------------------------------------------------------------------
 
-                    _local_step += 1
-                    _t0 = time.perf_counter()
-                    metrics = self._training_step_fn(batch, self._state())  # compute
+                    metrics = self._training_step_fn(batch, self._state())
                     self._sync_device()
-                    _dt = time.perf_counter() - _t0
-
-                    _total_compute_s += _dt
-                    _slice_accum_compute += _dt
 
                     loss = float(metrics.get("loss", float("inf")))
                     if not math.isfinite(loss):
@@ -300,16 +264,6 @@ class TrainMixin:
 
                     grad_norm = float(metrics.get("grad_norm", 0.0))
                     self.step += 1
-
-                    if (_local_step % _slice_size) == 0:
-                        if _local_step == _slice_size:
-                            _slice_accum_compute = 0.0
-                        else:
-                            start_b = _local_step - _slice_size
-                            end_b   = _local_step
-                            avg = _slice_accum_compute / _slice_size
-                            print(f"[slice] epoch {self.epoch:02d} steps {start_b}-{end_b}  compute_wall={_slice_accum_compute:.3f}s  avg={avg:.4f}s/step")
-                            _slice_accum_compute = 0.0
 
                     self._emit({
                         "type":     "trainStep",
@@ -350,10 +304,6 @@ class TrainMixin:
                 self._event({"type": "epoch_end", "epoch": self.epoch, "val_loss": vloss})
                 self._maybe_suggest_or_do_merge()
                 self.epoch += 1
-
-            _train_wall_s = time.perf_counter() - _main_wall_start
-            print(f"[timing] total_train_compute={_total_compute_s:.2f}s  total_train_wall={_train_wall_s:.2f}s  "
-                f"(~{_total_compute_s/max(1,self.epoch):.2f}s compute/epoch)")
 
             if do_test_after and self.test_loader is not None:
                 self._event({"type": "log", "level": "info", "text": "testing"})
