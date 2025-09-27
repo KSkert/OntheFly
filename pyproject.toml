@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "onthefly-ai"                       # ← pip install onthefly
-version = "0.0.3.post1"
-description = "Local-first, VS Code-driven model development…"
+name = "onthefly-ai"
+version = "0.0.4"
+description = "Human-in-the-Loop ML Training Orchestrator."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
