@@ -1,6 +1,6 @@
 # On The Fly
 
-**On The Fly** is the open‑source ML **orchestration** platform that lets you take control **during** training.
+**On The Fly** is the open‑source ML **orchestration** platform that lets you take control **during** training. We want to reduce Time-to-Detection for failure cases with proactive decisions.
 
 
 ![On‑the‑Fly overview](./docs/images/onthefly-dashboard.png)
