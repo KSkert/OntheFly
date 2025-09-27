@@ -91,18 +91,17 @@ Keep full control with **Automode OFF**. Pause runs, inspect evidence, export su
 **What you can do**
 
 * **Pause/Resume** at any time to take a clean snapshot.
-* **Inspect before acting**: loss tails, clusters (auto‑k), slices, routing/gate loads.
-* **Export subsets** for offline analysis.
+* **Inspect before acting**: View per-sample loss distributions, export subsets for offline analysis.
 * **Approve or edit plan cards** prior to execution.
 * **Compare experts** on target slices.
 * **Merge on your terms** via SWA / Distill / Fisher‑Soup / Adapter‑Fuse.
+* **Merge on your terms** View model parent/children in lineage graph.
 
 **Typical manual loop**
 
 1. Pause when drift or a weak slice appears.
-2. Inspect loss tails, clusters, and slice deltas.
-3. Export a subset (e.g., `region=APAC & volatility>p90`) for a quick notebook check.
-4. Fork a short‑budget specialist.
+2. Inspect loss tails, export a subset for a quick notebook check.
+4. Fork a short‑budget specialist for chosen samples, with desired parameters.
 5. Evaluate on target slices; iterate if needed.
 6. Merge improvements and resume training.
 
