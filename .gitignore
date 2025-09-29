@@ -18,4 +18,11 @@ vscode-onthefly/node_modules/
 EOF
 
 vscode-onthefly/node_modules/
-vscode-onthefly/.vscodeignore
+vscode-onthefly/.vscodeignorei
+cache/
+examples/results/
+examples/AvgImprovement.png
+examples/hugging_face.py
+examples/Results.csv
+examples/second.py
+examples/experiments.py

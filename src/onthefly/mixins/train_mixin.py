@@ -178,7 +178,7 @@ class TrainMixin:
         init_ckpt     = os.getenv("ONTHEFLY_INIT_CKPT") or None
         init_step_env = os.getenv("ONTHEFLY_INIT_STEP") or None
 
-        # If the UI asked us to resume under a specific run id, adopt it *before* emitting anything.
+        # If the UI asked us to resume under a specific run id, adopt it before emitting anything.
         if resume_run:
             prev = getattr(self.cfg, "run_name", None)
             self.cfg.run_name = str(resume_run)

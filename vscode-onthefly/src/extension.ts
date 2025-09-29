@@ -258,7 +258,6 @@ function sendReq(cmd: string, payload: any = {}, timeoutMs = 15000): Promise<any
   });
 }
 
-
 function isRunImportedForThisSession(runId: string): boolean {
   // Imported == NOT created/touched by the current live Python session.
   // If there is no live session yet, treat EVERYTHING as imported.
@@ -545,8 +544,6 @@ function haveScript(context: vscode.ExtensionContext): boolean {
 }
 
 
-
-
 const LAST_EXPORT_DIR_KEY = 'onthefly.lastExportDir';
 
 function ensurePng(name: string) {
@@ -610,6 +607,17 @@ export function stripUiOnlyFields(rows: unknown): unknown {
 
   return Array.isArray(rows) ? rows.map(cleanOne) : cleanOne(rows);
 }
+
+async function switchToRun(context: vscode.ExtensionContext, runId: string) {
+  try { sendCtl({ cmd: 'pause' }); } catch {}
+  try { await new Promise(res => setTimeout(res, 200)); } catch {}
+  try { killProc(); } catch {}
+  // Point selection to the requested run and launch a fresh process
+  modelNavSelectedRunId = runId;
+  currentRunId = runId;
+  await startRun(context, lastMode);
+}
+
 
 /* ============================ Message handling ============================ */
 
@@ -785,32 +793,33 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'pause': sendCtl({ cmd: 'pause' }); break;
     case 'resume': {
       try {
-        const rk = String((m as any).runId || '').trim();
-        if (rk) modelNavSelectedRunId = rk;
+        const requested = String((m as any).runId || '').trim();
+        if (requested) modelNavSelectedRunId = requested;
+
+        // If a process exists and the user is trying to resume a different run,
+        // do a clean switch to avoid GPU/Metal assertion and stale state.
+        const target = modelNavSelectedRunId || currentRunId || null;
+        if (proc && target && currentRunId && target !== currentRunId) {
+          post({ type: 'log', text: `Switching active run: ${currentRunId} → ${target}` });
+          await switchToRun(context, target);
+          break;
+        }
 
         if (proc) {
           sendCtl({ cmd: 'resume' });
           break;
         }
 
-        // Use persisted state as source of truth
-        if (!havePython(context)) {
-          vscode.window.showErrorMessage('Set a Python interpreter first.');
-          postStatus(false);
-          break;
-        }
-        if (!haveScript(context)) {
-          vscode.window.showErrorMessage('Choose a Python training script first.');
-          postStatus(false);
-          break;
-        }
+        // No process → start fresh with currently selected run
+        if (!havePython(context)) { vscode.window.showErrorMessage('Set a Python interpreter first.'); postStatus(false); break; }
+        if (!haveScript(context)) { vscode.window.showErrorMessage('Choose a Python training script first.'); postStatus(false); break; }
 
-        // Only now announce and start
         post({ type: 'log', text: 'Starting training (via Resume)...' });
         await startRun(context, lastMode);
       } catch (e: any) { postErr(e); postStatus(false); }
       break;
     }
+
 
     case 'fork': sendCtl({ cmd: 'fork', payload: (m as any).payload }); break;
 
@@ -1301,9 +1310,11 @@ async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'swee
 
   const imported = resumeRunId ? isRunImportedForThisSession(resumeRunId) : false;
   const resume   = resumeRunId ? latestCheckpointForRun(resumeRunId) : null;
+  
 
-  console.log('[onthefly] starting run', { mode, resumeRunId, imported });
-  console.log('[onthefly] resume lookup', { resumeRunId, resume });
+  console.log('[onthefly] starting run', JSON.stringify({ mode, resumeRunId, imported }, null, 2));
+  console.log('[onthefly] resume lookup', JSON.stringify({ resumeRunId, resume }, null, 2));
+
 
   const envBlock = {
     ...process.env,

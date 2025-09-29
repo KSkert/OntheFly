@@ -72,7 +72,7 @@ Don't run this just yet.
 
 ## Features
 
-* **Mid‑training control & visibility** – Start from Python; control and inspect in VS Code. Pause/resume safely and snapshot metrics/checkpoints/buffers.
+* **Mid‑training control & visibility** – Start training natively from the VS Code dashboard.
 * **Hard‑sample mining** – Stream per‑sample loss (optionally grad‑norm, margin) with robust quantiles; surface loss tails early.
 * **Fork & specialize** – Create short‑budget specialists from high‑loss tails or residual clusters, then route with a lightweight gate.
 * **Merge improvements** – SWA, distillation, Fisher Soup, or adapter fusion; compare experts side‑by‑side before merging.
