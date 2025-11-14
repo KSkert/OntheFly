@@ -90,7 +90,7 @@ Don't run this just yet — you'll start training from the dashboard controls in
 ### Open the VS Code dashboard
 
 1. Open VS Code → Command Palette (`Ctrl/Cmd + Shift + P`).
-2. Select the **“On the Fly: Show Dashboard”** command.
+2. Select the **“OnTheFly: Show Dashboard”** command.
 3. Select your Python interpreter and training script.
 4. Press **▶ Run** to start/monitor training, inspect clusters, and compare experts.
 

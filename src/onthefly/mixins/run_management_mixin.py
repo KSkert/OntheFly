@@ -1,11 +1,10 @@
 from __future__ import annotations
-import os, json, time, warnings
+import os, json, warnings
 from typing import Dict, Any, Optional, List
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from ..ids import _safe_component, _unique_component
-from ..ckpt_utils import _parse_step
+from ..ids import _safe_component
 from ..metrics_utils import _percentile_list
 from ..kmeans_utils import _run_kmeans
 from ..merging import (

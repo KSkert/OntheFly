@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Optional, Callable, Any, Dict, List
-import time, threading, random
+import time, threading
 import torch
 from torch.utils.data import DataLoader
 from queue import Queue
@@ -62,97 +62,18 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
         self._model_factory = _build_model_factory(self.model, model_factory)
         self._embedding_hook_fn = embedding_hook
 
-        # session identity & device
-        self.session_id = f"sess-{_short_hash(f'{project}|{run_name}|{time.time()}', n=12)}"
-        if self.cfg.device: self.device = self.cfg.device
-        elif torch.cuda.is_available(): self.device = "cuda"
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available(): self.device = "mps"
-        else: self.device = "cpu"
-        self.model.to(self.device)
-        self._activation_tracker = ActivationZeroTracker(self.model)
-        self._device_monitor = DeviceStatsMonitor(self.device)
-
-        # loss / amp / scaler
-        self.raw_loss_fn = loss_fn
-        def _wrapped_loss_fn(*args, **kwargs):
-            out = self.raw_loss_fn(*args, **kwargs)
-            from .metrics_utils import _to_scalar_loss
-            return _to_scalar_loss(out, device=self.device)
-        self.loss_fn = _wrapped_loss_fn
-        self.autocast = torch.cuda.amp.autocast if (self.cfg.amp and "cuda" in self.device) else _noop_ctx
-        self.scaler = _SafeScaler(torch.cuda.amp.GradScaler(enabled=(self.cfg.amp and "cuda" in self.device)))
-
-        # state
-        self.step = 0; self.epoch = 0
-        self._running = True; self._paused = False
-        self._event_seq = 0; self._run_gen = 0
-        self._ckpts: List[str] = []
-        self._expected_token_by_owner: Dict[str, str] = {}
-        self._last_val_loss: Optional[float] = None
-        self._halt_evt = threading.Event()
-        self._pause_gen = 0
-        self._pause_ckpt_path: Optional[str] = None
-
-        # snapshots + feature worker infra
-        self._snapshots = SnapshotManager(keep_per_owner=3, default_spill_dir=self.cfg.save_dir)
-        self._snapshots.attach_session(self)
-        self._feature_queue = Queue(maxsize=4)
-        self._FeatureWorkerCtor = FeatureWorker
-
-        # --- determinism policy (don’t touch user order unless asked) ---
-        self._sampler_policy = (data_order_policy or "user").lower()
-        self._enforce_sampler_state = bool(enforce_sampler_state)
-
-        # --- pending feature latch (consumed by FeatureMixin/RunManagement) ---
-        self._pending_feature_feed = None
-        self._pending_feature_owner = None
-        self._pending_feature_step = None
-        self._pending_feature_token = None
-
-        self._feature_sampling_cfg: Dict[str, Any] = dict(
-            psl_every=0,        # off by default: only runs when paused AND nonzero
-            psl_budget=4000,
-            mirror_train=True,
-            amp_for_psl=True,
-            compute_margins=True,
-            compute_embeddings=False,
-            embed_max_dim=256,
+        self.__init__identity_and_device(project, run_name)
+        self.__init__loss_and_scaler(loss_fn)
+        self.__init__runtime_state()
+        self.__init__feature_system()
+        self.__init__control_plane()
+        self.__init__train_context()
+        self.__init__determinism(
+            seed=seed,
+            data_order_policy=data_order_policy,
+            enforce_sampler_state=enforce_sampler_state,
+            deterministic_pauses=deterministic_pauses,
         )
-
-        # bus + router
-        self._bus = ControlBus(); self._router = CommandRouter()
-        self._register_command_handlers()
-        try: self._bus.start()
-        except Exception: pass
-
-        # train hooks & dataset roots
-        self._training_step_fn = self._default_training_step
-        self._validation_step_fn = self._default_validation_step
-        self._train_root_ds = getattr(self.train_loader, "dataset", None)
-        self._active_subset_indices: Optional[List[int]] = None
-
-        # --- determinism policy (don’t touch user order unless asked) ---
-        self._data_order_policy = (data_order_policy or "user").lower()
-        self._enforce_sampler_state = bool(enforce_sampler_state)
-        self._deterministic_pauses = bool(deterministic_pauses)
-
-        # start background feature worker immediately
-        self._spawn_feature_worker()
-
-        # seeding
-        torch.manual_seed(seed)
-        if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
-
-        # 1) Apply user data-order policy (may wrap loaders with a stateful sampler)
-        self._apply_determinism_policy(seed)
-
-        # 2) Install pause/resume determinism guard (skips if sampler is stateful)
-        if self._deterministic_pauses:
-            self._install_determinism_guards(seed)
-        else:
-            self._dl_determinism_managed = False
-            self._det_seed = None
-            self._epoch_batch_idx = 0
 
     # small helpers to keep names intact
     def _run_dir_exists(self, run_name: str) -> bool:
@@ -196,6 +117,106 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
             kwargs["prefetch_factor"] = pf
 
         return DataLoader(**kwargs)
+
+    def __init__identity_and_device(self, project: str, run_name: str) -> None:
+        self.session_id = f"sess-{_short_hash(f'{project}|{run_name}|{time.time()}', n=12)}"
+        if self.cfg.device:
+            self.device = self.cfg.device
+        elif torch.cuda.is_available():
+            self.device = "cuda"
+        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            self.device = "mps"
+        else:
+            self.device = "cpu"
+        self.model.to(self.device)
+        self._activation_tracker = ActivationZeroTracker(self.model)
+        self._device_monitor = DeviceStatsMonitor(self.device)
+
+    def __init__loss_and_scaler(self, loss_fn: Callable) -> None:
+        self.raw_loss_fn = loss_fn
+
+        def _wrapped_loss_fn(*args, **kwargs):
+            out = self.raw_loss_fn(*args, **kwargs)
+            from .metrics_utils import _to_scalar_loss
+            return _to_scalar_loss(out, device=self.device)
+
+        self.loss_fn = _wrapped_loss_fn
+        self.autocast = torch.cuda.amp.autocast if (self.cfg.amp and "cuda" in self.device) else _noop_ctx
+        self.scaler = _SafeScaler(torch.cuda.amp.GradScaler(enabled=(self.cfg.amp and "cuda" in self.device)))
+
+    def __init__runtime_state(self) -> None:
+        self.step = 0
+        self.epoch = 0
+        self._running = True
+        self._paused = False
+        self._event_seq = 0
+        self._run_gen = 0
+        self._ckpts: List[str] = []
+        self._expected_token_by_owner: Dict[str, str] = {}
+        self._last_val_loss: Optional[float] = None
+        self._halt_evt = threading.Event()
+        self._pause_gen = 0
+        self._pause_ckpt_path: Optional[str] = None
+
+    def __init__feature_system(self) -> None:
+        self._snapshots = SnapshotManager(keep_per_owner=3, default_spill_dir=self.cfg.save_dir)
+        self._snapshots.attach_session(self)
+        self._feature_queue = Queue(maxsize=4)
+        self._FeatureWorkerCtor = FeatureWorker
+        self._pending_feature_feed = None
+        self._pending_feature_owner = None
+        self._pending_feature_step = None
+        self._pending_feature_token = None
+        self._feature_sampling_cfg: Dict[str, Any] = dict(
+            psl_every=0,
+            psl_budget=4000,
+            mirror_train=True,
+            amp_for_psl=True,
+            compute_margins=True,
+            compute_embeddings=False,
+            embed_max_dim=256,
+        )
+
+    def __init__control_plane(self) -> None:
+        self._bus = ControlBus()
+        self._router = CommandRouter()
+        self._register_command_handlers()
+        try:
+            self._bus.start()
+        except Exception:
+            pass
+
+    def __init__train_context(self) -> None:
+        self._training_step_fn = self._default_training_step
+        self._validation_step_fn = self._default_validation_step
+        self._train_root_ds = getattr(self.train_loader, "dataset", None)
+        self._active_subset_indices: Optional[List[int]] = None
+
+    def __init__determinism(
+        self,
+        *,
+        seed: int,
+        data_order_policy: Optional[str],
+        enforce_sampler_state: bool,
+        deterministic_pauses: bool,
+    ) -> None:
+        self._data_order_policy = (data_order_policy or "user").lower()
+        self._enforce_sampler_state = bool(enforce_sampler_state)
+        self._deterministic_pauses = bool(deterministic_pauses)
+
+        self._spawn_feature_worker()
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        self._apply_determinism_policy(seed)
+        if self._deterministic_pauses:
+            self._install_determinism_guards(seed)
+        else:
+            self._dl_determinism_managed = False
+            self._det_seed = None
+            self._epoch_batch_idx = 0
 
     
 

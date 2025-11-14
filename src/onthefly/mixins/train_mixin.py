@@ -1,9 +1,7 @@
 from __future__ import annotations
-import os, time, math, threading, random
-from typing import Dict, Any, Optional, Callable, List
+import os, time, math
+from typing import Dict, Any, Optional
 import torch
-from torch.utils.data import DataLoader
-import itertools as _it
 
 from ..device_utils import _sync_device_by_name, _noop_ctx
 from ..scale import _SafeScaler
@@ -13,8 +11,7 @@ from ..runtime_metrics import (
     estimate_batch_size as _estimate_batch_size,
     weight_norm as _weight_norm,
 )
-from ..control import ControlBus, CommandRouter, serve_commands
-from ..snapshots import SnapshotManager
+from ..control import serve_commands
 
 
 def _metric_float(val):

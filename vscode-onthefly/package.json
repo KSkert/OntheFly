@@ -1,10 +1,10 @@
 {
   "name": "onthefly",
-  "displayName": "On the Fly",
-  "description": "Mid-training model adjustment toolkit for PyTorch.",
+  "displayName": "OnTheFly",
+  "description": "Human-in-the-Loop ML Training Orchestrator.",
   "version": "0.1.0",
   "publisher": "lukeskertich",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/KSkert/OntheFly"
@@ -28,7 +28,7 @@
     "commands": [
       {
         "command": "onthefly.showDashboard",
-        "title": "On the Fly: Show Dashboard"
+        "title": "OnTheFly: Show Dashboard"
       }
     ],
     "configuration": {
@@ -47,7 +47,7 @@
         },
         "onthefly.minPythonPackage": {
           "type": "string",
-          "default": "0.0.3.post1",
+          "default": "0.0.5",
           "description": "Minimum onthefly-ai version required by the extension."
         }
       }

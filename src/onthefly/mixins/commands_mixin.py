@@ -6,9 +6,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import contextlib
 
 import torch
-import math
 
-from ..control import CommandRouter, serve_commands
+from ..control import CommandRouter
 from ..ckpt_utils import _parse_step
 from ..data_explorer import export_subset_table, compute_per_sample_losses
 
