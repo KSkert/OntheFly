@@ -366,14 +366,12 @@ class CommandsMixin:
                     ckpts.append(p)
                 paths = ckpts
 
-            mode = str(payload.get("mode", "manual")).lower()
             new_name = str(payload["new_name"]) if payload.get("new_name") else None
 
             new_id = self._merge_from_checkpoints(
                 paths,
                 strategy=strategy,
                 parents=parents,
-                mode=mode,
                 new_name=new_name,
             )
 

@@ -8,7 +8,12 @@ from ..ids import _safe_component, _unique_component
 from ..ckpt_utils import _parse_step
 from ..metrics_utils import _percentile_list
 from ..kmeans_utils import _run_kmeans
-from ..merging import weighted_average_merge, stochastic_weight_averaging, advanced_merge
+from ..merging import (
+    stochastic_weight_averaging,
+    fisher_soup_merge,
+    adapter_fuse_merge,
+)
+
 from ..data_explorer import (
     compute_per_sample_losses,
     compute_embeddings,
@@ -90,17 +95,27 @@ class RunManagementMixin:
             models.append(m)
 
         s = (strategy or "swa").lower()
+
+        # main three strategies
         if s == "swa":
             return stochastic_weight_averaging(models)
-        if s == "weighted":
-            return weighted_average_merge(models, [1.0 / len(models)] * len(models))
-        if s in ("distill", "fisher_soup", "adapter_fuse"):
-            try:
-                return advanced_merge(models, method=s)
-            except TypeError:
-                return advanced_merge(models)
-        if s in ("auto", "advanced"):
-            return stochastic_weight_averaging(models)
+
+        if s == "fisher":
+            # when you have Fisher info, pass fisher_mats here:
+            # fisher_mats = ...
+            # return fisher_soup_merge(models, fisher_mats=fisher_mats)
+            return fisher_soup_merge(models)
+
+        if s == "adapter":
+            return adapter_fuse_merge(models)
+
+        # optional: accept legacy aliases if they ever appear
+        if s == "fisher_soup":
+            return fisher_soup_merge(models)
+        if s == "adapter_fuse":
+            return adapter_fuse_merge(models)
+
+        # fallback: default to SWA
         return stochastic_weight_averaging(models)
 
     # ---- merge with run creation + naming --------------------------------
@@ -110,7 +125,6 @@ class RunManagementMixin:
         *,
         strategy: str = "swa",
         parents: Optional[List[str]] = None,
-        mode: str = "manual",
         new_name: Optional[str] = None,
     ) -> str:
         """
@@ -145,7 +159,6 @@ class RunManagementMixin:
                 "strategy": strategy,
                 "parents": parents or [],
                 "paths": paths,
-                "mode": str(mode).lower(),
             },
         )
 
