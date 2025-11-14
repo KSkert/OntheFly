@@ -1,11 +1,33 @@
-# On The Fly
+# OnTheFly
 
-**On The Fly** is the open-source ML **orchestration** platform offering real-time capabilities during training and insights side-by-sde with your ML development. Take control **during** training, fully offline and portable with no externals, no cloud, or tokens needed. The app supports model management during training -- not after -- letting you reduce Time-to-Detection for failure cases with proactive decisions. Testing can be done any time; training is continuous after testing.
+**OnTheFly** lets you *steer* PyTorch training runs live from VS Code — pause, inspect, fork, merge, and export without ever leaving your IDE or sending data to the cloud.
+
+Today, most training is **fire-and-forget**:
+you start a long run, wait, and only discover failure cases or weak slices *after* it finishes. Fixing them means reruns, one-off notebooks, and manual data slicing.
+
+OnTheFly turns that into an interactive loop:
+
+- watch per-sample loss and slices **while you train**
+- pause to inspect hard examples or drift
+- fork short-budget specialists on rough regions
+- merge improvements back into a single exportable model
+
+All of this runs **fully offline** in a local VS Code extension — no accounts, no tokens, no external services.
 
 ![On-the-Fly overview](./docs/images/dashboard_image.png)
 
 > [!IMPORTANT]
 > **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues.
+
+---
+
+## When should you use OnTheFly?
+
+OnTheFly is aimed at people who:
+
+- train **PyTorch models** (classification, regression, etc.) and want more visibility than TensorBoard/print logs
+- care about **bad slices / drift / outliers** and don't want to wait until the run is over to investigate
+- prefer a **local, offline** workflow inside VS Code rather than wiring up cloud dashboards
 
 ---
 
@@ -63,12 +85,12 @@ quickstart(
 )
 ```
 
-Don't run this just yet, you're going to begin training using the dashboard controls.
+Don't run this just yet — you'll start training from the dashboard controls instead.
 
 ### Open the VS Code dashboard
 
 1. Open VS Code → Command Palette (`Ctrl/Cmd + Shift + P`).
-2. Select the **“On the Fly: Show Dashboard.”** Command.
+2. Select the **“On the Fly: Show Dashboard”** command.
 3. Select your Python interpreter and training script.
 4. Press **▶ Run** to start/monitor training, inspect clusters, and compare experts.
 
@@ -76,24 +98,31 @@ Don't run this just yet, you're going to begin training using the dashboard cont
 
 ## Features
 
-* **Mid-training control & visibility** – Start training natively from the VS Code dashboard.
-* **Hard-sample mining** – Stream per-sample loss (optionally grad-norm, margin) with robust quantiles; surface loss tails early.
-* **Fork & specialize** – Create short-budget specialists from high-loss tails or residual clusters, then route with a lightweight gate.
-* **Merge models** – SWA, distillation, Fisher Soup, or adapter fusion; compare experts side-by-side before merging.
-* **Data export** – One-click export of indices/rows for any slice to CSV/Parquet/JSON.
-* **Ephemeral sessions & exports** – Every session is ephemeral in storage; storage is cleaned whenever a new session begins. Exporting a session is equivalent to saving it.
-* **Backend-mirrored training** – Mirrors training in the app’s backend, encompassing any `torch.nn.Module` (including custom ones) and `DataLoader` workers.
-* **Deterministic distributed runs** – Ensures deterministic actions across distributed set-ups, with a surfaceable deterministic health check-up for monitoring.
-* **Mid-run health check-ups** – Run health check-ups mid-run to detect instability and configuration issues before they cascade.
-* **Continuous training post-testing** – Continue training seamlessly after tests, whether testing was triggered by criteria or by a mid-run decision.
-* **Checkpoint override on import** – Ability to override test checkpoints so that when a session is imported, the final model is always included.
-* **Portable sessions** – All sessions are portable and traceable. Imported sessions can be acted on (e.g., reports, training, testing) just like live ones.
+**Mid-training control & visibility**
+- Start and control training from the VS Code dashboard.
+- Stream per-sample loss (optionally grad-norm, margin) with robust quantiles to surface loss tails early.
+- Run mid-run health check-ups to detect instability and configuration issues before they cascade.
+
+**Fork, specialize, and merge**
+- Fork short-budget specialists from high-loss tails or residual clusters, then route with a lightweight gate.
+- Compare experts side-by-side on target slices.
+- Merge via SWA, distillation, Fisher Soup, or adapter fusion; view model lineage (parent/children) before committing.
+
+**Data & sessions**
+- One-click export of indices/rows for any slice to CSV / Parquet / JSON.
+- Ephemeral sessions: storage is cleared when a new session begins; exporting is how you save.
+- Portable sessions: exported sessions include the final model and can be re-imported to run tests, reports, or further training.
+
+**Training backend**
+- Mirrors training in OnTheFly’s backend for any `torch.nn.Module` (including custom ones) and standard `DataLoader`s.
+- Deterministic distributed runs, with a surfaced determinism “health check” for monitoring.
+- Seamless continuation of training after tests, whether they were triggered automatically or manually.
 
 ---
 
 ## Manual human-in-the-loop
 
-Keep full control with deterministic actions. Inspect evidence, export subsets, then decide when to fork or merge.
+Instead of trusting a long run and hoping for the best, you keep tight control over when to pause, inspect, fork, and merge — with deterministic actions and evidence in front of you.
 
 **What you can do**
 
@@ -101,8 +130,7 @@ Keep full control with deterministic actions. Inspect evidence, export subsets, 
 * **Inspect before acting**: View per-sample loss distributions, export subsets for offline analysis.
 * **Approve or edit plan cards** prior to execution.
 * **Compare experts** on target slices.
-* **Merge on your terms** via SWA / Distill / Fisher-Soup / Adapter-Fuse.
-* **Merge on your terms**: View model parent/children in lineage graph.
+* **Merge on your terms** via SWA / Distill / Fisher Soup / adapter fusion.
 * **Run health check-ups mid-run** to validate determinism, gradients, and metrics before committing to longer budgets.
 * **Export & import sessions** knowing that exported sessions include the final model and can later be imported, tested, and trained further.
 
@@ -140,7 +168,7 @@ If you use this project in research, please cite:
 
 ```bibtex
 @software{onthefly2025,
-  title        = {On The Fly: Human-in-the-Loop ML Orchestrator},
+  title        = {OnTheFly: Human-in-the-Loop ML Orchestrator},
   author       = {Luke Skertich},
   year         = {2025},
   url          = {https://github.com/KSkert/onthefly}
