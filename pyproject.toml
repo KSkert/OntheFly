@@ -3,8 +3,8 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "onthefly-ai"
-version = "0.0.4"
+name = "onthefly_ai"
+version = "0.0.5"
 description = "Human-in-the-Loop ML Training Orchestrator."
 readme = "README.md"
 requires-python = ">=3.9"
