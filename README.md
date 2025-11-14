@@ -1,6 +1,6 @@
 # On The Fly
 
-**On The Fly** is the open-source ML **orchestration** platform that lets you take control **during** training, fully offline, fully portable with no externals, no cloud, or tokens needed. The app supports model management during training -- not after -- letting you reduce Time-to-Detection for failure cases with proactive decisions. Testing can be done any time; training is continuous after testing.
+**On The Fly** is the open-source ML **orchestration** platform offering real-time capabilities during training and insights side-by-sde with your ML development. Take control **during** training, fully offline and portable with no externals, no cloud, or tokens needed. The app supports model management during training -- not after -- letting you reduce Time-to-Detection for failure cases with proactive decisions. Testing can be done any time; training is continuous after testing.
 
 ![On-the-Fly overview](./docs/images/dashboard_image.png)
 
@@ -80,14 +80,14 @@ Don't run this just yet, you're going to begin training using the dashboard cont
 * **Hard-sample mining** – Stream per-sample loss (optionally grad-norm, margin) with robust quantiles; surface loss tails early.
 * **Fork & specialize** – Create short-budget specialists from high-loss tails or residual clusters, then route with a lightweight gate.
 * **Merge models** – SWA, distillation, Fisher Soup, or adapter fusion; compare experts side-by-side before merging.
-* **Data export** – One-click export of indices/rows for any slice/cluster/tail to CSV/Parquet/JSON for notebooks, SQL, or BI tools.
+* **Data export** – One-click export of indices/rows for any slice to CSV/Parquet/JSON.
 * **Ephemeral sessions & exports** – Every session is ephemeral in storage; storage is cleaned whenever a new session begins. Exporting a session is equivalent to saving it.
 * **Backend-mirrored training** – Mirrors training in the app’s backend, encompassing any `torch.nn.Module` (including custom ones) and `DataLoader` workers.
 * **Deterministic distributed runs** – Ensures deterministic actions across distributed set-ups, with a surfaceable deterministic health check-up for monitoring.
 * **Mid-run health check-ups** – Run health check-ups mid-run to detect instability and configuration issues before they cascade.
 * **Continuous training post-testing** – Continue training seamlessly after tests, whether testing was triggered by criteria or by a mid-run decision.
 * **Checkpoint override on import** – Ability to override test checkpoints so that when a session is imported, the final model is always included.
-* **Portable, traceable sessions** – All sessions are portable and traceable. Imported sessions can be acted on (e.g., reports, training, testing) just like live ones.
+* **Portable sessions** – All sessions are portable and traceable. Imported sessions can be acted on (e.g., reports, training, testing) just like live ones.
 
 ---
 
@@ -123,8 +123,8 @@ Keep full control with deterministic actions. Inspect evidence, export subsets, 
 1. Train a compact **generalist** on all data.
 2. **Hard-sample mining** flags high-loss examples online.
 3. **Clustering** groups hard samples into candidate regimes.
-4. Train **per-regime specialists**.
-5. Learn a **gating network** to mix experts.
+4. Boost rough areas of the loss curve by forking specialists.
+5. Choose a **gating network** to unify experts.
 6. **Benchmark fairly** against a monolithic baseline with matched compute.
 
 
