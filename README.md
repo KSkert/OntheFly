@@ -1,4 +1,3 @@
-````markdown
 # On The Fly
 
 **On The Fly** is the open-source ML **orchestration** platform that lets you take control **during** training. We want to reduce Time-to-Detection for failure cases with proactive decisions.
@@ -16,7 +15,7 @@
 
 ```bash
 pip install onthefly-ai
-````
+```
 
 **Requirements**
 
@@ -204,7 +203,4 @@ If you use this project in research, please cite:
   year         = {2025},
   url          = {https://github.com/KSkert/onthefly}
 }
-```
-
-```
 ```
