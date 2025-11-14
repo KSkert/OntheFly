@@ -173,7 +173,7 @@
     .fs-helpMark {
       position: absolute; top: -5px; right: -25px;
       width: 16px; height: 16px; border-radius: 9999px;
-      background: var(--badge-bg); color: var(--badge-fg);
+      background: var(--btn-bg); color: var(--btn-fg);
       font-weight: 800; font-size: 10px; display: inline-flex; align-items: center; justify-content: center;
       box-shadow: none; z-index: 2; cursor: default;
     }
@@ -191,15 +191,131 @@
     }
     .fs-helpMark:hover::after, .fs-helpMark:hover::before { opacity: 1; transform: translateY(0); }
 
+    .chartTitle.fs-helpWrap {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      position: relative;
+    }
+    .chartTitle.fs-helpWrap .fs-helpMark {
+      position: relative;
+      top: auto;
+      right: auto;
+      width: 16px;
+      height: 16px;
+      font-size: 10px;
+      background: var(--btn-bg);
+      color: var(--btn-fg);
+      cursor: default;
+    }
+    .chartTitle.fs-helpWrap .fs-helpMark::after {
+      top: -30px;
+      right: auto;
+      left: 0;
+      transform: translateY(4px);
+    }
+    .chartTitle.fs-helpWrap .fs-helpMark::before {
+      top: -8px;
+      right: auto;
+      left: 10px;
+    }
+    .chartTitle.fs-helpWrap .fs-helpMark:hover::after {
+      transform: translateY(0);
+    }
+    .chartTitle.fs-helpWrap .fs-helpMark:hover::before {
+      transform: translateY(0);
+    }
+
     /* ---------- Charts ---------- */
     .chartsRow { display: block; }
     .chartsMain { display: flex; flex-direction: column; gap: 12px; }
-    .chartWrap { position: relative; border: 1px solid var(--border); border-radius: 8px; padding: 8px; overflow: hidden; background: var(--panel-bg); min-height: 220px; }
+    .chartWrap {
+      position: relative;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px;
+      overflow: visible;
+      background: var(--panel-bg);
+      min-height: 220px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
     canvas { display: block; width: 100%; max-width: 100%; }
-    #lossChart { height: 240px; }
-    #valLossChart, #smoothChart { height: 340px; }
-    #lossDistChart { height: 260px; }
-    .chartTitle { margin: 6px 2px 2px; font-weight: 700; font-size: 14px; letter-spacing: .2px; }
+    .chartTitle { margin: 6px 2px 2px; font-weight: 700; font-size: 14px; letter-spacing: .2px; position: relative; z-index: 2; }
+    /* Let the container define the height */
+    .chartWrap[data-chart="loss"]    { height: 340px; }
+    .chartWrap[data-chart="valloss"] { height: 340px; }
+
+    /* Your histogram sits in the reportRow’s chartWrap */
+    .reportRow .chartWrap { height: 260px; }
+
+    /* Let the chart canvas consume the remaining vertical space inside each wrapper */
+    .chartWrap canvas {
+      flex: 1;
+      width: 100%;
+      height: auto;
+      min-height: 0;
+    }
+    .regionHandleLayer {
+      position: absolute;
+      z-index: 4;
+      pointer-events: auto;
+    }
+    .regionHandle {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      width: 14px;
+      border-radius: 9999px;
+      background: linear-gradient(180deg, var(--focus, #fff), var(--btn-bg));
+      box-shadow: 0 0 0 2px var(--border);
+      transform: translateX(-50%);
+      cursor: ew-resize;
+      pointer-events: auto;
+    }
+    .regionHandle::after {
+      content: '';
+      position: absolute;
+      inset: 10px 3px;
+      border-radius: 9999px;
+      background: rgba(0,0,0,0.25);
+    }
+    .regionHandle:active {
+      box-shadow: 0 0 0 3px var(--focus, #fff);
+    }
+
+
+
+    /* === NEW: Metrics dropdown and dynamic stack === */
+    .chartsToolbar { display: flex; justify-content: flex-end; align-items: center; margin: 2px 0 6px; }
+    #metricsSelect { min-width: 170px; }
+    .chartsStack { display: flex; flex-direction: column; gap: 12px; }
+    .chartsStack .chartWrap { flex: 0 0 auto; height: 280px; }
+    .metricCanvas {
+      flex: 1;
+      min-height: 0;
+      display: block;
+    }
+    .chartCloseBtn {
+      position: absolute; left: 6px; top: 6px; width: 28px; height: 28px;
+      border-radius: 6px; border: 1px solid var(--border);
+      background: var(--panel-bg); color: var(--fg);
+      line-height: 1; font-size: 16px; font-weight: 700;
+      z-index: 3;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .metricWrap .chartTitle {
+      padding-left: 38px;
+    }
+    .chartWrap[data-chart] .chartTitle {
+      padding-left: 38px;
+      margin-top: 0;
+    }
+    .chartCloseBtn:hover { transform: translateY(-1px) scale(1.04); }
+    .chartCloseBtn:active { transform: translateY(0) scale(0.96); }
 
     /* ---------- Report ---------- */
     .reportRow { display: grid; grid-template-columns: 3fr 1fr; gap: 12px; align-items: start; margin-top: 12px; }
@@ -356,6 +472,52 @@
       background: transparent;       /* belt-and-braces */
       display: block;
     }
+
+
+    /* ------- Health Monitor (scoped by class prefix hm-) ------- */
+    .hmBar > button { white-space: nowrap; }
+
+    .hmDock{
+      display: flex; gap: 10px;
+      overflow-x: auto; overflow-y: hidden;
+      padding: 4px 2px 8px;
+      scroll-snap-type: x proximity;
+      scrollbar-width: thin;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-bg);
+      min-height: 180px;
+    }
+
+    .hmCard{
+      flex: 0 0 auto;
+      min-width: clamp(280px, 38vw, 520px);
+      max-width: 620px;
+      scroll-snap-align: start;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--panel-bg);
+      box-shadow: none;
+      display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+
+    .hmCardHeader{
+      display:flex; align-items:center; justify-content:space-between;
+      padding: 8px 10px; border-bottom: 1px solid var(--border);
+      background: var(--panel-bg);
+    }
+    .hmTitle{ font-weight: 700; letter-spacing: .2px; }
+    .hmClose{ width: 28px; height: 28px; line-height: 1; font-size: 18px; }
+
+    .hmBody{
+      padding: 10px;
+      min-height: 140px;
+      color: var(--muted);
+    }
+
+    /* subtle focus/peek when brought into view */
+    .hmCard.is-peek{ outline: 2px solid var(--focus); outline-offset: -2px; }
   </style>
 
 </head>
@@ -378,7 +540,8 @@
     <section class="customBar" id="customBar" aria-label="Customize dashboard layout">
       <div class="customList" id="customList" aria-live="polite">
         <label><input type="checkbox" data-widget="w-top" checked> Workspace</label>
-        <label><input type="checkbox" data-widget="w-autofork" checked> AutoFork</label>
+        <!-- <label><input type="checkbox" data-widget="w-autofork" checked> AutoFork</label> -->
+        <label><input type="checkbox" data-widget="w-health" checked> Health Monitoring</label>
         <label><input type="checkbox" data-widget="w-runs" checked> Models & Controls</label>
         <label><input type="checkbox" data-widget="w-charts" checked> Training Metrics</label>
         <label><input type="checkbox" data-widget="w-report" checked> Loss Distribution by Sample</label>
@@ -402,7 +565,6 @@
             <label>Python:</label>
             <input id="pyPath" placeholder="python" />
             <button id="btnSetPy">Save Python Path</button>
-            <button id="btnSaveCkpt">Save ckpt</button>
             <button id="btnAutoSave">Export Session…</button>
             <button id="btnLoad">Load Session…</button>
           </div>
@@ -410,110 +572,7 @@
       </div>
 
       <!-- === Widget: AutoFork === -->
-      <div class="widget col-12" data-widget-id="w-autofork">
-        <div class="panel" id="autoForkPanel">
-          <div class="widgetHeader"><div class="widgetTitle">AutoFork</div></div>
-
-          <div class="row" style="justify-content:space-between; align-items:center; margin-bottom:8px">
-            <div class="row" style="margin:0">
-              <button id="btnAutoForkOn"  class="afToggleBtn" title="Enable AutoFork with defaults">ON</button>
-              <button id="btnAutoForkOff" class="afToggleBtn" title="Disable AutoFork">OFF</button>
-              <button id="btnAutoForkApply" title="Apply the current rules to the session">Apply Rules</button>
-              <label>Variant
-                <input id="afVariantIndex" type="number" value="0" min="0" style="width:72px" />
-              </label>
-            </div>
-          </div>
-
-          <div id="afTabs" class="afTabs">
-            <div id="afTabButtons" class="afTabButtons" role="tablist" aria-label="AutoFork tabs">
-              <button type="button" data-tab="forking"  class="afTabBtn" role="tab" aria-selected="true">Forking</button>
-              <button type="button" data-tab="sampling" class="afTabBtn" role="tab" aria-selected="false">Sampling</button>
-              <button type="button" data-tab="merging"  class="afTabBtn" role="tab" aria-selected="false">Merging</button>
-              <button type="button" data-tab="plan"     class="afTabBtn" role="tab" aria-selected="false">Plan</button>
-            </div>
-
-            <!-- Forking -->
-            <section class="afTabPanel" data-tab="forking" role="tabpanel">
-              <div class="afSectionTitle">Triggers & Limits</div>
-              <div class="afGrid">
-                <label><input id="afEnabled" type="checkbox" /> Enabled</label>
-                <label>Loss plateau patience <input id="afLossPlateauPatience" type="number" step="1" /></label>
-                <label>Loss plateau delta <input id="afLossPlateauDelta" type="number" step="0.0001" /></label>
-                <label>Per-sample window <input id="afPerSampleWindow" type="number" step="1" /></label>
-                <label>k-means k <input id="afKmeansK" type="number" step="1" /></label>
-                <label>Dead cluster z <input id="afDeadClusterZ" type="number" step="0.1" /></label>
-                <label>High-loss quantile <input id="afHighLossQuantile" type="number" step="0.01" min="0" max="1" /></label>
-                <label>Spike σ <input id="afSpikeSigma" type="number" step="0.1" /></label>
-                <label>EMA decay <input id="afEmaDecay" type="number" step="0.001" min="0" max="1" /></label>
-                <label>Max parallel children <input id="afMaxParallelChildren" type="number" step="1" min="0" /></label>
-                <label>Fork cooldown (steps) <input id="afForkCooldownSteps" type="number" step="1" min="0" /></label>
-                <label>Gate epochs <input id="afGateEpochs" type="number" step="1" min="0" /></label>
-              </div>
-            </section>
-
-            <!-- Sampling -->
-            <section class="afTabPanel" data-tab="sampling" role="tabpanel" hidden>
-              <div class="afSectionTitle">PSL & Feature Sampling</div>
-              <div class="afGrid">
-                <label>PSL every <input id="afPslEvery" type="number" step="1" min="1" /></label>
-                <label>PSL budget <input id="afPslBudget" type="number" step="1" min="0" /></label>
-                <label><input id="afMirrorTrain" type="checkbox" /> Mirror train</label>
-                <label><input id="afAmpForPsl" type="checkbox" /> AMP for PSL</label>
-
-                <label class="checkbox" style="grid-column: span 2;">
-                  <input type="checkbox" id="afComputeMargins" />
-                  Compute margins (top-2 logit gap)
-                </label>
-
-                <label class="checkbox" style="grid-column: span 2;">
-                  <input type="checkbox" id="afComputeEmbeddings" />
-                  Compute embeddings (via embedding_hook)
-                </label>
-
-                <label style="grid-column: span 2;">
-                  Embed max dim
-                  <input id="afEmbedMaxDim" type="number" step="1" min="1" value="256" style="width:90px" />
-                </label>
-              </div>
-            </section>
-
-            <!-- Merging -->
-            <section class="afTabPanel" data-tab="merging" role="tabpanel" hidden>
-              <div class="afSectionTitle">Merging & Backpressure</div>
-              <div class="afGrid">
-                <label><input id="afMergeOnPlateau" type="checkbox" /> Merge on plateau</label>
-                <label>Reunify every (steps) <input id="afReunifyEverySteps" type="number" step="1" min="0" /></label>
-                <label>Min child steps before merge <input id="afMinChildStepsBeforeMerge" type="number" step="1" min="0" /></label>
-                <label>Merge uplift threshold <input id="afMergeUpliftThreshold" type="number" step="0.0001" /></label>
-                <label>
-                  Merge method
-                  <select id="afMergeMethodSelector">
-                    <option value="swa">SWA</option>
-                    <option value="distill">Knowledge distillation</option>
-                    <option value="fisher_soup">Fisher-weighted soup</option>
-                    <option value="adapter_fuse">Adapter fusion</option>
-                    <option value="none">Disable merges</option>
-                  </select>
-                </label>
-                <label>Inter-fork improvement <input id="afInterForkImprovement" type="number" step="0.0001" /></label>
-                <label>Fork backpressure α <input id="afForkBackpressureAlpha" type="number" step="0.0001" min="0" max="1" /></label>
-              </div>
-            </section>
-
-            <!-- Plan -->
-            <section class="afTabPanel" data-tab="plan" role="tabpanel" hidden>
-              <div class="afSectionTitle">Suggested Plan</div>
-              <pre id="afPlan" class="note afPlanBox">(no plan yet)</pre>
-              <div class="row" style="margin-top:8px">
-                <button id="btnAutoForkExec" title="Execute the latest suggested plan">
-                  Execute Plan
-                </button>
-              </div>
-            </section>
-          </div>
-        </div>
-      </div>
+      <!-- (kept collapsed in markup) -->
 
       <!-- === Widget: Runs & Controls === -->
       <div class="widget col-12" data-widget-id="w-runs">
@@ -568,8 +627,30 @@
 
           <div class="chartsRow">
             <div class="chartsMain">
-              <!-- Loss chart -->
-              <div class="chartWrap">
+
+              <!-- NEW: Metrics dropdown (top-right, above loss chart) -->
+              <div class="chartsToolbar">
+                <label for="metricsSelect" class="sr-only">Toggle training metrics</label>
+                <select id="metricsSelect" aria-label="Metrics toggle" title="-- Metrics --">
+                  <option value="" selected disabled>-- Metrics --</option>
+                  <option value="show_all">Show All</option>
+                  <option value="loss">Training Loss</option>
+                  <option value="valloss">Validation Loss</option>
+                  <option value="accuracy">Accuracy</option>
+                  <option value="lr">Learning Rate</option>
+                  <option value="grad_norm">Gradient Norm</option>
+                  <option value="weight_norm">Weight Norm</option>
+                  <option value="activation_zero_frac">Activation Sparsity</option>
+                  <option value="throughput">Throughput</option>
+                  <option value="mem_vram">Memory</option>
+                  <option value="gpu_util">GPU Util</option>
+                </select>
+              </div>
+
+              <!-- Loss chart (always visible) -->
+              <div class="chartWrap" data-chart="loss">
+                <button class="chartCloseBtn" data-close-chart="loss" title="Close" aria-label="Close loss chart">✕</button>
+                <div class="chartTitle">Training Loss</div>
                 <button id="exportLossBtn" class="exportBtn" title="Export PNG" aria-label="Export loss chart">
                   <svg class="exportIcon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                     <path d="M12 3v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -581,9 +662,11 @@
                 <canvas id="lossChart"></canvas>
               </div>
 
-              <!-- Validation / GUR chart -->
-              <div class="chartWrap">
-                <button id="exportValLossBtn" class="exportBtn" title="Export PNG" aria-label="Export GUR chart">
+              <!-- Validation chart -->
+              <div class="chartWrap" data-chart="valloss">
+                <button class="chartCloseBtn" data-close-chart="valloss" title="Close" aria-label="Close validation loss chart">✕</button>
+                <div class="chartTitle">Validation Loss</div>
+                <button id="exportValLossBtn" class="exportBtn" title="Export PNG" aria-label="Export Val chart">
                   <svg class="exportIcon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
                     <path d="M12 3v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                     <path d="M8 9l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -593,6 +676,10 @@
                 </button>
                 <canvas id="valLossChart"></canvas>
               </div>
+              
+              <!-- NEW: Dynamic metrics stack (charts appear here, under loss) -->
+              <div id="metricsStack" class="chartsStack" aria-live="polite"></div>
+
 
               <!-- Report heading -->
               <h3 class="chartTitle">Loss Distribution by Sample</h3>
@@ -620,12 +707,29 @@
         </div>
       </div>
 
+      <div class="widget col-12" data-widget-id="w-health">
+        <div class="panel" id="healthMonitorPanel">
+          <div class="widgetHeader">
+            <div class="widgetTitle">Health Monitoring</div>
+          </div>
+
+          <!-- Controls -->
+          <div class="row hmBar" style="margin-bottom:8px">
+            <button id="btnActivationsHealth" title="Inspect Activation Health">Activation Health</button>
+            <button id="btnDeterminismHealth" title="Inspect Determinism Health">Determinism Health</button>
+            <button id="btnNumericsHealth" title="Inspect Numerics Health">Numerics Health</button>
+            <button id="btnDistHealth" title="Inspect Distribution Health">Dist Health</button>
+            <button id="btnThroughputHealth" title="Inspect Throughput Health">Throughput Health</button>
+          </div>
+
+          <!-- Sliding dock -->
+          <div class="hmDock" role="region" aria-label="Health panels dock"></div>
+        </div>
+      </div>
+
       <!-- === Widget: Notes === -->
       <div class="widget col-12" data-widget-id="w-report">
-        <div class="panel">
-          <div class="widgetHeader"><div class="widgetTitle">Notes</div></div>
-          <p class="note">Observations and auto-generated notes will appear alongside the histogram above.</p>
-        </div>
+        <!-- (intentionally blank; content sits above in reportRow) -->
       </div>
 
       <!-- === Widget: Log === -->
@@ -663,47 +767,12 @@
     </div>
   </div>
 
-  <!-- ===== Theme → Chart.js bridge ===== -->
-  <script nonce="__NONCE__">
-    (function () {
-      function applyChartTheme() {
-        var cs = getComputedStyle(document.documentElement);
-        var text = (cs.getPropertyValue('--chart-text') || cs.getPropertyValue('--fg')).trim();
-        var grid = (cs.getPropertyValue('--chart-grid') || cs.getPropertyValue('--border')).trim();
-        if (window.Chart) {
-          Chart.defaults.color = text;
-          Chart.defaults.borderColor = grid;
-          Chart.defaults.plugins = Chart.defaults.plugins || {};
-          Chart.defaults.plugins.legend = Chart.defaults.plugins.legend || {};
-          Chart.defaults.plugins.legend.labels = Chart.defaults.plugins.legend.labels || {};
-          Chart.defaults.plugins.legend.labels.color = text;
-          Chart.defaults.plugins.tooltip = Chart.defaults.plugins.tooltip || {};
-          Chart.defaults.plugins.tooltip.titleColor = text;
-          Chart.defaults.plugins.tooltip.bodyColor = text;
-          Chart.defaults.scales = Chart.defaults.scales || {};
-          ['linear', 'logarithmic', 'category', 'time', 'timeseries'].forEach(function (type) {
-            Chart.defaults.scales[type] = Chart.defaults.scales[type] || {};
-            Chart.defaults.scales[type].grid = Chart.defaults.scales[type].grid || {};
-            Chart.defaults.scales[type].grid.color = grid;
-            Chart.defaults.scales[type].ticks = Chart.defaults.scales[type].ticks || {};
-            Chart.defaults.scales[type].ticks.color = text;
-          });
-        }
-      }
-      applyChartTheme();
-      var mql = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
-      if (mql && mql.addEventListener) mql.addEventListener('change', applyChartTheme);
-      else if (mql && mql.addListener) mql.addListener(applyChartTheme);
-      window.addEventListener('DOMContentLoaded', applyChartTheme);
-    })();
-  </script>
-
   <!-- ===== Expose key variables & ID registry for other files ===== -->
   <script nonce="__NONCE__">
     window.OnTheFlyExports = {
       version: '1.0.0-rework',
       ids: {
-        btnChoose:'btnChoose', scriptName:'scriptName', pyPath:'pyPath', btnSetPy:'btnSetPy', btnSaveCkpt:'btnSaveCkpt', btnAutoSave:'btnAutoSave', btnLoad:'btnLoad', btnTestNow: 'btnTestNow',
+        btnChoose:'btnChoose', scriptName:'scriptName', pyPath:'pyPath', btnSetPy:'btnSetPy', btnAutoSave:'btnAutoSave', btnLoad:'btnLoad', btnTestNow: 'btnTestNow',
         autoForkPanel:'autoForkPanel',
         afEnabled:'afEnabled',
         afLossPlateauPatience:'afLossPlateauPatience',
@@ -736,21 +805,19 @@
         afMergeMethodSelector: 'afMergeMethodSelector',
         afInterForkImprovement:'afInterForkImprovement',
         afForkBackpressureAlpha:'afForkBackpressureAlpha',
-        runSel:'runSel', btnOpenDag:'btnOpenDag', btnRefreshRuns:'btnRefreshRuns', btnResume:'btnResume', btnPause:'btnPause', btnRewind:'btnRewind', rewindSteps:'rewindSteps',
+        runSel:'runSel', btnOpenDag:'btnOpenDag', btnRefreshRuns:'btnRefreshRuns', btnResume:'btnResume', btnPause:'btnPause',
         btnPrevModel:'btnPrevModel', btnNextModel:'btnNextModel', btnGenerateReport:'btnGenerateReport', btnSelectRegion:'btnSelectRegion', modelLabel:'modelLabel',
+        btnDistHealth:'btnDistHealth', btnActivationsHealth:'btnActivationsHealth', btnNumericsHealth:'btnNumericsHealth', btnDeterminismHealth:'btnDeterminismHealth', btnThroughputHealth:'btnThroughputHealth',
         lossChart:'lossChart', valLossChart:'valLossChart', lossDistChart:'lossDistChart',
         reportMeta:'reportMeta', reportNote:'reportNote',
         log:'log',
         dagOverlay:'dagOverlay', dagSvg:'dagSvg', dagStrategy:'dagStrategy', dagMergeBtn:'dagMergeBtn', dagClose:'dagClose',
-        exportLossBtn:'exportLossBtn', exportValLossBtn:'exportValLossBtn', exportLossDistBtn:'exportLossDistBtn'
+        exportLossBtn:'exportLossBtn', exportValLossBtn:'exportValLossBtn', exportLossDistBtn:'exportLossDistBtn',
+        metricsSelect:'metricsSelect', metricsStack:'metricsStack'
       },
       cssVars: ['--bg','--fg','--muted','--panel-bg','--panel-elev','--border','--btn-bg','--btn-fg','--btn-shadow','--btn-shadow-hover','--chart-text','--chart-grid'],
       widgets: ['w-top','w-autofork','w-runs','w-charts','w-report','w-log']
-    };
-
-    window.FS = {
-      el(name){ const id = (window.OnTheFlyExports && window.OnTheFlyExports.ids[name]) || name; return document.getElementById(id); },
-      css(name){ return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+      
     };
   </script>
 
@@ -788,13 +855,7 @@
         saveState(s);
       });
 
-      function wireDnD(){
-        widgets().forEach(w => {
-          w.addEventListener('dragstart', onDragStart);
-          w.addEventListener('dragend', onDragEnd);
-        });
-        grid.addEventListener('dragover', onDragOver);
-      }
+      function wireDnD(){ /* no-op for now */ }
 
       applyState();
       wireDnD();
@@ -803,65 +864,20 @@
 
   <!-- ===== Script placeholders injected by host ===== -->
   <script nonce="__NONCE__" src="__CHART_JS__"></script>
+  <script nonce="__NONCE__" src="__CHART_UTILS__"></script>
+  <script nonce="__NONCE__" src="__CHART_PLUGINS_JS__"></script>
+  <script nonce="__NONCE__" src="__CHART_CREATION_JS__"></script>
+  <script nonce="__NONCE__" src="__CHART_STREAM_JS__"></script>
+  <script nonce="__NONCE__" src="__LOG_BUFFER_JS__"></script>
+  <script nonce="__NONCE__" src="__IPC_CONTROLS_JS__"></script>
+  <script nonce="__NONCE__" src="__CHART_BOOTSTRAP_JS__"></script>
+  <script nonce="__NONCE__" src="__CHART_REPORT_JS__"></script>
+  <script nonce="__NONCE__" src="__REPORT_SELECTION_JS__"></script>
   <script nonce="__NONCE__" src="__DAG_LAYOUT_JS__"></script>
-
-  <!-- ===== Inline helpers ===== -->
-  <script nonce="__NONCE__">
-  (function () {
-    var btn = document.getElementById('btnGenerateReport');
-    if (!btn || btn.dataset.fsHelpWrapped) return;
-
-    var wrap = document.createElement('span');
-    wrap.className = 'fs-helpWrap';
-    btn.parentElement.insertBefore(wrap, btn);
-    wrap.appendChild(btn);
-
-    var mark = document.createElement('span');
-    mark.className = 'fs-helpMark';
-    mark.textContent = '?';
-    mark.setAttribute('data-tip', 'Generate this report to manually fork.');
-    wrap.appendChild(mark);
-
-    btn.dataset.fsHelpWrapped = '1';
-  })();
-  </script>
-
-  <script nonce="__NONCE__">
-  (function () {
-    function moveAndToggle() {
-      var btn = document.getElementById('btnSelectRegion');
-      var aside = document.querySelector('.reportSide');
-      if (!btn || !aside) return;
-
-      aside.appendChild(btn);
-      btn.style.display = 'none';
-
-      var meta = document.getElementById('reportMeta');
-      var note = document.getElementById('reportNote');
-
-      function hasReport() {
-        var metaTxt = (meta && meta.textContent || '').trim();
-        var noteTxt = (note && note.textContent || '').trim();
-        return (metaTxt && metaTxt !== '—') || (noteTxt.length > 0);
-      }
-
-      function updateVisibility() { btn.style.display = hasReport() ? '' : 'none'; }
-
-      var gen = document.getElementById('btnGenerateReport');
-      if (gen) gen.addEventListener('click', function () { setTimeout(updateVisibility, 60); });
-
-      var mo = new MutationObserver(updateVisibility);
-      if (meta) mo.observe(meta, { childList: true, characterData: true, subtree: true });
-      if (note) mo.observe(note, { childList: true, characterData: true, subtree: true });
-
-      updateVisibility();
-    }
-
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', moveAndToggle);
-    else moveAndToggle();
-  })();
-  </script>
-
+  <script nonce="__NONCE__" src="__DAG_RENDER_JS__"></script>
+  <script nonce="__NONCE__" src="__HEALTH_MONITOR_JS__"></script>
+  <!-- <script nonce="__NONCE__" src="__AUTOFORK_PANEL_JS__"></script> -->
+  <script nonce="__NONCE__" src="__RUN_STATE_JS__"></script>
   <script nonce="__NONCE__" src="__DASHBOARD_JS__"></script>
 </body>
 </html>

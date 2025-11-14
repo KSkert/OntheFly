@@ -51,11 +51,11 @@ class _LatestOnlyTask:
 class FeatureWorker(threading.Thread):
     """
     Loads a snapshot, computes budgeted per-sample features, and returns a
-    *feature pack* to the session. The SESSION's single AutoForkEngine consumes
-    these features on the next train step. No engine runs here -> no second brain.
+    *feature pack* to the session. The main session consumes these features on
+    the next train step; this worker only produces data.
 
-    The pack schema mirrors AutoForkEngine.observe_batch(...) inputs so the
-    session can feed them atomically along with its batch-level stats.
+    The pack schema mirrors the observe_batch(...) inputs handled by the session
+    so it can feed them atomically along with its batch-level stats.
     """
     def __init__(
         self,

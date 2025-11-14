@@ -13,7 +13,12 @@ class CheckpointMixin:
     _ckpts: list
     _snapshots: SnapshotManager
 
-    def _save_ring_checkpoint(self) -> str:
+
+    def _save_ring_checkpoint(self, *, force: bool = False) -> Optional[str]:
+        # Respect your "only when paused" rule *unless* someone explicitly forces it
+        if not force and not getattr(self, "_paused", False):
+            return None
+
         path = os.path.join(
             self.cfg.save_dir,
             f"{self.cfg.project}__{self.cfg.run_name}__step{self.step}.pt"
@@ -23,53 +28,52 @@ class CheckpointMixin:
             "model": self.model.state_dict(),
             "optimizer": (self.optimizer.state_dict() if self.optimizer is not None else None),
             "scheduler": (self.scheduler.state_dict() if self.scheduler is not None else None),
-            "scaler": (getattr(self, "scaler", None).state_dict() if getattr(self, "scaler", None) else None),
+            "scaler": (
+                getattr(self, "scaler", None).state_dict()
+                if getattr(self, "scaler", None) else None
+            ),
             "step": int(self.step),
             "epoch": int(self.epoch),
-            "last_val_loss": (float(self._last_val_loss) if self._last_val_loss is not None else None),
-            "epoch": self.epoch,
-            "last_val_loss": (float(self._last_val_loss) if self._last_val_loss is not None else None),
+            "last_val_loss": (
+                float(self._last_val_loss)
+                if self._last_val_loss is not None else None
+            ),
         }
-        # If you still want to keep your wrapper, make it a thin torch.save:
-        # save_checkpoint(path, payload)
-        import torch
-        os.makedirs(self.cfg.save_dir, exist_ok=True)
-        torch.save(payload, path)
-        # ---------------------------------------------
 
-        try:
-            self._autofork_engine.set_parent_checkpoint(path)
-        except Exception:
-            pass
+        import torch, os as _os
+        _os.makedirs(self.cfg.save_dir, exist_ok=True)
+        torch.save(payload, path)
 
         self._ckpts.append(path)
         if len(self._ckpts) > self.cfg.ckpt_keep:
             old = self._ckpts.pop(0)
             for p in (old, old + ".meta.json"):
-                try: os.remove(p)
-                except Exception: pass
-
-        # publish snapshot for worker on cadence (unchanged)
-        if not self._paused:
-            try:
-                every = int(self._af_cfg.get("psl_every", 200) or 200)
-            except Exception:
-                every = 200
-            if (self.step % every) == 0:
-                token, ref = self._snapshots.push_from_model(
-                    owner=self.cfg.run_name, version=self.step, model=self.model
-                )
-                self._expected_token_by_owner[self.cfg.run_name] = token
                 try:
-                    self._feature_worker.submit_snapshot(
-                        owner=self.cfg.run_name,
-                        version=self.step,
-                        token=token,
-                        snapshot=ref,
-                        ckpt_path=path,
-                    )
+                    _os.remove(p)
                 except Exception:
                     pass
+
+        # publish snapshot for worker on cadence, only while paused (unchanged)
+        try:
+            every = int(self._feature_sampling_cfg.get("psl_every", 0) or 0)
+        except Exception:
+            every = 0
+        if self._paused and every and (self.step % every) == 0:
+            token, ref = self._snapshots.push_from_model(
+                owner=self.cfg.run_name, version=self.step, model=self.model
+            )
+            self._expected_token_by_owner[self.cfg.run_name] = token
+            try:
+                self._feature_worker.submit_snapshot(
+                    owner=self.cfg.run_name,
+                    version=self.step,
+                    token=token,
+                    snapshot=ref,
+                    ckpt_path=path,
+                )
+            except Exception:
+                pass
+
         return path
 
 

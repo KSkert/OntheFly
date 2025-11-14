@@ -3,6 +3,8 @@ from __future__ import annotations
 from typing import Callable, Any
 import contextlib
 import torch
+import numpy as np
+import random
 
 # Prefer torch.func.vmap (PyTorch 2.x), fall back to functorch.vmap, else None
 try:
@@ -12,6 +14,23 @@ except Exception:
         from functorch import vmap  # older functorch
     except Exception:
         vmap = None
+
+def _seed_worker(worker_id: int, base_seed: int, orig=None):
+    """
+    Worker init fn that sets Python, NumPy and torch RNGs based on a base seed
+    plus worker_id, then optionally calls the original worker_init_fn.
+    """
+    s = int(base_seed) + int(worker_id)
+    random.seed(s)
+    try:
+        np.random.seed(s)
+    except Exception:
+        pass
+    torch.manual_seed(s)
+
+    if callable(orig):
+        orig(worker_id)
+
 
 
 def _as_tensor_loss(x, device):
@@ -183,4 +202,4 @@ def per_sample_loss(loss_fn: Callable, pred: torch.Tensor, target: Any) -> torch
         return _vectorize_with_loop(loss_fn, pred, target)
 
 
-__all__ = ["per_sample_loss"]
+__all__ = ["per_sample_loss", "_seed_worker"]

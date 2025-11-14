@@ -1,15 +1,12 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional, List, Tuple
 from queue import Empty
-import math, warnings
+import warnings
 import torch
 from torch.utils.data import DataLoader, Subset
 
 from ..metrics_utils import _top2_margin
 from ..device_utils import _noop_ctx
-from ..data_explorer import compute_per_sample_losses
-from ..metrics_utils import _percentile_list, _ranks
-from ..kmeans_utils import _run_kmeans
 
 class FeatureMixin:
     """
@@ -130,10 +127,10 @@ class FeatureMixin:
                     ds,
                     indices=None,
                     batch_size=batch_size,
-                    amp_enabled=bool(self._af_cfg["amp_for_psl"] and self.cfg.amp and "cuda" in self.device),
+                    amp_enabled=bool(self._feature_sampling_cfg.get("amp_for_psl", True) and self.cfg.amp and "cuda" in self.device),
                     need_margin=need_margin,
                     need_embed=need_embed,
-                    embed_max_dim=int(self._af_cfg.get("embed_max_dim", 256)),
+                    embed_max_dim=int(self._feature_sampling_cfg.get("embed_max_dim", 256)),
                 )
                 if need_margin: cache["margin"] = mlist
                 if need_embed:  cache["embed"] = elist

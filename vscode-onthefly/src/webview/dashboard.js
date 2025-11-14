@@ -4,31 +4,55 @@
  * =====================================================================
  * TABLE OF CONTENTS
  * -----------------
- *  1) Utilities & Debug
- *  2) DOM References
- *  3) Sessions/Compare (state, helpers, cache keys)
- *  4) Autofork Defaults & UI (prefill, read, plan rendering, tabs)
- *  5) Run/Training State (lineage maps, status flags, nav helpers)
- *  6) Charting (init, plugins, rendering, export)
- *  7) Streamed Data Model (STATE/PEND, redraw pipeline)
- *  8) Log Ring Buffer
- *  9) IPC Commands & Buttons (send helpers + button handlers)
- * 10) Session Navigator (not implemented yet)
- * 11) Window/Message Handlers (all postMessage routes)
- * 12) Select Populators (runs dropdown)
- * 13) Status Gating (running/paused UI)
- * 14) Report Histogram + Manual Fork Overlay (drag/select UX)
- * 15) DAG (graph layout + rendering + helpers)
+ *  1) Core Handles & Helpers
+ *  2) DOM References & Basic Wiring
+ *  3) Run State & Navigation
+ *  4) Export Hook
+ *  5) Chart & Report Plumbing
+ *  6) DAG & Merge UI
+ *  7) IPC & Controls Bridge
+ *  8) Window & Message Bus
 
 
 /* ====================================================================
- * 1) Utilities & Debug
+ * 1) Core Handles & Helpers
  * --------------------------------------------------------------------
- * Small helpers used across the file + debug shim for navigation logs.
+ * VS Code bridge, RunState accessors, and shared helper utilities.
  * ==================================================================== */
 
 /* global acquireVsCodeApi, Chart */
 const vscode = acquireVsCodeApi();
+// Expose vscode handle so earlier scripts (chart utils/export helpers) can reach it.
+if (typeof window !== 'undefined') {
+  window.vscode = vscode;
+}
+const RunState = window.RunState || (() => { throw new Error('run_state.js missing'); })();
+const {
+  parentsOf,
+  childrenOf,
+  runsIndex,
+  AF_MARKERS,
+  RUN_STATE,
+  LAST_PAUSED_STEP,
+  keyOf,
+  runIdOf,
+  edges,
+  addRun: storeAddRun,
+  rebuildNavListFromRows: storeRebuildNavList,
+  gotoPageByIndex: storeGotoPageByIndex,
+  gotoPageByRunId: storeGotoPageByRunId,
+  updateModelNav: computeModelNavSnapshot,
+  setLiveRun: storeSetLiveRun,
+  getLiveRun: storeGetLiveRun,
+  streamTargetRunId,
+  followTemporarilyOff: storeFollowTemporarilyOff,
+  isFollowActive,
+  setFollowActive: storeSetFollowActive,
+  getNavList,
+  getPageIndex,
+  setLastRowsRunKey,
+  getLastRowsRunKey,
+} = RunState;
 
 const byId = (id) => document.getElementById(id);
 const on = (el, evt, fn) => { if (el) el.addEventListener(evt, fn); };
@@ -36,49 +60,57 @@ const nf = v => (Number.isFinite(v) ? v : NaN);
 
 // ===== DEBUG SHIM =====
 window.DEBUG_NAV = false;
-const logNav = (...args) => { if (window.DEBUG_NAV) console.log('[NAV]', ...args); };
 const groupNav = (label, fn) => {
   if (!window.DEBUG_NAV) return fn();
   console.groupCollapsed(`%c[NAV] ${label}`, 'color:#0ea5e9');
   try { fn(); } finally { console.groupEnd(); }
 };
 
+function notify(text, level = 'info') {
+  vscode.postMessage({ command: 'notify', level, text });
+}
+
 
 /* ====================================================================
- * 2) DOM References
+ * 2) DOM References & Basic Wiring
  * --------------------------------------------------------------------
- * Cache relevant DOM elements once. These are used widely across the UI.
+ * Cache commonly used DOM elements once to keep lookups cheap.
  * ==================================================================== */
 
 /* -------- DOM refs -------- */
+//setup env
 const btnChoose = byId('btnChoose');
 const btnSetPy = byId('btnSetPy');
 const pyPath = byId('pyPath');
+const scriptName = byId('scriptName');
 
-
+//common basics
 const btnPause = byId('btnPause');
 const btnResume = byId('btnResume');
-const rewindSteps = byId('rewindSteps');
+const btnTestNow = byId('btnTestNow');
 
-const btnSaveCkpt = byId('btnSaveCkpt');
 const btnAutoSave = byId('btnAutoSave');
 const btnLoad = byId('btnLoad');
 
-const btnTestNow = byId('btnTestNow');
+// report
 const btnReport = byId('btnGenerateReport') || byId('btnReport');
 const reportNote = byId('reportNote');
-const btnSelectRegion = byId('btnSelectRegion');
-
-const btnPrevModel = byId('btnPrevModel');
-const btnNextModel = byId('btnNextModel');
-
 const reportMeta = byId('reportMeta');
 
+// health
+const btnDistHealth = byId('btnDistHealth')
+const btnActivationsHealth = byId('btnActivationsHealth')
+const btnNumericsHealth = byId('btnNumericsHealth')
+const btnDeterminismHealth = byId('btnDeterminismHealth')
+const btnThroughputHealth = byId('btnThroughputHealth')
+
+//nav
+const btnPrevModel = byId('btnPrevModel');
+const btnNextModel = byId('btnNextModel');
 const runSel = byId('runSel');
 const btnRefreshRuns = byId('btnRefreshRuns');
-const scriptName = byId('scriptName');
-const logDiv = byId('log');
 
+//dag
 const btnOpenDag = byId('btnOpenDag');
 const btnExportLoss = byId('exportLossBtn');
 const btnExportLossDist = byId('exportLossDistBtn');
@@ -90,1188 +122,114 @@ const dagClose   = byId('dagClose');
 const dagMergeBtn= byId('dagMergeBtn');
 const dagStrategy= byId('dagStrategy');
 
-
-const btnAutoForkOn     = byId('btnAutoForkOn');
-const btnAutoForkOff    = byId('btnAutoForkOff');
-const btnAutoForkApply  = byId('btnAutoForkApply');
-const btnAutoForkExec   = byId('btnAutoForkExec');
-const afVariantIndex    = byId('afVariantIndex');
-const afPlanBox         = byId('afPlan'); // <pre> or <div>
-
-const afEnabled                = byId('afEnabled');
-const afLossPlateauPatience    = byId('afLossPlateauPatience');
-const afLossPlateauDelta       = byId('afLossPlateauDelta');
-const afPerSampleWindow        = byId('afPerSampleWindow');
-const afKmeansK                = byId('afKmeansK');
-const afDeadClusterZ           = byId('afDeadClusterZ');
-const afHighLossQuantile       = byId('afHighLossQuantile');
-const afSpikeSigma             = byId('afSpikeSigma');
-const afEmaDecay               = byId('afEmaDecay');
-const afMaxParallelChildren    = byId('afMaxParallelChildren');
-const afForkCooldownSteps      = byId('afForkCooldownSteps');
-const afGateEpochs             = byId('afGateEpochs');
-
-const afPslEvery               = byId('afPslEvery');
-const afPslBudget              = byId('afPslBudget');
-const afMirrorTrain            = byId('afMirrorTrain');
-const afAmpForPsl              = byId('afAmpForPsl');
-// feature sampling toggles
-const afComputeMargins         = byId('afComputeMargins');
-const afComputeEmbeddings      = byId('afComputeEmbeddings');
-const afEmbedMaxDim            = byId('afEmbedMaxDim');
-
-const afMergeOnPlateau          = byId('afMergeOnPlateau');
-const afReunifyEverySteps       = byId('afReunifyEverySteps');
-const afMinChildStepsBeforeMerge= byId('afMinChildStepsBeforeMerge');
-const afMergeUpliftThreshold    = byId('afMergeUpliftThreshold');
-const afInterForkImprovement    = byId('afInterForkImprovement');
-const afForkBackpressureAlpha   = byId('afForkBackpressureAlpha');
-const afMergeMethodSelector    = byId('afMergeMethodSelector');
-
-
-const btnExportSelectedSubset = byId('btnExportSelectedSubset');
+//exports
 const btnExportSubset = byId('btnExportSubset');
 const exportSubsetFmt = byId('exportSubsetFmt');
 
-
 /* ====================================================================
- * 4) Autofork Defaults & UI
+ * 3) Run State & Navigation
  * --------------------------------------------------------------------
- * Defaults, UI prefill/reading, rendering suggested plans, tab wiring.
- * No runtime semantics changed.
+ * Tracks paused/running flags, follow state, and model navigation UI.
  * ==================================================================== */
 
-const AF_DEFAULTS = {
-  rules: {
-    enabled: false,
-    loss_plateau_patience: 200,
-    loss_plateau_delta: 1e-4,
-    per_sample_window: 5000,
-    kmeans_k: 5,
-    dead_cluster_z: 1.0,
-    high_loss_quantile: 0.85,
-    spike_sigma: 3.0,
-    ema_decay: 0.98,
-    max_parallel_children: 2,
-    fork_cooldown_steps: 1000,
-    gate_epochs: 30,
-
-    merge_on_plateau: true,
-    reunify_every_steps: 0,
-    min_child_steps_before_merge: 0,
-    merge_uplift_threshold: 0.0,
-    inter_fork_improvement: 0.0,
-    fork_backpressure_alpha: 0.0,
-    merge_method: 'swa',
-  },
-  sampling: {
-    psl_every: 200,
-    psl_budget: 4000,
-    mirror_train: true,
-    amp_for_psl: true,
-    compute_margins: true,
-    compute_embeddings: false,
-    embed_max_dim: 256,
-  },
-};
-
-// --- subset export UI ---
-function selectedIndicesForRun(runId, lo, hi) {
-  const c = REPORT_CACHE.get(cacheKeyFor(runId));
-  if (!c || !c.lossesRaw || !c.indexMap) return [];
-  const a = Math.min(lo, hi), b = Math.max(lo, hi);
-  const out = [];
-  const L = c.lossesRaw.length;
-  for (let i = 0; i < L; i++) {
-    const v = c.lossesRaw[i];
-    if (Number.isFinite(v) && v >= a && v <= b) out.push(c.indexMap[i]);
-  }
-  return out;
-}
-
-on(btnExportSubset, 'click', () => {
-  const runId = currentPageRunId();
-  if (!runId) { notify('No run selected.', 'warn'); return; }
-  const format = (exportSubsetFmt && exportSubsetFmt.value) || 'parquet';
-  // Ask the extension host to open Save dialog + call Python
-  vscode.postMessage({ command: 'exportSubset', runId, format });
-});
-
-
-// toast when the extension finishes
-window.addEventListener('message', (e) => {
-  const m = e.data;
-  if (m?.type === 'subsetExported') {
-    const rows = Number(m.rows || 0);
-    const fmt  = (m.format || '').toUpperCase();
-  }
-});
-if (btnSelectRegion) {
-  on(btnSelectRegion, 'click', () => {
-    if (!lossDistChart) { notify('Report chart not ready yet.', 'warn'); return; }
-    const points = (lossDistChart.data?.datasets?.[0]?.data?.length) || 0;
-    if (!points) { notify('Generate the report first.', 'warn'); return; }
-
-    regionSelectMode = true;
-    regionSel.active = true;
-    regionSel.dragging = null;
-
-    const s = lossDistChart.scales.x;
-    if (s && Number.isFinite(s.min) && Number.isFinite(s.max)) {
-      const span = (s.max - s.min) || 1;
-      if (regionSel.aVal == null) regionSel.aVal = s.min + 0.25 * span;
-      if (regionSel.bVal == null) regionSel.bVal = s.min + 0.75 * span;
-    }
-
-    ensureRegionOverlay();      // new name (see next section)
-    regionOverlay.style.display = 'block';
-    btnSelectRegion.style.display = 'none';
-    lossDistChart.update('none');
-    updateSelectedExportGate();
-    if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate()
-  });
-}
-
-function _set(el, v) { if (el) { if (el.type === 'checkbox') el.checked = !!v; else el.value = String(v); } }
-function _num(el)    { const n = el ? Number(el.value) : NaN; return Number.isFinite(n) ? n : NaN; }
-function _bool(el)   { return !!(el && el.checked); }
-function setAutoModeUI(isAuto) {
-  // Hide any manual-only actions in auto mode
-  [btnSelectRegion, btnAutoForkExec].forEach(b => {
-    if (!b) return;
-    b.style.display = isAuto ? 'none' : '';
-    b.disabled = !!isAuto;
-  });
-  // make the plan <pre> read-only or relabel
-  if (afPlanBox) afPlanBox.closest('.card')?.classList.toggle('readonly', isAuto);
-}
-function reflectAutoForkBtns() {
-  const onActive = !!afEnabled?.checked;           // true = ON selected
-  btnAutoForkOn?.classList.toggle('is-active', onActive);
-  btnAutoForkOn?.classList.toggle('is-inactive', !onActive);
-  btnAutoForkOn?.setAttribute('aria-pressed', String(onActive));
-
-  btnAutoForkOff?.classList.toggle('is-active', !onActive);
-  btnAutoForkOff?.classList.toggle('is-inactive', onActive);
-  btnAutoForkOff?.setAttribute('aria-pressed', String(!onActive));
-}
-
-function prefillAutoforkUi() {
-  if (!afEnabled) return;
-  _set(afEnabled,             AF_DEFAULTS.rules.enabled);
-  _set(afLossPlateauPatience, AF_DEFAULTS.rules.loss_plateau_patience);
-  _set(afLossPlateauDelta,    AF_DEFAULTS.rules.loss_plateau_delta);
-  _set(afPerSampleWindow,     AF_DEFAULTS.rules.per_sample_window);
-  _set(afKmeansK,             AF_DEFAULTS.rules.kmeans_k);
-  _set(afDeadClusterZ,        AF_DEFAULTS.rules.dead_cluster_z);
-  _set(afHighLossQuantile,    AF_DEFAULTS.rules.high_loss_quantile);
-  _set(afSpikeSigma,          AF_DEFAULTS.rules.spike_sigma);
-  _set(afEmaDecay,            AF_DEFAULTS.rules.ema_decay);
-  _set(afMaxParallelChildren, AF_DEFAULTS.rules.max_parallel_children);
-  _set(afForkCooldownSteps,   AF_DEFAULTS.rules.fork_cooldown_steps);
-  _set(afGateEpochs,          AF_DEFAULTS.rules.gate_epochs);
-
-  _set(afMergeOnPlateau,          AF_DEFAULTS.rules.merge_on_plateau);
-  _set(afReunifyEverySteps,       AF_DEFAULTS.rules.reunify_every_steps);
-  _set(afMinChildStepsBeforeMerge,AF_DEFAULTS.rules.min_child_steps_before_merge);
-  _set(afMergeUpliftThreshold,    AF_DEFAULTS.rules.merge_uplift_threshold);
-  _set(afInterForkImprovement,    AF_DEFAULTS.rules.inter_fork_improvement);
-  _set(afForkBackpressureAlpha,   AF_DEFAULTS.rules.fork_backpressure_alpha);
-
-  _set(afPslEvery,            AF_DEFAULTS.sampling.psl_every);
-  _set(afPslBudget,           AF_DEFAULTS.sampling.psl_budget);
-  _set(afMirrorTrain,         AF_DEFAULTS.sampling.mirror_train);
-  _set(afAmpForPsl,           AF_DEFAULTS.sampling.amp_for_psl);
-  _set(afComputeMargins,      AF_DEFAULTS.sampling.compute_margins);
-  _set(afComputeEmbeddings,   AF_DEFAULTS.sampling.compute_embeddings);
-  _set(afEmbedMaxDim,         AF_DEFAULTS.sampling.embed_max_dim);
-
-  _set(afMergeMethodSelector,     AF_DEFAULTS.rules.merge_method);
-
-}
-
-function readAutoForkConfig() {
-  return {
-    rules: {
-      enabled:               _bool(afEnabled),
-      loss_plateau_patience: _num(afLossPlateauPatience),
-      loss_plateau_delta:    _num(afLossPlateauDelta),
-      per_sample_window:     _num(afPerSampleWindow),
-      kmeans_k:              _num(afKmeansK),
-      dead_cluster_z:        _num(afDeadClusterZ),
-      high_loss_quantile:    _num(afHighLossQuantile),
-      spike_sigma:           _num(afSpikeSigma),
-      ema_decay:             _num(afEmaDecay),
-      max_parallel_children: _num(afMaxParallelChildren),
-      fork_cooldown_steps:   _num(afForkCooldownSteps),
-      gate_epochs:           _num(afGateEpochs),
-
-      merge_on_plateau:           _bool(afMergeOnPlateau),
-      reunify_every_steps:        _num(afReunifyEverySteps),
-      min_child_steps_before_merge:_num(afMinChildStepsBeforeMerge),
-      merge_uplift_threshold:     _num(afMergeUpliftThreshold),
-      inter_fork_improvement:     _num(afInterForkImprovement),
-      fork_backpressure_alpha:    _num(afForkBackpressureAlpha),
-      merge: {
-        method: (afMergeMethodSelector && afMergeMethodSelector.value) || 'swa',
-      },
-    },
-    sampling: {
-      psl_every:        _num(afPslEvery),
-      psl_budget:       _num(afPslBudget),
-      mirror_train:     _bool(afMirrorTrain),
-      amp_for_psl:      _bool(afAmpForPsl),
-      compute_margins:  _bool(afComputeMargins),
-      compute_embeddings:_bool(afComputeEmbeddings),
-      embed_max_dim:    _num(afEmbedMaxDim),
-    },
-  };
-}
-
-let _lastAutoForkPlan = null;
-
-function renderAutoForkPlan(plan) {
-  if (!afPlanBox) return;
-  if (!plan) { afPlanBox.textContent = '(no plan yet)'; return; }
-
-  const variants = Array.isArray(plan?.training_recipe?.variants) ? plan.training_recipe.variants : [];
-  const summary = {
-    reason: plan.reason,
-    priority: plan.priority,
-    selection: plan.selection,
-    variants: variants.map((v, i) => ({ i, ...v })),
-    cooldown_steps: plan.cooldown_steps,
-    analyzed_at_step: plan.at_step ?? plan.step ?? null,
-  };
-  afPlanBox.textContent = JSON.stringify(summary, null, 2);
-}
-
-function wireAfTabs() {
-  const LS_KEY = 'fs.autofork.tab.v1';
-  const btns = document.querySelectorAll('#afTabButtons .afTabBtn');
-  const panels = document.querySelectorAll('.afTabPanel');
-
-  const setActive = (tab) => {
-    btns.forEach(b => {
-      const is = b.dataset.tab === tab;
-      b.setAttribute('aria-selected', is ? 'true' : 'false');
-    });
-    panels.forEach(p => {
-      const show = p.getAttribute('data-tab') === tab;
-      if (show) p.removeAttribute('hidden'); else p.setAttribute('hidden','');
-    });
-  };
-
-  let initial = localStorage.getItem(LS_KEY) || 'forking';
-  const known = new Set(Array.from(btns).map(b => b.dataset.tab));
-  if (!known.has(initial)) initial = 'forking';
-  setActive(initial);
-
-  btns.forEach(b => b.addEventListener('click', () => {
-    const t = b.dataset.tab;
-    setActive(t);
-    localStorage.setItem(LS_KEY, t);
-  }));
-}
-// prefill once on load if the fields are present
-prefillAutoforkUi();
-reflectAutoForkBtns();
-wireAfTabs();
-
-
-/* ====================================================================
- * 5) Run/Training State & Navigation
- * --------------------------------------------------------------------
- * Lineage maps, run status/flags, follow behavior, model nav arrows.
- * ==================================================================== */
-
-let regionSelectMode = false;
-let regionSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
-let regionOverlay;
-
-
-// lineage maps
-// multi-parent lineage
-const parentsOf  = new Map();       // child -> Set(parents)
-const parentOf   = new Map();       // child -> primary parent (for nav arrows)
-const childrenOf = new Map();       // parent -> Set(children)
-const runsIndex  = new Map();       // run_id -> row
-const extraParents = new Map(); // childId -> Set(parents)
-const AF_MARKERS = new Map(); // runKey -> [{ step, kind: 'suggested'|'executed' }]
-
-const RUN_STATE = new Map(); // runKey -> { running:boolean, paused:boolean }
-let FOLLOW_ACTIVE = true;
-let _followResetTimer = null;
-
-
-const LAST_PAUSED_STEP = new Map();   // runId -> step
 let IS_RUNNING = false;
 let IS_PAUSED  = false;
+gateHealthButtons();
 function curRunKey() { return keyOf(currentPageRunId()); }
 
 
 function reportMatchesPause(runKey = curRunKey()) {
-  const cache = REPORT_CACHE.get(cacheKeyFor(runKey));
+  const cache = ChartReport.getReport(runKey);
   const pausedAt = LAST_PAUSED_STEP.get(runKey);
   const atStep = cache?.at_step;
   return Number.isFinite(atStep) && Number.isFinite(pausedAt) && atStep === pausedAt;
 }
 
 function updateSelectRegionGate() {
-  if (!btnSelectRegion) return;
-  const hasReport = !!REPORT_CACHE.get(cacheKeyFor(curRunKey()));
-  // Availability rule: only requires a report to exist on the current page.
-  btnSelectRegion.disabled = !hasReport;
-  btnSelectRegion.style.display = hasReport ? '' : 'none';
-  btnSelectRegion.title = hasReport
-    ? ''
-    : 'Generate a report to select a region.';
+  window.ChartReportSelection?.updateSelectRegionGate?.();
 }
 
 function updateSelectedExportGate() {
-  if (!btnExportSelectedSubset) return;
-  const available = !!regionSelectMode && !!regionSel.active;
-  btnExportSelectedSubset.disabled = !available;
-  btnExportSelectedSubset.style.display = available ? '' : 'none';
-  btnExportSelectedSubset.title = available ? '' : 'Click “Select Region” first.';
+  window.ChartReportSelection?.updateSelectedExportGate?.();
 }
 
+function gateHealthButtons() {
+  const needPauseMsg = 'Pause training to run health checks.';
+  const enabled = !!IS_PAUSED;   // only when explicitly paused
 
-
-const selectedForMerge = new Set();
-function pickPrimaryParent(childId) {
-  const ps = Array.from(parentsOf.get(childId) || []);
-  if (!ps.length) return null;
-  // choose newest-by-created_at if available, else first
-  ps.sort((a, b) => (runsIndex.get(b)?.created_at || 0) - (runsIndex.get(a)?.created_at || 0));
-  return ps[0];
+  [
+    btnDistHealth,
+    btnThroughputHealth,
+    btnActivationsHealth,
+    btnNumericsHealth,
+    btnDeterminismHealth,
+  ].forEach(b => {
+    if (!b) return;
+    b.disabled = !enabled;
+    b.title = enabled ? '' : needPauseMsg;
+    if (!enabled) {
+      b.setAttribute('aria-disabled', 'true');
+      b.style.opacity = '0.5';
+      b.style.pointerEvents = 'none';
+    } else {
+      b.removeAttribute('aria-disabled');
+      b.style.opacity = '';
+      b.style.pointerEvents = '';
+    }
+  });
 }
 
-/* ========= MODEL NAV ========= */
-
-let NAV_LIST = []; // ["run3", "run2", "run1", "run0"] newest -> oldest
-
-// === PAGE INDEX (newest-left list) ===
-let PAGE_INDEX = 0;  // 0 = newest (left-most)
-
-function clampPage(i) {
-  return Math.max(0, Math.min(NAV_LIST.length - 1, Number(i) || 0));
-}
-function currentPageRunId() {
-  if (!NAV_LIST.length) return null;
-  return NAV_LIST[clampPage(PAGE_INDEX)] || null;
-}
 function notifyModelNavSelected(runId) {
   vscode.postMessage({ command: 'modelNav.select', runId: String(runId || '') });
 }
-/** The single entry-point to switch pages */
-function gotoPageByIndex(i) {
-  PAGE_INDEX = clampPage(i);
-  const runId = currentPageRunId();
+
+function currentPageRunId() {
+  return RunState.currentPageRunId();
+}
+
+function applyRunSelection(runId) {
   if (!runId) {
-    updateModelNav();
+    updateModelNavUI();
     return;
   }
 
-  // keep dropdown in sync
   if (runSel) runSel.value = runId;
   notifyModelNavSelected(runId);
+  MetricHistory.setRun(runId);
 
-  // switch charts/data to that run and (re)paint cached report
-  activeRunId = runId;     // tie streaming to viewed page
   clearCharts();
+  setLastRowsRunKey(runId);
   send('requestRows',   { runId });
-  send('requestReport', { runId });   // if cached, showReportFor will display immediately
-  showReportFor(runId);
+  send('requestReport', { runId });
+  ChartReport.showReportFor(runId);
 
   updateSelectRegionGate();
   updateSelectedExportGate();
-  updateModelNav();
+  updateModelNavUI();
 }
 
-/** Convenience: jump to whatever index a runId currently occupies */
-function gotoPageByRunId(runId) {
-  const idx = NAV_LIST.indexOf(String(runId));
-  if (idx >= 0) gotoPageByIndex(idx);
+function selectRunByIndex(i) {
+  const runId = storeGotoPageByIndex(i);
+  applyRunSelection(runId);
 }
 
-
-function rebuildNavListFromRows(rows) {
-  // Normalize to {id, created_at}, newest first (left)
-  const items = (rows || []).map(r => {
-    const id = runIdOf(r);
-    const created = r.created_at ?? r.createdAt ?? r.created ?? r.timestamp ?? r.ts ?? 0;
-    return id ? { id: String(id), created_at: Number(created) || 0 } : null;
-  }).filter(Boolean);
-
-  items.sort((a, b) => b.created_at - a.created_at); // newest first
-  NAV_LIST = items.map(x => x.id);
+function selectRunByRunId(runId) {
+  const next = storeGotoPageByRunId(runId);
+  if (next) applyRunSelection(next);
 }
 
-
-function updateModelNav() {
+function updateModelNavUI() {
   const { prev, next } = navEls();
   if (!prev || !next) return;
 
-  const idx = clampPage(PAGE_INDEX);
-  const hasPrev = idx > 0;
-  const hasNext = idx < NAV_LIST.length - 1;
-
-  const prevVal = hasPrev ? NAV_LIST[idx - 1] : '';
-  const nextVal = hasNext ? NAV_LIST[idx + 1] : '';
-
-  setArrow(prev, hasPrev, prevVal);
-  setArrow(next, hasNext, nextVal);
+  const navState = computeModelNavSnapshot();
+  setArrow(prev, navState.hasPrev, navState.prevVal);
+  setArrow(next, navState.hasNext, navState.nextVal);
 }
-
-
-
-function wireModelNavClicks() {
-  const { prev, next } = navEls();
-
-  if (prev && !prev._wired) {
-    prev.addEventListener('click', () => {
-      followTemporarilyOff();
-      if (PAGE_INDEX > 0) gotoPageByIndex(PAGE_INDEX - 1);
-    });
-    prev._wired = true;
-  }
-  if (next && !next._wired) {
-    next.addEventListener('click', () => {
-      followTemporarilyOff();
-      if (PAGE_INDEX < NAV_LIST.length - 1) gotoPageByIndex(PAGE_INDEX + 1);
-    });
-    next._wired = true;
-  }
-}
-
-
-function formatWhen(step, epoch) {
-  const stepTxt = (Number.isFinite(step) ? step : '—');
-  const epTxt   = (Number.isFinite(epoch) ? epoch : '—');
-  return `Analyzed at step ${stepTxt} (epoch ${epTxt})`;
-}
-
-// --- Fork plugins ---
-
-// --- Fork selection render plugin ---
-const forkSelectionPlugin = {
-  id: 'forkSelection',
-  afterDraw(chart) {
-    if (!chart || chart.canvas.id !== 'lossDistChart') return;
-    if (!regionSelectMode || !regionSel.active) return;
-
-    const scaleX = chart.scales?.x;
-    const area = chart.chartArea;
-    if (!scaleX || !area) return;
-
-    if (regionSel.aVal == null || regionSel.bVal == null) return;
-    const aXraw = scaleX.getPixelForValue(regionSel.aVal);
-    const bXraw = scaleX.getPixelForValue(regionSel.bVal);
-    const clamp = (x) => Math.max(area.left, Math.min(area.right, x));
-    const aX = clamp(aXraw);
-    const bX = clamp(bXraw);
-
-    const left = Math.min(aX, bX);
-    const right = Math.max(aX, bX);
-
-    const ctx = chart.ctx;
-    ctx.save();
-
-    ctx.fillStyle = 'rgba(100, 149, 237, 0.18)';
-    ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
-
-    ctx.lineWidth = 2;
-
-    ctx.strokeStyle = '#efe444ff';
-    ctx.beginPath();
-    ctx.moveTo(aX, area.top);
-    ctx.lineTo(aX, area.bottom);
-    ctx.stroke();
-
-    ctx.strokeStyle = '#efe444ff';
-    ctx.beginPath();
-    ctx.moveTo(bX, area.top);
-    ctx.lineTo(bX, area.bottom);
-    ctx.stroke();
-
-    const cap = 6;
-    ctx.beginPath();
-    ctx.fillStyle = '#efe444ff';
-    ctx.fillRect(aX - 3, area.top - cap, 6, cap);
-    ctx.fillStyle = '#efe444ff';
-    ctx.fillRect(bX - 3, area.top - cap, 6, cap);
-
-    ctx.restore();
-
-    updateSelectedCountPill();
-  }
-};
-// --- Vertical dotted line markers for AutoFork provenance ---
-const autoForkMarkerPlugin = {
-  id: 'autoForkMarkers',
-  afterDatasetsDraw(chart) {
-    const id = chart?.canvas?.id;
-    if (!id || (id !== 'lossChart' && id !== 'valLossChart')) return;
-
-    const runKey = keyOf(currentPageRunId());
-    const marks = AF_MARKERS.get(runKey);
-    if (!marks || !marks.length) return;
-
-    const scaleX = chart.scales?.x;
-    const area = chart.chartArea;
-    if (!scaleX || !area) return;
-
-    const labels = chart.data?.labels || [];
-    const pixelForStep = (step) => {
-      let idx = labels.findIndex(v => Number(v) === Number(step));
-      if (idx >= 0) return scaleX.getPixelForTick(idx);
-      // fallback: nearest existing tick (handles slight mismatches)
-      let best = -1, dBest = Infinity;
-      for (let i = 0; i < labels.length; i++) {
-        const d = Math.abs(Number(labels[i]) - Number(step));
-        if (d < dBest) { dBest = d; best = i; }
-      }
-      return (best >= 0) ? scaleX.getPixelForTick(best) : NaN;
-    };
-
-    const ctx = chart.ctx;
-    ctx.save();
-    ctx.setLineDash([6, 5]);  // dotted
-    ctx.lineWidth = 1;
-
-    for (const m of marks) {
-      const x = pixelForStep(m.step);
-      if (!Number.isFinite(x)) continue;
-
-      ctx.strokeStyle = (m.kind === 'executed') ? '#22c55e' : '#94a3b8' ;
-      ctx.beginPath();
-      ctx.moveTo(x + 0.5, area.top);
-      ctx.lineTo(x + 0.5, area.bottom);
-      ctx.stroke();
-    }
-
-    ctx.restore();
-  }
-};
-
-
-/* ====================================================================
- * 6) Charting
- * --------------------------------------------------------------------
- * Canvas sizing, PNG export via extension, chart init with plugins,
- * y-scale sync. All behavior preserved.
- * ==================================================================== */
-
-function prepareCanvasSizes() {
-  ['lossChart','valLossChart','lossDistChart'].forEach(id => {
-    const c = byId(id);
-    if (!c) return;
-    c.style.width = '100%';
-    c.style.height = '100%';
-    c.removeAttribute('width');
-    c.removeAttribute('height');
-  });
-}
-function chartToPngDataURL(chart) {
-  if (!chart || !chart.canvas) return null;
-  const src = chart.canvas;
-  const w = src.width, h = src.height;
-
-  // Compose onto a background that matches the pane for “what you see is what you get”
-  const bg = getComputedStyle(src.closest('.chartWrap') || document.body).backgroundColor || '#ffffff';
-  const out = document.createElement('canvas');
-  out.width = w; out.height = h;
-  const ctx = out.getContext('2d');
-  ctx.save();
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, w, h);
-  ctx.drawImage(src, 0, 0);
-  ctx.restore();
-  return out.toDataURL('image/png');
-}
-
-function exportChartViaExtension(chart, suggestedName) {
-  const dataUrl = chartToPngDataURL(chart);
-  if (!dataUrl) { notify('Chart not ready to export.', 'warn'); return; }
-  // Ask the extension to save the PNG (reliable in VS Code webviews)
-  vscode.postMessage({ command: 'exportChart', filename: suggestedName, dataUrl });
-}
-on(btnExportLoss, 'click', () => {
-  const fname = `loss_chart_${Date.now()}.png`;
-  exportChartViaExtension(lossChart, fname);
-});
-on(btnExportLossDist, 'click', () => {
-  const fname = `loss_distribution_${Date.now()}.png`;
-  exportChartViaExtension(lossDistChart, fname);
-});
-on(btnExportValLoss, 'click', () => {
-  const fname = `val_loss_${Date.now()}.png`;
-  exportChartViaExtension(val_lossChart, fname);
-});
-
-
-/* -------- charts -------- */
-let lossChart, val_lossChart, lossDistChart;
-// --- Report request tracking (prevents cross-run bleed) ---
-let reportSeq = 0;
-const reportReqToRun = new Map();          // reqId -> runId
-const latestReqForRun = new Map();         // runId -> reqId
-const keyOf = id => (id == null ? '' : String(id));
-const runIdOf = (r) => keyOf(r?.run_id ?? r?.id ?? r?.runId ?? r?.uuid ?? r?.uid);
-
-function computeLossHistogram(values, numBins = 30) {
-  if (!Array.isArray(values) || values.length === 0) {
-    return { bars: [], line: [], xmin: undefined, xmax: undefined };
-  }
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const width = (max - min) || 1e-9;
-  const step = width / numBins;
-
-  const edges = Array.from({ length: numBins + 1 }, (_, i) => min + i * step);
-  const counts = new Array(numBins).fill(0);
-  for (const v of values) {
-    let idx = Math.floor((v - min) / step);
-    if (idx >= numBins) idx = numBins - 1;
-    if (idx < 0) idx = 0;
-    counts[idx]++;
-  }
-  const centers = counts.map((_, i) => edges[i] + step * 0.5);
-
-  const n = values.length;
-  const mean = values.reduce((a, b) => a + b, 0) / n;
-  const variance = values.reduce((a, b) => a + (b - mean) * (b - mean), 0) / Math.max(1, (n - 1));
-  const std = Math.sqrt(Math.max(variance, 0));
-  let h = 1.06 * (std || (step / 1.06)) * Math.pow(n, -1 / 5);
-  if (!Number.isFinite(h) || h <= 1e-12) h = step;
-  h = Math.max(0.6 * step, Math.min(3 * step, h));
-
-  const sampleCount = 160;
-  const xs = Array.from({ length: sampleCount }, (_, i) => min + (i / (sampleCount - 1)) * (max - min));
-  const invNorm = 1 / (Math.sqrt(2 * Math.PI) * h);
-  const ySmooth = xs.map(x => {
-    let dens = 0;
-    for (let i = 0; i < centers.length; i++) {
-      const u = (x - centers[i]) / h;
-      dens += counts[i] * invNorm * Math.exp(-0.5 * u * u);
-    }
-    return dens * step;
-  });
-
-  return {
-    bars: centers.map((x, i) => ({ x, y: counts[i] })),
-    line: xs.map((x, i) => ({ x, y: ySmooth[i] })),
-    xmin: min,
-    xmax: max,
-    edges
-  };
-}
-
-// Cache: one report per runId
-const REPORT_CACHE = (window.__REPORT_CACHE__ ||= new Map());
-
-
-const cacheKeyFor = (runId) => `${keyOf(runId)}`;
-const cloneXY = (arr) => (Array.isArray(arr) ? arr.map(p => ({ x: +p.x, y: +p.y })) : []);
-
-function showReportFor(runId) {
-  if (!lossDistChart) return;
-  const cache = REPORT_CACHE.get(cacheKeyFor(runId));
-
-  if (!cache) { clearReportChart(); return; }
-
-  const bars = lossDistChart.data?.datasets?.[0];
-  const line = lossDistChart.data?.datasets?.[1];
-
-  if (bars) bars.data = cache.bars.slice();
-  if (line) line.data = cache.line.slice();
-
-  // lastLossEdges = (cache.edges || []).slice();
-  if (lossDistChart.options?.scales?.x) {
-    lossDistChart.options.scales.x.min = cache.xmin;
-    lossDistChart.options.scales.x.max = cache.xmax;
-  }
-  if (reportNote) reportNote.textContent = cache.note || '';
-  if (reportMeta)  reportMeta.textContent  = formatWhen(cache.at_step, cache.at_epoch);
-
-  regionSelectMode = false;
-  regionSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
-  if (regionOverlay) regionOverlay.style.display = 'none';
-  lossDistChart.$ownerKey = cacheKeyFor(runId);
-  lossDistChart.update('none');
-  updateSelectedExportGate();
-}
-
-
-/* ====================================================================
- * 7) Streamed Data Model (STATE/PEND) + redraw pipeline
- * --------------------------------------------------------------------
- * Batched push into PEND, periodic flush to STATE, and apply to charts.
- * ==================================================================== */
-
-/* -------- state (no feature sets) -------- */
-let activeRunId = null;
-let pendingSelectRunId = null;
-
-/* ========= STREAMING DATA MODEL ========= */
-const STATE = {
-  labels: [],
-  loss: [],
-  val_loss: [],
-};
-
-
-const PEND = {
-  labels: [],
-  loss: [],
-  val_loss: [],
-};
-
-function pendPush(step, loss, val_loss) {
-  if (Number.isFinite(step) && Number.isFinite(loss)) {
-    PEND.labels.push(step);
-    PEND.loss.push(loss);
-    PEND.val_loss.push(Number.isFinite(val_loss) ? val_loss : NaN);
-  }
-  
-}
-
-/* ========= FRAME-PACED REDRAW ========= */
-const MIN_DRAW_INTERVAL_MS = 120;
-let lastDrawTs = 0;
-let rafPending = false;
-
-function scheduleChartsRedraw() {
-  const now = performance.now();
-  if (now - lastDrawTs < MIN_DRAW_INTERVAL_MS) return;
-  if (rafPending) return;
-  rafPending = true;
-  requestAnimationFrame(() => {
-    rafPending = false;
-    flushPendingToState();
-    applyStateToCharts();
-    lastDrawTs = performance.now();
-  });
-}
-
-function flushPendingToState() {
-  if (!PEND.labels.length) return;
-
-  if (PEND.labels.length) {
-    STATE.labels.push(...PEND.labels);
-    STATE.loss.push(...PEND.loss);
-    STATE.val_loss.push(...PEND.val_loss);
-  }
-
-
-  PEND.labels.length = 0;
-  PEND.loss.length = 0;
-  PEND.val_loss.length = 0;
-
-}
-
-function applyStateToCharts() {
-  if (!lossChart || !val_lossChart) return;
-
-  lossChart.data.labels = STATE.labels.map(Number);
-
-  const L = STATE.labels.length;
-  const loss = STATE.loss.slice(0, L);
-
-  lossChart.data.datasets[0].data = loss;
-
-  val_lossChart.data.labels = STATE.labels.map(Number);
-  val_lossChart.data.datasets[0].data = STATE.val_loss.slice(0, L);
-
-  syncLossYScale(loss);
-
-  lossChart.update('none');
-  val_lossChart.update('none');
-}
-
-
-/* ====================================================================
- * 8) Log Ring Buffer
- * --------------------------------------------------------------------
- * Efficient log text area updates with minimal DOM churn.
- * ==================================================================== */
-
-const MAX_LOG_LINES = 2000;
-const _logRing = new Array(MAX_LOG_LINES);
-let _logStart = 0, _logLen = 0;
-let _logFlushTimer = null;
-
-// Clear logs (ring buffer + UI) in one place
-function clearLogs() {
-  _logStart = 0;
-  _logLen = 0;
-  _logRing.fill(undefined);
-  if (_logFlushTimer) {
-    clearTimeout(_logFlushTimer);
-    _logFlushTimer = null;
-  }
-  if (logDiv) {
-    logDiv.value = '';
-    logDiv.scrollTop = 0;
-  }
-}
-
-function _pushLogLine(s) {
-  const idx = (_logStart + _logLen) % MAX_LOG_LINES;
-  _logRing[idx] = s;
-  if (_logLen < MAX_LOG_LINES) _logLen++;
-  else _logStart = (_logStart + 1) % MAX_LOG_LINES;
-}
-
-function _flushLog() {
-  if (!logDiv) return;
-  const out = new Array(_logLen);
-  for (let i = 0; i < _logLen; i++) out[i] = _logRing[(_logStart + i) % MAX_LOG_LINES];
-  const atBottom = (logDiv.scrollTop + logDiv.clientHeight) >= (logDiv.scrollHeight - 4);
-  logDiv.value = out.join('\n');
-  if (atBottom) logDiv.scrollTop = logDiv.scrollHeight;
-}
-
-function log(t) {
-  if (!logDiv) return;
-  _pushLogLine(String(t));
-  if (!_logFlushTimer) {
-    _logFlushTimer = setTimeout(() => {
-      _logFlushTimer = null;
-      _flushLog();
-    }, 200);
-  }
-}
-
-
-/* ====================================================================
- * 9) IPC Commands & Buttons
- * --------------------------------------------------------------------
- * `send()` helper + all button click handlers that post messages to host.
- * ==================================================================== */
-
-function send(command, extra = {}) { vscode.postMessage({ command, ...extra }); }
-
-on(btnChoose, 'click', () => send('chooseScript'));
-on(btnSetPy, 'click', () => send('setPython', { path: (pyPath && pyPath.value) || 'python' }));
-
-
-on(btnPause,  'click', () => send('pause',  { runId: currentPageRunId() }));
-on(btnTestNow,'click', () => send('testNow', { runId: currentPageRunId() }));
-on(btnResume, 'click', () => {
-  const rk = keyOf(currentPageRunId());
-  setRunningFor(rk, true);
-  setPausedFor(rk, false);
-  send('resume', { runId: rk });
-});
-
-
-on(btnAutoSave, 'click', () => send('exportSession'));
-on(btnLoad, 'click', () => send('loadSession'));
-on(btnReport, 'click', () => {
-  const runId = currentPageRunId();
-  if (!runId) { notify('No run selected.', 'warn'); return; }
-
-  const reqId  = ++reportSeq;
-  const runKey = keyOf(runId);
-  reportReqToRun.set(reqId, runKey);
-  latestReqForRun.set(runKey, reqId);
-  send('generateReport', { runId, reqId });
-  notify('Generating fresh report…');
-});
-
-
-// One-click: turn on with defaults and apply
-on(btnAutoForkOn, 'click', () => {
-  if (!afEnabled) return;
-  prefillAutoforkUi();
-  afEnabled.checked = true;
-  const cfg = readAutoForkConfig();
-  cfg.runtime = { ...(cfg.runtime||{}), auto_execute: true };  // ← ensure auto mode
-  vscode.postMessage({ command: 'applyAutoForkRules', config: cfg });
-  setAutoModeUI(true);  // ← hide manual controls immediately
-  reflectAutoForkBtns();
-  notify('AutoFork enabled with defaults.');
-});
-
-// Turn AutoFork OFF: disable rules + exit auto mode (show manual controls)
-on(btnAutoForkOff, 'click', () => {
-  if (!afEnabled) return;
-  // reflect OFF in the UI model
-  afEnabled.checked = false;
-  // read current fields, then force-disable and turn off auto_execute
-  const cfg = readAutoForkConfig();
-  cfg.rules.enabled = false;
-  cfg.runtime = { ...(cfg.runtime || {}), auto_execute: false };
-  vscode.postMessage({ command: 'applyAutoForkRules', config: cfg });
-  // bring back manual controls immediately
-  setAutoModeUI(false);
-  reflectAutoForkBtns();
-  notify('AutoFork disabled. Manual controls restored.');
-});
-
-
-// Apply whatever is currently typed in the fields
-on(btnAutoForkApply, 'click', () => {
-  if (!afEnabled) return;
-  vscode.postMessage({ command: 'applyAutoForkRules', config: readAutoForkConfig() });
-  notify('AutoFork rules applied.');
-});
-
-// Execute latest suggested plan (optional variant index)
-on(btnAutoForkExec, 'click', () => {
-  if (!_lastAutoForkPlan) { notify('No AutoFork plan yet.', 'warn'); return; }
-  const variantIndex = Number(afVariantIndex?.value ?? 0);
-  vscode.postMessage({
-    command: 'executeAutoForkPlan',
-    plan: _lastAutoForkPlan,
-    variantIndex: Number.isFinite(variantIndex) ? variantIndex : 0,
-    runId: currentPageRunId(),
-  });
-  notify('Requested AutoFork execution.');
-});
-
-
-
-
-
-
-if (btnRefreshRuns) on(btnRefreshRuns, 'click', () => {
- // Alerts are blocked in webviews; ask the extension host to show a native modal.
- send('resetAll');
-  const rk = currentPageRunId();
-});
-
-on(btnOpenDag, 'click', () => { openDag(); });
-on(dagClose,   'click', () => { closeDag(); });
-on(dagMergeBtn,'click', () => {
-  if (selectedForMerge.size !== 2) return;
-   const parents = Array.from(selectedForMerge); // ← run IDs, not file paths
-   const strategy = (dagStrategy && dagStrategy.value) || 'swa';
-   vscode.postMessage({ command: 'merge', payload: { parents, strategy } });
-   notify(`Requested merge: ${parents.join(' + ')} (${strategy})`);
-});
-
-
-/* ====================================================================
- * 10) Compare Columns UI
- * --------------------------------------------------------------------
- * Compare mode rendering: grid, tabs, columns, summary cache, copy btn.
- * ==================================================================== */
-
-function openDag(){
-  if (!dagOverlay) return;
-  dagOverlay.classList.add('show');
-  renderDag(); // draw current snapshot
-}
-function closeDag(){
-  if (!dagOverlay) return;
-  dagOverlay.classList.remove('show');
-  selectedForMerge.clear();
-  updateMergeUi();
-}
-function updateMergeUi(){
-  if (!dagMergeBtn) return;
-  const n = selectedForMerge.size;
-  dagMergeBtn.disabled = (n !== 2);
-  dagMergeBtn.textContent = (n === 2) ? 'Merge selected' : 'Pick 2 to merge';
-}
-
-
-/* ========= RUN SELECTOR ========= */
-if (runSel) {
-  runSel.onchange = () => {
-    followTemporarilyOff();
-    const id  = String(runSel.value);
-    const idx = NAV_LIST.indexOf(id);
-    if (idx >= 0) gotoPageByIndex(idx);
-  };
-}
-
-
-/* ========= CHART INIT ========= */
-(function waitForChart() {
-  if (typeof Chart !== 'undefined') {
-    initCharts();
-
-    wireModelNavClicks();
-    updateModelNav();
-
-    return;
-  }
-  const started = Date.now();
-  const tick = () => {
-    if (typeof Chart !== 'undefined') {
-      initCharts();
-
-      wireModelNavClicks();
-      updateModelNav();
-    } else if (Date.now() - started > 3000) {
-      log('Chart.js not loaded. Ensure chart.js is resolved and injected.');
-      ['lossChart','val_lossChart','lossDistChart'].forEach(id => {
-        const el = byId(id);
-        if (el && el.parentElement) el.parentElement.style.display = 'none';
-      });
-    } else {
-      setTimeout(tick, 50);
-    }
-  };
-  tick();
-})();
-
-function initCharts() {
-  if (typeof Chart !== 'undefined') {
-    if (!Chart.registry.plugins.get('forkSelection'))   Chart.register(forkSelectionPlugin);
-    if (!Chart.registry.plugins.get('autoForkMarkers')) Chart.register(autoForkMarkerPlugin);
-  }
-  prepareCanvasSizes();
-  const defer = (chart) => chart && _deferUntilLayout(chart, () => { chart.resize(); chart.update('none'); });
-  const commonOpts = {
-    animation: false,
-    animations: { colors: false, x: false, y: false },
-    parsing: true,
-    normalized: true,
-    responsive: true,
-    maintainAspectRatio: false,
-    interaction: { intersect: false},
-    devicePixelRatio: 1,
-    plugins: {
-      legend: { display: false },
-      decimation: { enabled: true, algorithm: 'lttb', samples: 500 },
-    },
-    scales: { x: { type: 'category', ticks: { maxTicksLimit: 8 } } },
-    elements: { point: { radius: 0, hitRadius: 0 } }
-  };
-
-  const lossCtx = byId('lossChart')?.getContext('2d');
-  if (lossCtx) {
-    lossChart = new Chart(lossCtx, {
-      type: 'line',
-      data: {
-        labels: [],
-        datasets: [
-          { label: 'Loss', data: [], borderColor: 'blue', fill: false, yAxisID: 'y' }
-        ]
-      },
-      options: {
-        ...commonOpts,
-        scales: {
-          ...commonOpts.scales,
-          y: { type: 'linear', position: 'left', title: { display: true, text: 'Train Loss' } }
-        }
-      }
-    });
-    defer(lossChart);
-  }
-
-  const val_lossCtx = byId('valLossChart')?.getContext('2d');
-  if (val_lossCtx) {
-    val_lossChart = new Chart(val_lossCtx, {
-      type: 'line',
-      data: { labels: [], datasets: [{ label: 'VAL', data: [], borderColor: 'orange', fill: false }] },
-            options: {
-        ...commonOpts,
-        scales: {
-          ...commonOpts.scales,
-          y: { type: 'linear', position: 'left', title: { display: true, text: 'Validation Loss' } }
-        }
-      }
-    });
-    defer(val_lossChart);
-  }
-
-
-  const rdc = byId('lossDistChart')?.getContext('2d');
-  if (rdc) {
-   lossDistChart = new Chart(rdc, {
-     type: 'bar',
-     data: {
-       datasets: [
-         { type: 'bar',  label: 'Loss frequency', data: [], parsing: false, borderWidth: 1, backgroundColor: 'rgba(128, 0, 128, 0.15)' },
-         { type: 'line', label: 'Loss density (smooth)', data: [], parsing: false, pointRadius: 0, tension: 0.3, borderWidth: 2, borderColor: 'purple' }
-       ]
-     },
-     options: {
-       ...commonOpts,
-       plugins: { ...commonOpts.plugins, decimation: { enabled: false } },
-       scales: { x: { type: 'linear', ticks: { maxTicksLimit: 8 }, offset: false }, y: { type: 'linear', beginAtZero: true } }
-     }
-    });
-    defer(lossDistChart);
-    enableDragOnReportChart();
-  }
-}
-
-function syncLossYScale(lossData) {
-  if (!lossChart?.options?.scales) return;
-  const ls = (lossData || []).filter(Number.isFinite);
-  if (ls.length) {
-    const minL = Math.min(...ls), maxL = Math.max(...ls);
-    const padL = (maxL - minL) * 0.05 || 1e-6;
-    lossChart.options.scales.y.min = minL - padL;
-    lossChart.options.scales.y.max = maxL + padL;
-  }
-}
-
-
-/* ====================================================================
- * 11) Clear/Reset helpers
- * --------------------------------------------------------------------
- * Destroy/re-init charts and clear report visuals safely.
- * ==================================================================== */
-
-function resetPendingBuffers() {
-  PEND.labels.length = 0;
-  PEND.loss.length = 0;
-  PEND.val_loss.length = 0;
-}
-function clearCharts() {
-  lossChart?.destroy();
-  val_lossChart?.destroy();
-  lossDistChart?.destroy();
-  lossDistChart = null;
-
-  STATE.labels.length = 0;
-  STATE.loss.length = 0;
-  STATE.val_loss.length = 0;
-
-  resetPendingBuffers();           // ← prevent single-point bleed across runs
-  rafPending = false;              // ← drop any queued frame using stale PEND
-  lastDrawTs = 0;
-
-  prepareCanvasSizes();
-  initCharts();
-}
-
-function clearReportChart() {
-  if (!lossDistChart) return;
-  const bars = lossDistChart.data?.datasets?.[0];
-  const line = lossDistChart.data?.datasets?.[1];
-  if (bars) bars.data = [];
-  if (line) line.data = [];
-
-  if (reportMeta) reportMeta.textContent = '';
-  if (reportNote) reportNote.textContent = '';
-
-  regionSelectMode = false;
-  regionSel = { active: false, aVal: null, bVal: null, dragging: null, activeHandle: 'a' };
-  if (regionOverlay) regionOverlay.style.display = 'none';
-  lossDistChart.update('none');
-}
-
-
-
-/* ====================================================================
- * 12) Nav helpers (arrows) & lineage rebuild
- * --------------------------------------------------------------------
- * Compute arrows’ targets, rebuild parent/child maps from rows.
- * ==================================================================== */
 
 function setArrow(btn, enabled, targetId) {
-  if (!btn) { logNav('setArrow: no btn'); return; }
+  if (!btn) { return; }
   btn.dataset.target = enabled ? keyOf(targetId) : '';
-  logNav('setArrow', { id: btn.id, enabled, targetId: btn.dataset.target });
 
   if (enabled) {
     btn.disabled = false;
@@ -1288,59 +246,383 @@ function setArrow(btn, enabled, targetId) {
   }
 }
 
-
-function rebuildLineageFromRows(rows){
-  parentsOf.clear(); parentOf.clear(); childrenOf.clear(); runsIndex.clear();
-  if (!Array.isArray(rows) || rows.length === 0) return;
-
-  for (const r of rows) {
-    const id = runIdOf(r); if (!id) continue;
-    const created = r.created_at ?? r.createdAt ?? r.created ?? r.timestamp ?? r.ts ?? 0;
-    runsIndex.set(id, { ...r, created_at: created });
-
-    // parents from rows (array preferred, otherwise legacy single-parent field)
-    const rowParents =
-      Array.isArray(r.parents) ? r.parents :
-      [ r.parent ?? r.parent_run ?? r.parent_run_id ?? r.parentId ?? null ];
-
-    // parents learned from runtime `newRun` events (may include multi-parent for merges)
-    const learned = extraParents.get(id);
-    const ps = new Set(
-      rowParents
-        .map(keyOf)
-        .filter(p => p && p !== id)
-    );
-    if (learned) for (const p of learned) if (p && p !== id) ps.add(keyOf(p));
-
-    if (ps.size) {
-      parentsOf.set(id, ps);
-      for (const p of ps) {
-        if (!childrenOf.has(p)) childrenOf.set(p, new Set());
-        childrenOf.get(p).add(id);
-      }
-    }
-  }
-
-  // derive a primary parent for prev/next arrows
-  for (const id of runsIndex.keys()) {
-    const p = pickPrimaryParent(id);
-    if (p && p !== id) parentOf.set(id, p);
-  }
-}
-
 function navEls() {
   const els = {
     prev: document.getElementById('btnPrevModel'),
     next: document.getElementById('btnNextModel'),
     sel:  document.getElementById('runSel'),
   };
-  logNav('navEls()', {
-    prev: !!els.prev, next: !!els.next, sel: !!els.sel,
-    prevDisabled: els.prev?.disabled, nextDisabled: els.next?.disabled
-  });
   return els;
 }
-// --- Merge gating banner (no HTML changes needed) ---
+
+
+
+function wireModelNavClicks() {
+  const { prev, next } = navEls();
+
+  if (prev && !prev._wired) {
+    prev.addEventListener('click', () => {
+      storeFollowTemporarilyOff();
+      const idx = getPageIndex();
+      if (idx > 0) selectRunByIndex(idx - 1);
+    });
+    prev._wired = true;
+  }
+  if (next && !next._wired) {
+    next.addEventListener('click', () => {
+      storeFollowTemporarilyOff();
+      const idx = getPageIndex();
+      const navList = getNavList();
+      if (idx < navList.length - 1) selectRunByIndex(idx + 1);
+    });
+    next._wired = true;
+  }
+}
+
+if (runSel) {
+  runSel.onchange = () => {
+    storeFollowTemporarilyOff();
+    const id  = String(runSel.value);
+    const navList = getNavList();
+    const idx = navList.indexOf(id);
+    if (idx >= 0) selectRunByIndex(idx);
+  };
+}
+
+function fillRunSel(rows) {
+  if (!runSel) return;
+
+  storeRebuildNavList(rows);
+  const navList = getNavList();
+
+  const prevViewed = currentPageRunId();
+  const prevSelect = String(runSel.value || '');
+
+  runSel.innerHTML = '';
+  for (const id of navList) {
+    const row = runsIndex.get(id) || {};
+    const opt = document.createElement('option');
+    opt.value = id;
+    opt.textContent = row?.name || id;
+    runSel.appendChild(opt);
+  }
+
+  if (!navList.length) {
+    clearCharts();
+    storeSetLiveRun(null);
+    updateModelNavUI();
+    return;
+  }
+
+  // Prefer follow-live, then the page the user was on, else newest
+  const exists = (id) => !!id && navList.includes(String(id));
+  let targetIdx = 0;
+
+  const liveRun = storeGetLiveRun();
+  if (isFollowActive() && exists(liveRun)) {
+    targetIdx = navList.indexOf(String(liveRun));
+  } else if (exists(prevViewed)) {
+    targetIdx = navList.indexOf(String(prevViewed));
+  } else if (exists(prevSelect)) {
+    targetIdx = navList.indexOf(String(prevSelect));
+  }
+
+  selectRunByIndex(targetIdx);
+}
+
+function setRunning(running) {
+  IS_RUNNING = !!running;
+
+  if (btnPause)  btnPause.disabled  = !running;
+  if (btnResume) btnResume.disabled = running;
+  if (btnChoose) btnChoose.disabled = running;
+  if (btnSetPy)  btnSetPy.disabled  = running;
+
+  if (btnReport) btnReport.disabled = running;
+  updateSelectRegionGate();
+  updateSelectedExportGate();
+  gateHealthButtons();
+}
+
+function setRunningFor(runKey, running) {
+  const st = RUN_STATE.get(runKey) || {};
+  st.running = !!running;
+  RUN_STATE.set(runKey, st);
+  if (runKey === keyOf(currentPageRunId())) {
+    const effectiveRunning = !st.paused && st.running;
+    setRunning(effectiveRunning);
+  }
+}
+
+function setPausedFor(runKey, paused) {
+  const st = RUN_STATE.get(runKey) || {};
+  st.paused = !!paused;
+  RUN_STATE.set(runKey, st);
+  if (runKey === keyOf(currentPageRunId())) {
+    IS_PAUSED = !!paused;
+    const effectiveRunning = !paused && !!st.running;
+    setRunning(effectiveRunning);
+    updateSelectRegionGate();
+    updateSelectedExportGate();
+    gateHealthButtons();
+  }
+}
+
+
+function formatWhen(step, epoch) {
+  const stepTxt = (Number.isFinite(step) ? step : '—');
+  const epTxt   = (Number.isFinite(epoch) ? epoch : '—');
+  return `Analyzed at step ${stepTxt} (epoch ${epTxt})`;
+}
+
+/* ====================================================================
+ * 4) subset export button wiring.
+ * ==================================================================== */
+
+
+
+// --- subset export UI ---
+
+on(btnExportSubset, 'click', () => {
+  const runId = currentPageRunId();
+  if (!runId) { notify('No run selected.', 'warn'); return; }
+  const format = (exportSubsetFmt && exportSubsetFmt.value) || 'parquet';
+  vscode.postMessage({ command: 'exportSubset', runId, format });
+});
+
+
+/* ====================================================================
+ * 5) Chart & Report Plumbing
+ * --------------------------------------------------------------------
+ * ChartStream wiring plus report helpers (chart_* scripts do the heavy lifting).
+ * ==================================================================== */
+
+const STREAM_METRICS = [
+  'accuracy',
+  'lr',
+  'grad_norm',
+  'weight_norm',
+  'activation_zero_frac',
+  'throughput',
+  'mem_vram',
+  'gpu_util',
+];
+
+window.ChartStream?.trackMetrics?.(['loss', 'val_loss', ...STREAM_METRICS]);
+
+const MetricHistory = (() => {
+  const MAX_POINTS = 4096;
+  let runKey = '';
+  const store = new Map();
+  let backfillTimer = null;
+  let awaitingBackfill = false;
+  const BACKFILL_DEBOUNCE_MS = 500;
+
+  function setRun(nextKey) {
+    const normalized = keyOf(nextKey);
+    if (!normalized || normalized === runKey) return;
+    runKey = normalized;
+    store.clear();
+    window.ChartStream?.reset?.();
+  }
+
+  function pushPoint(metric, point, skipChart) {
+    if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
+    const arr = store.get(metric) || [];
+    arr.push(point);
+    if (arr.length > MAX_POINTS) arr.splice(0, arr.length - MAX_POINTS);
+    store.set(metric, arr);
+  }
+
+  function rebuild(key, rows) {
+    const normalized = keyOf(key);
+    if (!normalized) return;
+    runKey = normalized;
+    store.clear();
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+      const step = Number(row.step);
+      if (!Number.isFinite(step)) continue;
+      for (const metric of STREAM_METRICS) {
+        const val = nf(row?.[metric]);
+        if (!Number.isFinite(val)) continue;
+        pushPoint(metric, { x: step, y: val }, true);
+      }
+    }
+    hydrateOpenCharts();
+    markHydrated();
+  }
+
+  function pushLive(key, row) {
+    const normalized = keyOf(key);
+    if (!normalized) return;
+    if (!runKey || runKey !== normalized) {
+      setRun(normalized);
+    }
+    const step = Number(row?.step);
+    if (!Number.isFinite(step)) return;
+    for (const metric of STREAM_METRICS) {
+      const val = nf(row?.[metric]);
+      if (!Number.isFinite(val)) continue;
+      pushPoint(metric, { x: step, y: val }, false);
+    }
+  }
+
+  function hydrate(metric) {
+    window.ChartStream?.applyMetric?.(metric);
+  }
+
+  function hydrateOpenCharts() {
+    window.ChartStream?.applyStateToCharts?.();
+  }
+
+  function hasData(metric) {
+    const arr = store.get(metric);
+    return Array.isArray(arr) && arr.length > 0;
+  }
+
+  function requestBackfill() {
+    const runId = keyOf(currentPageRunId());
+    if (!runId) return;
+    if (awaitingBackfill) return;
+    awaitingBackfill = true;
+    if (backfillTimer) clearTimeout(backfillTimer);
+    vscode.postMessage({ command: 'requestRows', runId, reason: 'metrics-backfill' });
+    backfillTimer = setTimeout(() => { awaitingBackfill = false; }, BACKFILL_DEBOUNCE_MS);
+  }
+
+  function markHydrated() {
+    awaitingBackfill = false;
+    if (backfillTimer) {
+      clearTimeout(backfillTimer);
+      backfillTimer = null;
+    }
+  }
+
+  return {
+    STREAM_METRICS,
+    setRun,
+    replaceAll: rebuild,
+    pushLive,
+    hydrate,
+    hydrateOpenCharts,
+    hasData,
+    requestBackfill,
+    markHydrated,
+    currentRun: () => runKey,
+  };
+})();
+
+window.MetricHistory = MetricHistory;
+window.MetricHydrator = {
+  hydrateMetric(metric) {
+    MetricHistory.hydrate(metric);
+  }
+};
+
+function clearCharts() {
+  // reset streaming buffers + visuals without tearing down chart instances
+  ChartStream.reset();
+
+  const ids = (window.OnTheFlyExports && OnTheFlyExports.ids) || {};
+  ChartCreation.ensurePluginsRegistered();
+  ChartCreation.initDefaultCanvases();
+
+  const lossChart = ChartCreation.get('loss') || ChartCreation.createLineChart({
+    name: 'loss',
+    canvasId: ids.lossChart,
+    label: 'Loss'
+  });
+
+  const valChart = ChartCreation.get('val_loss') || ChartCreation.createLineChart({
+    name: 'val_loss',
+    canvasId: ids.valLossChart,
+    label: 'VAL'
+  });
+
+  const hist = ChartCreation.get('loss_dist') || ChartCreation.createHistogramChart({
+    name: 'loss_dist',
+    canvasId: ids.lossDistChart
+  });
+
+  // ensure histogram visuals are cleared between runs
+  if (hist?.data?.datasets) {
+    hist.data.datasets.forEach(ds => { if (ds?.data) ds.data = []; });
+    hist.update('none');
+  }
+
+  ChartStream.attachCharts({ lossChart, valLossChart: valChart });
+
+  // Back-compat globals for any older code still reading these
+  window.lossChart = lossChart;
+  window.val_lossChart = valChart;
+  window.lossDistChart = hist;
+}
+
+function clearReportChart() {
+  ChartReport.clearReportChart();
+}
+
+function addAutoForkMarker(runKey, step, kind = 'suggested') {
+  const s = Number(step);
+  if (!Number.isFinite(s) || !runKey) return;
+  const arr = AF_MARKERS.get(runKey) || [];
+  if (!arr.some(m => m.step === s && m.kind === kind)) {
+    arr.push({ step: s, kind });
+    if (arr.length > 128) arr.splice(0, arr.length - 128);
+    AF_MARKERS.set(runKey, arr);
+    scheduleChartsRedraw();
+  }
+}
+
+function clearMarkersFor(runKey) {
+  if (!runKey) return;
+  AF_MARKERS.delete(runKey);
+}
+
+/* ====================================================================
+ * 6) DAG & Merge UI
+ * --------------------------------------------------------------------
+ * Overlay UX for DAG selection, merge gating banner, and render helpers.
+ * ==================================================================== */
+
+const selectedForMerge = new Set();
+
+function pickPrimaryParent(childId) {
+  const ps = Array.from(parentsOf.get(childId) || []);
+  if (!ps.length) return null;
+  ps.sort((a, b) => (runsIndex.get(b)?.created_at || 0) - (runsIndex.get(a)?.created_at || 0));
+  return ps[0];
+}
+
+function openDag(){
+  if (!dagOverlay) return;
+  dagOverlay.classList.add('show');
+  renderDag();
+}
+
+function closeDag(){
+  if (!dagOverlay) return;
+  dagOverlay.classList.remove('show');
+  selectedForMerge.clear();
+  updateMergeUi();
+}
+
+function updateMergeUi(){
+  if (!dagMergeBtn) return;
+  const n = selectedForMerge.size;
+  dagMergeBtn.disabled = (n !== 2);
+  dagMergeBtn.textContent = (n === 2) ? 'Merge selected' : 'Pick 2 to merge';
+}
+
+function requestDagMerge() {
+  if (selectedForMerge.size !== 2) return;
+  const parents = Array.from(selectedForMerge);
+  const strategy = (dagStrategy && dagStrategy.value) || 'swa';
+  vscode.postMessage({ command: 'merge', payload: { parents, strategy } });
+  notify(`Requested merge: ${parents.join(' + ')} (${strategy})`);
+}
+
 let _mergeBannerEl = null, _mergeBannerTimer = null;
 
 function ensureMergeBanner() {
@@ -1372,7 +654,7 @@ function ensureMergeBanner() {
 
 function showMergeBanner(text, kind = 'info', { sticky = false } = {}) {
   const el = ensureMergeBanner();
-  el.textContent = ''; // reset
+  el.textContent = '';
   const icon = document.createElement('span');
   icon.textContent = kind === 'error' ? '⚠️' : (kind === 'busy' ? '⏳' : 'ℹ️');
   el.appendChild(icon);
@@ -1394,7 +676,6 @@ function humanizeMergeGating(m) {
   switch (r) {
     case 'engine_error':           return 'Merge engine error. Check logs for details.';
     case 'awaiting_signal':        return 'Merge pending: waiting for a suggestion.';
-    case 'auto_merge_disabled':    return 'Auto-merge disabled. Enable it to proceed automatically.';
     case 'awaiting_checkpoint': {
       const haveP = !!m.have_parent_ckpt;
       const haveC = !!m.have_child_ckpt;
@@ -1408,15 +689,14 @@ function humanizeMergeGating(m) {
       return 'Paused';
   }
 }
-// Track last reason shown per run (prevents spam)
-const LAST_MERGE_REASON = new Map(); // runKey -> reason
 
+const LAST_MERGE_REASON = new Map();
 
 function shouldShowMergeGating(m) {
   const rk = String(m.run_id || curRunKey());
-  if (rk !== String(curRunKey())) return false;    // ignore off-screen runs
+  if (rk !== String(curRunKey())) return false;
   const prev = LAST_MERGE_REASON.get(rk);
-  if (prev === m.reason) return false;                 // no repeat spam
+  if (prev === m.reason) return false;
   LAST_MERGE_REASON.set(rk, m.reason);
   return true;
 }
@@ -1426,23 +706,75 @@ function hideMergeBanner() {
   if (el) el.style.display = 'none';
 }
 
-// ===================== Session Navigator =====================
-//not implemented yet
+function renderDag() {
+  if (!dagSvg) return;
+  const renderer = window.DagRender?.render;
+  if (typeof renderer !== 'function') return;
+
+  renderer({
+    svg: dagSvg,
+    runsIndex,
+    edges,
+    selectedForMerge,
+    onPrimarySelect: (runId) => {
+      storeFollowTemporarilyOff();
+      selectRunByRunId(runId);
+      closeDag();
+    },
+    updateMergeUi,
+  });
+}
 
 /* ====================================================================
- * 11.5) Window Events
+ * 7) IPC & Controls Bridge
  * --------------------------------------------------------------------
- * Global listeners (resize) that affect rendering cadence.
+ * Log buffer plumbing plus the shared send() helper + ControlsBridge.
+ * ==================================================================== */
+
+const fallbackLogBuffer = {
+  log: (msg) => console.log(String(msg)),
+  clearLogs: () => {}
+};
+const { log, clearLogs } = window.LogBuffer || fallbackLogBuffer;
+
+function send(command, extra = {}) { vscode.postMessage({ command, ...extra }); }
+
+const NullReportRequests = {
+  has: () => false,
+  runFor: () => null,
+  latestReqForRun: () => null,
+};
+
+const ControlsBridge = window.IPCControls?.init({
+  send,
+  currentPageRunId,
+  keyOf,
+  setRunningFor,
+  setPausedFor,
+  notify,
+  getPyPathValue: () => (pyPath && pyPath.value) || 'python',
+  onOpenDag: openDag,
+  onCloseDag: closeDag,
+  onRequestDagMerge: requestDagMerge,
+});
+
+const reportRequests = ControlsBridge?.reportRequests || NullReportRequests;
+
+/* ====================================================================
+ * 8) Window & Message Bus
+ * --------------------------------------------------------------------
+ * Global listeners (resize + message) that keep the webview responsive.
  * ==================================================================== */
 
 window.addEventListener('resize', scheduleChartsRedraw);
 
-
-/* ====================================================================
- * 11.6) Message Handler
- * --------------------------------------------------------------------
- * Single switchboard for messages from the extension host.
- * ==================================================================== */
+window.addEventListener('message', (e) => {
+  const m = e.data;
+  if (m?.type === 'subsetExported') {
+    const rows = Number(m.rows || 0);
+    const fmt  = (m.format || '').toUpperCase();
+  }
+});
 
 window.addEventListener('message', (e) => {
   const m = e.data;
@@ -1452,27 +784,24 @@ window.addEventListener('message', (e) => {
       // Now it’s safe to clear the webview state because the user confirmed.
       try {
         clearLogs();
-        parentsOf.clear(); parentOf.clear(); childrenOf.clear(); runsIndex.clear(); extraParents.clear();
+        RunState.resetLineage();
         selectedForMerge.clear();
-        REPORT_CACHE.clear();
-        LAST_PAUSED_STEP.clear();
-        AF_MARKERS.clear();
+        ChartReport.clearAllReports();
 
         clearCharts();
         clearReportChart();
         updateSelectedExportGate();
 
         if (runSel) runSel.innerHTML = '';
-        activeRunId = null;
-        pendingSelectRunId = null;
         IS_RUNNING = false;
         IS_PAUSED = false;
         setRunning(false);
-        updateModelNav();
+        updateModelNavUI();
 
-        regionSelectMode = false;
-        regionSel = { active:false, aVal:null, bVal:null, dragging:null, activeHandle:'a' };
-        if (regionOverlay) regionOverlay.style.display = 'none';
+        window.ChartReportSelection?.cancelSelection?.();
+
+        storeSetLiveRun(null);
+        storeSetFollowActive(true);
 
         log('Session reset.');
       } catch (e) {
@@ -1483,10 +812,9 @@ window.addEventListener('message', (e) => {
     case 'scriptChosen':
       if (scriptName) scriptName.textContent = `Chosen Python Script: ${m.file}`;
       break;
-
     case 'logs': {
       const rows = Array.isArray(m.rows) ? m.rows : [];
-      // optional: only clear if the run changed
+      //  only clear if the run changed
       clearLogs();
       for (const r of rows) {
         const ts  = r.ts ? new Date(r.ts).toLocaleTimeString() : '';
@@ -1496,76 +824,62 @@ window.addEventListener('message', (e) => {
       }
       break;
     }
-
-
     case 'session_started':
-      if (m.run_id) pendingSelectRunId = m.run_id;
+      if (m.run_id) storeSetLiveRun(m.run_id);
       send('requestRuns');
       break;
-
     case 'testNow':
-
+      if (btnTestNow && m?.status) {
+        if (m.status === 'pending') {
+          btnTestNow.disabled = true;
+          btnTestNow.setAttribute('aria-busy', 'true');
+          notify(`Running test on ${m.run_id || 'current run'}…`);
+        } else {
+          btnTestNow.disabled = false;
+          btnTestNow.removeAttribute('aria-busy');
+          if (m.status === 'completed') {
+            const avg = Number(m?.data?.avg_loss);
+            const lossText = Number.isFinite(avg) ? ` (avg loss ${avg.toFixed(4)})` : '';
+            notify(`Test complete${lossText}`);
+          } else if (m.status === 'error') {
+            notify(`Test failed: ${m.error || 'unknown error'}`, 'error');
+          }
+        }
+      }
       break;
-
     case 'newRun': {
       const child = keyOf(m.run_id || '');
-      const mode = (m.meta && m.meta.mode) || null;
-      if (mode) setAutoModeUI(mode === 'auto');
+      if (child) storeSetLiveRun(child);     // newest run becomes live
+
       if (child) {
+        // --- provenance logging (single place) ---
+        try {
+          const kind = m?.meta?.kind;
+        } catch (e) {
+          console.warn('[newRun provenance log failed]', e);
+        }
+
         const ps = Array.isArray(m.parents) ? m.parents.map(keyOf).filter(Boolean) : [];
-        if (ps.length) extraParents.set(child, new Set(ps));
+        storeAddRun({
+          id: child,
+          parents: ps,
+          name: m.name,
+          created_at: m.created_at ?? Date.now(),
+          ...m, // keep extra fields if you need them elsewhere
+        });
 
-        if (FOLLOW_ACTIVE) {
-          pendingSelectRunId = child;   // let fillRunSel drive the page switch
-        }
         send('requestRuns');            // always refresh the list
-        } else {
-          send('requestRuns');
-          wireModelNavClicks();
-          updateModelNav();
-        }
-      break;
-    }
-
-    case 'auto_fork_suggested': {
-      _lastAutoForkPlan = m.plan || null;
-      renderAutoForkPlan(_lastAutoForkPlan);
-      // record a marker at the plan's checkpoint
-      const runKey = keyOf(m.run_id || currentPageRunId());
-      const step   = Number(m.plan?.at_step ?? m.step);
-      if (Number.isFinite(step)) addAutoForkMarker(runKey, step, 'suggested');
-      notify(`AutoFork suggested: ${_lastAutoForkPlan?.reason || 'plan'}`);
-      break;
-    }
-
-
-    case 'auto_fork_executed': {
-      // Refresh runs so the new child appears in the selector/DAG immediately
-      const child = (typeof m.child_run === 'string') ? m.child_run : '';
-      const idx = Number.isFinite(m.variant_index) ? Number(m.variant_index) : null;
-      if (child) {
-        notify(`AutoFork executed → new run ${child}${idx != null ? ` (variant ${idx})` : ''}`);
       } else {
-        notify(`AutoFork executed${idx != null ? ` (variant ${idx})` : ''}.`);
+        send('requestRuns');
+        wireModelNavClicks();
+        updateModelNavUI();
       }
-      // reflect the executed plan in the plan box
-      if (m.plan) { _lastAutoForkPlan = m.plan; renderAutoForkPlan(_lastAutoForkPlan); }
-
-      // record an executed marker, too
-      const runKey = keyOf(m.run_id || currentPageRunId());
-      const step   = Number(m.plan?.at_step ?? m.step);
-      if (Number.isFinite(step)) addAutoForkMarker(runKey, step, 'executed');
-
-      send('requestRuns');
+      if ((m?.meta?.kind || '').toLowerCase() === 'fork') {
+        storeSetFollowActive(true);       // keep following live
+        selectRunByRunId(child);
+      }
       break;
     }
-
-    case 'auto_fork_rules_set':
-      // If Python echoed runtime.auto_execute, gate UI accordingly
-      if (m.config?.runtime && typeof m.config.runtime.auto_execute === 'boolean') {
-        setAutoModeUI(!!m.config.runtime.auto_execute);
-      }
-    break;
 
     case 'merge_gating': {
       if (!shouldShowMergeGating(m)) break;
@@ -1582,79 +896,103 @@ window.addEventListener('message', (e) => {
       log(`[merge] ${msg}`);
       break;
     }
-
-    case 'autoMergeExecuted':
-    case 'auto_merge_executed': {
-      // Clear any merge banner + de-dupe state for the active run
-      const rk = keyOf(m.run_id || curRunKey());
-      LAST_MERGE_REASON.delete(rk);
-      hideMergeBanner();
-
-      // reflect lineage so the DAG/selector knows this was a merge
-      if (m.new_run && Array.isArray(m.merged) && m.merged.length) {
-        extraParents.set(String(m.new_run), new Set(m.merged.map(keyOf)));
-      }
-
-      // Nudge the UI to refresh runs / rows
-      send('requestRuns');
-
-      if (FOLLOW_ACTIVE && m.new_run) {
-        const newId = keyOf(m.new_run);
-        activeRunId = newId;
-        clearCharts();
-        send('requestRows', { runId: newId });
-        showReportFor(newId);
-        updateModelNav();
-      }
-
-      // Nice to have: toast
-      try {
-        const parents = (m.merged || []).map(String).join(' + ');
-        notify(`Merge completed: ${parents} → ${m.new_run}`);
-      } catch {}
-
-      break;
-    }
-
     case 'status': {
       const rk = keyOf(m.run_id || curRunKey());
       setRunningFor(rk, !!m.running);
+      if (m.running) {
+        storeSetLiveRun(rk);                    // always switch to the run that is actually running
+        if (isFollowActive()) selectRunByRunId(rk); // snap view immediately if following
+      } else if (!m.running && storeGetLiveRun() === rk) {
+        storeSetLiveRun(null);                  // clear stale live when it stops
+      }
       log(`Status: ${m.running ? 'running' : 'idle'}${m.run_id ? ` (run ${rk})` : ''}`);
       break;
     }
-
     case 'runs': {
-      fillRunSel(m.rows);
+      const rows = Array.isArray(m.rows) ? m.rows : [];
 
-      const rk = keyOf(activeRunId || (runSel && runSel.value));
-      const row = (m.rows || []).find(r => keyOf(runIdOf(r)) === rk);
-      if (row && row.mode) setAutoModeUI(String(row.mode).toLowerCase()==='auto');
-      wireModelNavClicks();     // ensure listeners exist if buttons were late
-      updateModelNav();
+      // 1) Upsert every row into runsIndex + parents/children + edges (deduped)
+      for (const r of rows) {
+        const id = runIdOf(r);
+        if (!id) continue;
+
+        // normalize parents (supports array + legacy single-field)
+        const parents =
+          Array.isArray(r.parents)
+            ? r.parents
+            : [r.parent ?? r.parent_run ?? r.parent_run_id ?? r.parentId ?? null];
+
+        storeAddRun({
+          id,
+          parents: parents.map(keyOf).filter(Boolean),
+          name: r.name,
+          created_at: r.created_at ?? r.createdAt ?? r.created ?? r.timestamp ?? r.ts,
+          ...r, // keep other fields you rely on elsewhere
+        });
+      }
+
+      // 2) Rebuild selector/nav order (this does NOT touch lineage)
+      fillRunSel(rows);
+
+      wireModelNavClicks();
+      updateModelNavUI();
+
       if (dagOverlay && dagOverlay.classList.contains('show')) renderDag();
       updateSelectRegionGate();
       updateSelectedExportGate();
       break;
     }
-
     case 'rows': {
       const rows = m.rows || [];
-      resetPendingBuffers();
-      STATE.labels = rows.map(r => r.step);
-      STATE.loss   = rows.map(r => nf(r.loss));
-      STATE.val_loss    = rows.map(r => nf(r.val_loss));
-      scheduleChartsRedraw();
+      if (getLastRowsRunKey() !== keyOf(currentPageRunId())) break; // ignore stale/off-page rows
+      const targetRun = keyOf(currentPageRunId());
+      MetricHistory.replaceAll(targetRun, rows);
+      const tracked = ['loss', 'val_loss', ...STREAM_METRICS];
+      const sanitized = [];
+      for (const r of rows) {
+        const step = Number(r.step);
+        if (!Number.isFinite(step)) continue;
+        const rowObj = { step };
+        for (const metric of tracked) {
+          const val = nf(r?.[metric]);
+          rowObj[metric] = Number.isFinite(val) ? val : NaN;
+        }
+        sanitized.push(rowObj);
+      }
+      window.ChartStream?.ingestRows?.(sanitized);
       break;
     }
     case 'trainStep': {
-      if (!activeRunId) activeRunId = m.run_id;
-      if (m.run_id && activeRunId && m.run_id !== activeRunId) break;
-      pendPush(m.step, m.loss, m.val_loss);
-      scheduleChartsRedraw();
+      // Primary: does this message belong to the run we're tracking?
+      const msgRunId = keyOf(m.run_id);
+      const liveRun = keyOf(storeGetLiveRun());
+      
+      // If we have a live run set, only accept messages from it
+      if (liveRun && msgRunId !== liveRun) break;
+      
+      // If we don't have a live run but DO have a current page, only show that
+      const pageRun = keyOf(currentPageRunId());
+      if (!liveRun && pageRun && msgRunId !== pageRun) break;
+      
+      // If we have neither (fresh start), accept any message and set it as live
+      if (!liveRun && !pageRun) {
+        storeSetLiveRun(msgRunId);
+        // Optimistically: if NAV_LIST isn't populated yet, this will self-correct
+        // when 'runs' arrives and calls gotoPageByIndex
+      }
+
+      MetricHistory.pushLive(msgRunId, m);
+      const tracked = ['loss', 'val_loss', ...STREAM_METRICS];
+      const metricPayload = {};
+      for (const metric of tracked) {
+        const val = nf(m?.[metric]);
+        metricPayload[metric] = Number.isFinite(val) ? val : NaN;
+      }
+      window.ChartStream?.pendPush?.(m.step, metricPayload);
+      window.ChartStream?.scheduleChartsRedraw?.();
       break;
     }
     case 'paused': {
-      log('Training is paused.');
       const rk = keyOf(m.run_id || currentPageRunId());
       LAST_PAUSED_STEP.set(rk, Number(m.step) || 0);
       setRunningFor(rk, false);   // <- add this
@@ -1662,17 +1000,15 @@ window.addEventListener('message', (e) => {
       if (rk === curRunKey() && btnReport) btnReport.disabled = false;
       break;
     }
-
     case 'resumed': {
       log('Training ...');
       const rk = keyOf(m.run_id || currentPageRunId());
       setRunningFor(rk, true);
       setPausedFor(rk, false);
+      storeSetLiveRun(rk);
       if (rk === curRunKey() && btnReport) btnReport.disabled = true;
       break;
     }
-
-
     case 'trainingFinished': {
       log('Training finished.');
       const rk = keyOf(m.run_id || currentPageRunId());
@@ -1680,7 +1016,6 @@ window.addEventListener('message', (e) => {
       setPausedFor(rk, false);
       break;
     }
-
     case 'sessionLoaded':
       log('Session loaded. Refreshing runs...');
       send('requestRuns');
@@ -1693,915 +1028,35 @@ window.addEventListener('message', (e) => {
     case 'error':
       log(`[stderr] ${m.text}`);
       break;
-
     case 'reportData': {
+      notify('Done!');
       const { losses, sample_indices, meta, reqId, owner_run_id } = m;
 
-      // Require reqId to route the response; ignore anything else.
-      if (reqId == null || !reportReqToRun.has(reqId)) {
-        log('(ignored) Report without a known reqId');
-        return;
-      }
+      // Route only the intended reply
+      if (reqId == null || !reportRequests.has(reqId)) { log('(ignored) Report without a known reqId'); return; }
+      const intendedRunKey = reportRequests.runFor(reqId);
+      if (reportRequests.latestReqForRun(intendedRunKey) !== reqId) { log(`(ignored) Stale report for ${intendedRunKey} (reqId=${reqId})`); return; }
+      if (keyOf(owner_run_id) !== intendedRunKey) { log(`(ignored) Report attributed to ${owner_run_id}, expected ${intendedRunKey} (reqId=${reqId})`); return; }
 
-      const intendedRunKey = reportReqToRun.get(reqId);
-      // Drop stale/out-of-order replies for that run.
-      if (latestReqForRun.get(intendedRunKey) !== reqId) {
-        log(`(ignored) Stale report for ${intendedRunKey} (reqId=${reqId})`);
-        return;
-      }
+      // Persist + render via ChartReport
+      ChartReport.updateReportForRun(intendedRunKey, losses || [], meta || {}, sample_indices || []);
+      if (keyOf(currentPageRunId()) === intendedRunKey) ChartReport.showReportFor(intendedRunKey);
 
-      // Enforce attribution: the payload MUST say which run it belongs to.
-      if (keyOf(owner_run_id) !== intendedRunKey) {
-        log(`(ignored) Report attributed to ${owner_run_id}, expected ${intendedRunKey} (reqId=${reqId})`);
-        return;
-      }
-
-      const cacheKey = cacheKeyFor(intendedRunKey);
-
-      function writeCache(bars, line, xmin, xmax, note, meta, losses, sample_indices) {
-        const n = Array.isArray(losses) ? losses.length : 0;
-        let idx = Array.isArray(sample_indices) ? sample_indices.slice(0, n) : [];
-        if (idx.length !== n) idx = Array.from({ length: n }, (_, i) => i);
-
-        REPORT_CACHE.set(cacheKey, {
-          bars: cloneXY(bars),
-          line: cloneXY(line),
-          xmin,
-          xmax,
-          note: note || '',
-          at_step: meta?.at_step ?? null,
-          at_epoch: meta?.at_epoch ?? null,
-          lossesRaw: new Float32Array((losses || []).map(Number)),
-          indexMap:  new Uint32Array(idx.map(v => (Number(v) | 0))),
-        });
-      }
-
-      let bars = [], line = [], xmin, xmax, edges = [], note = '';
-      if (!Array.isArray(losses) || !losses.length) {
-        log('No losses returned for report.');
-        note = (meta?.note) || 'No per-sample losses available.';
-      } else {
-        const ownerHint = ` (run: ${intendedRunKey})`;
-        note = `Samples: ${losses.length}${ownerHint}` + (meta?.note ? `\n${meta.note}` : '');
-        ({ bars, line, xmin, xmax, edges } = computeLossHistogram(losses, 30));
-      }
-      lossDistChart.$ownerKey = cacheKey;
-      writeCache(bars, line, xmin, xmax, note, meta, losses || [], sample_indices || []);
-
-      const isVisible = (keyOf(currentPageRunId()) === intendedRunKey);
-      if (isVisible && lossDistChart) {
-        if (reportMeta) reportMeta.textContent = formatWhen(meta?.at_step, meta?.at_epoch);
-        _deferUntilLayout(lossDistChart, () => {
-          const incomingKey = cacheKey;
-          if (lossDistChart.$ownerKey && lossDistChart.$ownerKey !== incomingKey) {
-            if (lossDistChart.options?.scales?.x) {
-              delete lossDistChart.options.scales.x.min;
-              delete lossDistChart.options.scales.x.max;
-            }
-          }
-
-          const ds0 = lossDistChart.data?.datasets?.[0];
-          const ds1 = lossDistChart.data?.datasets?.[1];
-          if (ds0) ds0.data = bars.slice();
-          if (ds1) ds1.data = line.slice();
-
-          // lastLossEdges = edges.slice();
-          if (lossDistChart.options?.scales?.x) {
-            lossDistChart.options.scales.x.min = xmin;
-            lossDistChart.options.scales.x.max = xmax;
-          }
-          if (reportNote) reportNote.textContent = note;
-
-          // lossDistChart.$ownerKey = incomingKey;
-          lossDistChart.update('none');
-        });
-      }
       updateSelectRegionGate();
       updateSelectedExportGate();
       break;
     }
-
     case 'reportFromDb': {
       const { losses, meta, owner_run_id } = m;
-      const intendedRunKey = keyOf(owner_run_id || activeRunId);
+      const intendedRunKey = keyOf(owner_run_id || currentPageRunId());
 
-      let bars = [], line = [], xmin, xmax, note = '';
-      if (!Array.isArray(losses) || !losses.length) {
-        note = (meta?.note) || 'No per-sample losses available.';
-      } else {
-        note = `Samples: ${losses.length} (run: ${intendedRunKey})` + (meta?.note ? `\n${meta.note}` : '');
-        ({ bars, line, xmin, xmax } = computeLossHistogram(losses, 30));
-      }
+      // Persist + render via ChartReport (no indices from DB)
+      ChartReport.updateReportForRun(intendedRunKey, losses || [], meta || {}, []);
+      if (keyOf(currentPageRunId()) === intendedRunKey) ChartReport.showReportFor(intendedRunKey);
 
-
-      REPORT_CACHE.set(cacheKeyFor(intendedRunKey), {
-        bars: cloneXY(bars),
-        line: cloneXY(line),
-        xmin, xmax,
-        note: note || '',
-        at_step: meta?.at_step ?? null,
-        at_epoch: meta?.at_epoch ?? null,
-      });
-
-      const isVisible = (keyOf(currentPageRunId()) === intendedRunKey);
-      if (isVisible && lossDistChart) {
-        if (reportMeta) reportMeta.textContent = formatWhen(meta?.at_step, meta?.at_epoch);
-        _deferUntilLayout(lossDistChart, () => {
-          const ds0 = lossDistChart.data?.datasets?.[0];
-          const ds1 = lossDistChart.data?.datasets?.[1];
-          if (ds0) ds0.data = bars.slice();
-          if (ds1) ds1.data = line.slice();
-          if (lossDistChart.options?.scales?.x) {
-            lossDistChart.options.scales.x.min = xmin;
-            lossDistChart.options.scales.x.max = xmax;
-          }
-          if (reportNote) reportNote.textContent = note;
-          lossDistChart.update('none');
-        });
-      }
       updateSelectRegionGate();
       updateSelectedExportGate();
       break;
     }
-
   }
 });
-
-
-/* ====================================================================
- * 13) Select Populators
- * --------------------------------------------------------------------
- * Populate the run <select> consistently and keep active run synced.
- * ==================================================================== */
-
-function fillRunSel(rows) {
-  if (!runSel) return;
-
-  // Keep lineage + NAV_LIST in sync with incoming rows
-  rebuildLineageFromRows(rows);
-  rebuildNavListFromRows(rows);
-
-  // Rebuild <select> in NAV_LIST order (newest-left)
-  const prevViewed = currentPageRunId();   // runId the user was viewing before rebuild
-  const prevSelect = String(runSel.value || '');
-
-  runSel.innerHTML = '';
-  for (const id of NAV_LIST) {
-    const row = runsIndex.get(id) || {};
-    const opt = document.createElement('option');
-    opt.value = id;
-    opt.textContent = row?.name || id;
-    runSel.appendChild(opt);
-  }
-
-  if (!NAV_LIST.length) {
-    clearCharts();
-    activeRunId = null;
-    updateModelNav();
-    return;
-  }
-
-  // Choose the page to show after rebuild:
-  // 1) pendingSelectRunId (e.g., "follow newest") if present
-  // 2) keep the page the user was viewing if still present
-  // 3) keep the previous <select> value if still present
-  // 4) fallback to newest (index 0)
-  const exists = (id) => !!id && NAV_LIST.includes(String(id));
-  let targetIdx = 0;
-
-  if (exists(pendingSelectRunId)) {
-    targetIdx = NAV_LIST.indexOf(String(pendingSelectRunId));
-  } else if (exists(prevViewed)) {
-    targetIdx = NAV_LIST.indexOf(String(prevViewed));
-  } else if (exists(prevSelect)) {
-    targetIdx = NAV_LIST.indexOf(String(prevSelect));
-  }
-
-  pendingSelectRunId = null;
-
-  // This single call updates dropdown, charts, report view, gating, arrows
-  gotoPageByIndex(targetIdx);
-}
-
-
-
-/* ====================================================================
- * 14) Status Gating
- * --------------------------------------------------------------------
- * Toggle enabled/disabled UI based on running/paused flags.
- * ==================================================================== */
-
-function setRunning(running) {
-  IS_RUNNING = !!running;
-
-  // Primary controls
-  if (btnPause)  btnPause.disabled  = !running;
-  if (btnResume) btnResume.disabled = running;  // enabled when paused OR idle
-
-  // Secondary gating
-  if (btnSaveCkpt) btnSaveCkpt.disabled = !(running || IS_PAUSED);
-
-  if (btnChoose) btnChoose.disabled = running;
-  if (btnSetPy)  btnSetPy.disabled  = running;
-
-  if (btnReport) btnReport.disabled = running;
-  updateSelectRegionGate();
-  updateSelectedExportGate();
-}
-
-
-function followTemporarilyOff() {
-  FOLLOW_ACTIVE = false;
-  if (_followResetTimer) clearTimeout(_followResetTimer);
-  // re-enable “follow live run” after a quiet period
-  _followResetTimer = setTimeout(() => { FOLLOW_ACTIVE = true; }, 10000);
-}
-
-function setRunningFor(runKey, running) {
-  const st = RUN_STATE.get(runKey) || {};
-  st.running = !!running;
-  RUN_STATE.set(runKey, st);
-  if (runKey === keyOf(currentPageRunId())) {
-    const effectiveRunning = !st.paused && st.running;
-    setRunning(effectiveRunning);
-  }
-}
-
-
-function setPausedFor(runKey, paused) {
-  const st = RUN_STATE.get(runKey) || {};
-  st.paused = !!paused;
-  RUN_STATE.set(runKey, st);
-  if (runKey === keyOf(currentPageRunId())) {
-    IS_PAUSED = !!paused;
-    // If paused, UI should look not-running; if unpaused, reflect per-run running state.
-    const effectiveRunning = !paused && !!st.running;
-    setRunning(effectiveRunning);
-    updateSelectRegionGate();
-    updateSelectedExportGate();
-  }
-}
-
-
-
-/* ====================================================================
- * 15) Report Histogram + Manual Fork Overlay
- * --------------------------------------------------------------------
- * Drag handles on the loss distribution to select a range and trigger
- * manual fork. Selection count pill, keyboard nudge, overlay form.
- * ==================================================================== */
-
-let regionCountPill = null;
-
-function computeSelectedSampleCount(minLoss, maxLoss) {
-  if (!lossDistChart) return 0;
-  const bars = lossDistChart.data?.datasets?.[0]?.data || [];
-  if (!Array.isArray(bars) || bars.length === 0) return 0;
-  const lo = Math.min(minLoss, maxLoss);
-  const hi = Math.max(minLoss, maxLoss);
-  let total = 0;
-  for (const p of bars) {
-    if (p && Number.isFinite(p.x) && p.x >= lo && p.x <= hi) {
-      total += Number.isFinite(p.y) ? p.y : 0;
-    }
-  }
-  return total;
-}
-
-function updateSelectedCountPill() {
-  if (!regionCountPill || !regionSelectMode || !regionSel.active) return;
-  if (regionSel.aVal == null || regionSel.bVal == null) {
-    regionCountPill.textContent = 'Total Samples Selected: 0';
-    return;
-  }
-  const n = computeSelectedSampleCount(regionSel.aVal, regionSel.bVal);
-  regionCountPill.textContent = `Total Samples Selected: ${n}`;
-}
-
-function notify(text, level = 'info') {
-  vscode.postMessage({ command: 'notify', level, text });
-}
-
-
-function enableDragOnReportChart() {
-  const canvas = byId('lossDistChart');
-  if (!canvas || !lossDistChart || canvas._forkDragWired) return;
-  canvas._forkDragWired = true;
-
-  const valFromEvent = (evt) => {
-    const rect = canvas.getBoundingClientRect();
-    const xPix = evt.clientX - rect.left;
-    const scaleX = lossDistChart.scales.x;
-    const v = scaleX.getValueForPixel(xPix);
-    const min = scaleX.min, max = scaleX.max;
-    return Math.max(min, Math.min(max, v));
-  };
-
-  const nearHandle = (evt) => {
-    const rect = canvas.getBoundingClientRect();
-    const xPix = evt.clientX - rect.left;
-    const scaleX = lossDistChart.scales.x;
-    if (regionSel.aVal == null || regionSel.bVal == null) return null;
-    const aPix = scaleX.getPixelForValue(regionSel.aVal);
-    const bPix = scaleX.getPixelForValue(regionSel.bVal);
-    const hitRadius = 8;
-    if (Math.abs(xPix - aPix) <= hitRadius) return 'a';
-    if (Math.abs(xPix - bPix) <= hitRadius) return 'b';
-    return null;
-  };
-
-  on(canvas, 'mousedown', (e) => {
-    if (!regionSelectMode || !regionSel.active) return;
-    const h = nearHandle(e);
-    if (h) { 
-      regionSel.dragging = h;
-      regionSel.activeHandle = h;
-    }
-  });
-
-  on(canvas, 'click', (e) => {
-    if (!regionSelectMode || !regionSel.active) return;
-    setActiveHandleFromEvent(e);
-    const v = valFromEvent(e);
-    if (regionSel.activeHandle === 'a') regionSel.aVal = v; else regionSel.bVal = v;
-    lossDistChart.update('none');
-  });
-
-  on(window, 'mousemove', (e) => {
-    if (!regionSelectMode || !regionSel.active || !regionSel.dragging) return;
-    const v = valFromEvent(e);
-    if (regionSel.dragging === 'a') regionSel.aVal = v; else regionSel.bVal = v;
-    lossDistChart.update('none');
-  });
-
-  on(window, 'mouseup', () => { regionSel.dragging = null; });
-}
-
-
-function bumpHandle(which, delta) {
-  if (!lossDistChart || !regionSelectMode || !regionSel.active) return;
-  const scaleX = lossDistChart.scales.x;
-  const step = (scaleX.max - scaleX.min) / 100;
-  if (which === 'a') regionSel.aVal = clampValue((regionSel.aVal ?? scaleX.min) + delta * step);
-  else               regionSel.bVal = clampValue((regionSel.bVal ?? scaleX.max) + delta * step);
-  lossDistChart.update('none');
-}
-
-function setActiveHandleFromEvent(evt) {
-  if (!lossDistChart) return;
-  const canvas = byId('lossDistChart');
-  const rect = canvas.getBoundingClientRect();
-  const xPix = evt.clientX - rect.left;
-  const scaleX = lossDistChart.scales.x;
-  if (regionSel.aVal == null || regionSel.bVal == null) return;
-  const aPix = scaleX.getPixelForValue(regionSel.aVal);
-  const bPix = scaleX.getPixelForValue(regionSel.bVal);
-  regionSel.activeHandle = Math.abs(xPix - aPix) <= Math.abs(xPix - bPix) ? 'a' : 'b';
-}
-
-window.addEventListener('keydown', (e) => {
-  if (!regionSelectMode || !regionSel.active) return;
-  const which = regionSel.dragging || regionSel.activeHandle || 'a';
-  if (e.key === 'ArrowLeft')  { bumpHandle(which, -1); e.preventDefault(); }
-  if (e.key === 'ArrowRight') { bumpHandle(which, +1); e.preventDefault(); }
-});
-
-function clampValue(v) {
-  const s = lossDistChart?.scales?.x;
-  if (!s) return v;
-  return Math.max(s.min, Math.min(s.max, v));
-}
-
-function ensureRegionOverlay() {
-  if (regionOverlay) return;
-  regionOverlay = document.createElement('div');
-  Object.assign(regionOverlay.style, {
-    position: 'static',
-    background: '#334155',
-    border: '1px solid #ddd',
-    borderRadius: '10px',
-    padding: '10px',
-    boxShadow: '0 6px 20px rgba(0,0,0,0.15)',
-    marginTop: '12px',
-    display: 'none'
-  });
-
-  const chartWrap = byId('lossDistChart')?.closest('.chartWrap');
-  if (chartWrap && chartWrap.parentNode) {
-    chartWrap.parentNode.insertBefore(regionOverlay, chartWrap.nextSibling);
-  } else {
-    document.body.appendChild(regionOverlay);
-  }
-
-  // Keep the existing #forkOk button ID and fields exactly as-is:
-  regionOverlay.innerHTML = `
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-      <span id="forkCountPill"
-        style="
-          padding:4px 10px;border-radius:9999px;background:var(--btn-bg);color:var(--btn-fg);
-          font-weight:600;font-size:12px;box-shadow:var(--btn-shadow);user-select:none;
-        "
-      >Total Samples Selected: 0</span>
-
-      <label>LR <input id="forkLR" type="number" step="0.0001" value="0.001" style="width:90px"></label>
-      <label>Batch <input id="forkBS" type="number" step="1" value="32" style="width:80px"></label>
-      <label>Patience <input id="forkPat" type="number" step="1" value="5" style="width:80px"></label>
-
-      <button id="forkOk">Okay, fork</button>
-      
-
-      <label for="exportSelectedSubsetFmt">Format</label>
-      <select id="exportSelectedSubsetFmt" aria-label="Export format (selected subset)">
-        <option value="parquet">.parquet</option>
-        <option value="csv">.csv</option>
-        <option value="feather">.feather</option>
-      </select>
-      <button id="btnExportSelectedSubset" title="Export only the currently selected samples">
-        Export subset
-      </button>
-      <button id="forkCancel">Cancel</button>
-    </div>`;
-
-
-
-
-
-  const btnExportSelectedSubset = byId('btnExportSelectedSubset');
-  const overlayFmt = byId('exportSelectedSubsetFmt');
-
-  // 2a) Keep overlay format in sync with the main dropdown
-  if (overlayFmt) {
-    overlayFmt.value = (exportSubsetFmt && exportSubsetFmt.value) || 'parquet';
-    on(overlayFmt, 'change', () => { if (exportSubsetFmt) exportSubsetFmt.value = overlayFmt.value; });
-    if (exportSubsetFmt) on(exportSubsetFmt, 'change', () => { overlayFmt.value = exportSubsetFmt.value; });
-  }
-
-  // 2b) Export only the selected region, using exportSubsetFmt
-  on(btnExportSelectedSubset, 'click', () => {
-    const runId = currentPageRunId();
-    if (!runId) { notify('No run selected.', 'warn'); return; }
-    if (!regionSelectMode || !regionSel.active) {
-      notify('Click “Select Region” first, then pick a range.', 'warn');
-      return;
-    }
-    if (regionSel.aVal == null || regionSel.bVal == null) {
-      notify('Selection handles are not set yet. Click/drag on the chart.', 'warn');
-      return;
-    }
-
-    const format = (exportSubsetFmt && exportSubsetFmt.value) || 'parquet';
-    const minLoss = Math.min(regionSel.aVal, regionSel.bVal);
-    const maxLoss = Math.max(regionSel.aVal, regionSel.bVal);
-
-    const subset_indices = selectedIndicesForRun(runId, minLoss, maxLoss);
-    if (!subset_indices.length) {
-      notify('No samples in the selected range.', 'warn');
-      return;
-    }
-
-    vscode.postMessage({
-      command: 'exportSubset',
-      runId,
-      format,
-      subset_indices,
-    });
-
-    notify(`Exporting selected region (${subset_indices.length} samples, ${format.toUpperCase()})…`);
-  });
-
-  // 2c) Let your already-defined gate set visibility/enabled state
-  if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate();
-
-
-
-
-  
-  regionCountPill = byId('forkCountPill');
-  updateSelectedCountPill();
-
-  on(byId('forkOk'), 'click', () => {
-    const lr  = parseFloat(byId('forkLR').value || '0.001');
-    const bs  = parseInt(byId('forkBS').value || '32', 10);
-    const pat = parseInt(byId('forkPat').value || '5', 10);
-
-    if (regionSel.aVal == null || regionSel.bVal == null) {
-      notify('Selection handles not set. Click/drag on the chart first.', 'warn');
-      return;
-    }
-    const minLoss = Math.min(regionSel.aVal, regionSel.bVal);
-    const maxLoss = Math.max(regionSel.aVal, regionSel.bVal);
-
-    send('manualFork', {
-      runId: currentPageRunId(),
-      region: { minLoss, maxLoss },
-      hparams: { lr, batch_size: bs, patience: pat }
-    });
-
-    regionSel.aVal = null;
-    regionSel.bVal = null;
-    regionSel.activeHandle = 'a';
-    regionSelectMode = false;
-    regionSel.active = false;
-    regionOverlay.style.display = 'none';
-    if (lossDistChart) lossDistChart.update('none');
-    if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate()
-  });
-
-  on(byId('forkCancel'), 'click', () => {
-    regionSelectMode = false;
-    regionSel.active = false;
-    regionOverlay.style.display = 'none';
-    if (btnSelectRegion) btnSelectRegion.style.display = '';
-    if (lossDistChart) lossDistChart.update('none');
-    if (typeof updateSelectedExportGate === 'function') updateSelectedExportGate()
-  });
-}
-
-on(byId('forkALeft'),  'click', () => { regionSel.dragging = 'a'; bumpHandle('a', -1); });
-on(byId('forkARight'), 'click', () => { regionSel.dragging = 'a'; bumpHandle('a', +1); });
-on(byId('forkBLeft'),  'click', () => { regionSel.dragging = 'b'; bumpHandle('b', -1); });
-on(byId('forkBRight'), 'click', () => { regionSel.dragging = 'b'; bumpHandle('b', +1); });
-
-
-/* ====================================================================
- * 16) DAG + Layout Helpers
- * --------------------------------------------------------------------
- * Compute layered layout, render SVG nodes/edges, and interactions.
- * ==================================================================== */
-
-/* ===== DAG + layout helpers (unchanged) ===== */
-function _canvasHasLayout(cnv) {
-  if (!cnv) return false;
-  const r = cnv.getBoundingClientRect();
-  return r.width > 0 && r.height > 0;
-}
-function _deferUntilLayout(chart, cb, tries = 20) {
-  if (!chart?.canvas) { cb(); return; }
-  if (_canvasHasLayout(chart.canvas)) { chart.resize(); cb(); return; }
-  if (tries <= 0) { cb(); return; }
-  requestAnimationFrame(() => _deferUntilLayout(chart, cb, tries - 1));
-}
-function computeLayers(){
-  const depth = new Map();
-  const ids = Array.from(runsIndex.keys());
-
-  const getDepth = (id, stack = new Set()) => {
-    if (depth.has(id)) return depth.get(id);
-    if (stack.has(id)) { depth.set(id, 0); return 0; } // cycle guard
-    stack.add(id);
-    const ps = Array.from(parentsOf.get(id) || []);
-    const d = ps.length ? (Math.max(...ps.map(p => getDepth(p, stack))) + 1) : 0;
-    depth.set(id, d);
-    stack.delete(id);
-    return d;
-  };
-
-  ids.forEach(id => getDepth(id));
-
-  const byDepth = new Map();
-  ids.forEach(id => {
-    const d = depth.get(id) || 0;
-    if (!byDepth.has(d)) byDepth.set(d, []);
-    byDepth.get(d).push(id);
-  });
-
-  const depths = Array.from(byDepth.keys()).sort((a,b)=>a-b);
-  depths.forEach(d => byDepth.get(d).sort((a,b)=> a.localeCompare(b)));
-  return { depth, depths, byDepth };
-}
-
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-
-// ensure <defs>, a persistent pan/zoom viewport <g>, and a root <g> for content
-function ensureDagLayers(svg) {
-  if (!svg) return null;
-
-  // container object hung off the svg so we persist between re-renders
-  if (!svg.__dagLayers) svg.__dagLayers = {};
-  const layers = svg.__dagLayers;
-
-  // 1) defs (arrows, etc.)
-  if (!layers.defs) {
-    const defs = document.createElementNS(SVG_NS, 'defs');
-    defs.id = 'dag-defs';
-    defs.innerHTML = `
-      <marker id="arrowHead" markerWidth="12" markerHeight="10"
-              viewBox="0 0 12 10" refX="12" refY="5" orient="auto"
-              markerUnits="userSpaceOnUse">
-        <path class="dagEdgeArrow" d="M0,0 L12,5 L0,10 Z"></path>
-      </marker>`;
-    svg.appendChild(defs);
-    layers.defs = defs;
-  }
-
-  // 2) pan/zoom viewport
-  if (!layers.viewport) {
-    const viewport = document.createElementNS(SVG_NS, 'g');
-    viewport.id = 'dagViewport';
-    svg.appendChild(viewport);
-    layers.viewport = viewport;
-
-    // attach pan/zoom once
-    if (window.enablePanZoom) {
-      layers.panzoom = window.enablePanZoom(svg, viewport, {
-        minScale: 0.2,
-        maxScale: 5,
-        step: 0.14,
-      });
-    }
-  }
-
-  // 3) root content group (cleared every render)
-  if (!layers.root) {
-    const root = document.createElementNS(SVG_NS, 'g');
-    root.id = 'dagRoot';
-    layers.viewport.appendChild(root);
-    layers.root = root;
-  }
-
-  return layers;
-}
-
-// --- Robust SVG label wrapper (centers vertically, 2 lines + ellipsis) ---
-function wrapSvgTextIntoTspans(textEl, raw, maxWidthPx, maxLines = 2) {
-  const svg = textEl.ownerSVGElement;
-  const label = String(raw || '').trim();
-  if (!svg || !label) {
-    textEl.textContent = label || '';
-    return;
-  }
-
-  const cs = getComputedStyle(textEl);
-  const fontSize = parseFloat(cs.fontSize) || 12;
-  const lineHeight = Math.round(fontSize * 1.2);
-
-  // hidden measurer (reused)
-  let meas = svg.__measureTextEl;
-  if (!meas) {
-    meas = document.createElementNS(SVG_NS, 'text');
-    meas.setAttribute('x', '-9999');
-    meas.setAttribute('y', '-9999');
-    meas.style.visibility = 'hidden';
-    svg.appendChild(meas);
-    svg.__measureTextEl = meas;
-  }
-  // copy relevant font properties so measurements match
-  const mcs = meas.style;
-  mcs.font = cs.font;                    // copies family/size/weight/variant/line-height
-  meas.setAttribute('font-family', cs.fontFamily);
-  meas.setAttribute('font-weight', cs.fontWeight);
-  meas.setAttribute('font-size', cs.fontSize);
-
-  const widthOf = (s) => {
-    meas.textContent = s;
-    return meas.getComputedTextLength();
-  };
-
-  const words = label.split(/\s+/).filter(Boolean);
-  const lines = [];
-  let cur = '';
-
-  // Build up to maxLines lines by measuring word-by-word
-  while (words.length && lines.length < maxLines) {
-    if (!cur) {
-      // start a line; if a single word is too wide, ellipsize that word itself
-      if (widthOf(words[0]) > maxWidthPx) {
-        let w = words.shift();
-        // find largest prefix that fits with an ellipsis
-        let lo = 1, hi = w.length, best = 1;
-        while (lo <= hi) {
-          const mid = (lo + hi) >> 1;
-          const slice = w.slice(0, mid) + '…';
-          if (widthOf(slice) <= maxWidthPx) { best = mid; lo = mid + 1; }
-          else { hi = mid - 1; }
-        }
-        lines.push(w.slice(0, best) + '…');
-        // we’re done: we spent the whole line on an oversized word
-        break;
-      }
-      cur = words.shift();
-    } else {
-      const candidate = cur + ' ' + words[0];
-      if (widthOf(candidate) <= maxWidthPx) {
-        cur = candidate; words.shift();
-      } else {
-        lines.push(cur);
-        cur = '';
-      }
-    }
-  }
-  if (cur && lines.length < maxLines) lines.push(cur);
-
-  // If words remain, ellipsize last line to indicate more content
-  if (words.length) {
-    let last = lines.pop() || '';
-    while (last && widthOf(last + '…') > maxWidthPx) last = last.slice(0, -1);
-    lines.push((last || '…') + '…');
-  }
-
-  // Clear and create tspans, vertically centered via absolute y
-  while (textEl.firstChild) textEl.removeChild(textEl.firstChild);
-
-  const x = textEl.getAttribute('x') || '0';
-  const yCenter = Number(textEl.getAttribute('y') || 0);
-  const totalH = (lines.length - 1) * lineHeight;
-  const yStart = yCenter - totalH / 2; // top line
-
-  for (let i = 0; i < lines.length; i++) {
-    const tspan = document.createElementNS(SVG_NS, 'tspan');
-    tspan.setAttribute('x', x);
-    tspan.setAttribute('y', String(yStart + i * lineHeight));
-    tspan.textContent = lines[i];
-    textEl.appendChild(tspan);
-  }
-}
-
-function renderDag() {
-  if (!dagSvg) return;
-
-  // set up / reuse defs + viewport + root
-  const layers = ensureDagLayers(dagSvg);
-  if (!layers) return;
-  const { viewport, root, panzoom } = layers;
-
-  // --- Clear ONLY the content root; keep defs and viewport in place
-  while (root.firstChild) root.removeChild(root.firstChild);
-
-  // collect nodes & edges from existing maps
-  const nodeW = 150, nodeH = 42;
-  const nodes = Array.from(runsIndex.keys()).map(id => ({ id }));
-  const edges = [];
-  parentsOf.forEach((ps, child) => ps.forEach(p => edges.push({ source: p, target: child })));
-
-  // min viewBox sizes from CSS (fallbacks OK)
-  const cs = getComputedStyle(document.documentElement);
-  const MIN_W = parseFloat(cs.getPropertyValue('--dag-minW')) || 960;
-  const MIN_H = parseFloat(cs.getPropertyValue('--dag-minH')) || 560;
-
-  if (!nodes.length) {
-    dagSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-    dagSvg.setAttribute('viewBox', `0 0 ${MIN_W} ${MIN_H}`);
-    dagSvg.setAttribute('width', '100%');
-    dagSvg.setAttribute('height', '100%');
-
-    const t = document.createElementNS(SVG_NS, 'text');
-    t.setAttribute('x', '50%'); t.setAttribute('y', '50%');
-    t.setAttribute('text-anchor', 'middle');
-    t.setAttribute('fill', '#fff');
-    t.textContent = 'No runs yet';
-    root.appendChild(t);
-    return;
-  }
-
-  // --- compute layout
-  const { pos, routed, size } = window.layoutDAG(nodes, edges, {
-    nodeW, nodeH,
-    margin: 48,
-    rankSep: 200,
-    nodeSep: 28,
-    iterations: 6, // harmless extra param
-  });
-
-  // --- clamp the viewBox so content never over-zooms
-  const W = size.W, H = size.H;
-  const vbW = Math.max(W, MIN_W);
-  const vbH = Math.max(H, MIN_H);
-
-  dagSvg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
-  dagSvg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
-  dagSvg.setAttribute('width', '100%');
-  dagSvg.setAttribute('height', '100%');
-
-  // --- center the content within the larger clamped viewBox
-  const offsetX = (vbW - W) / 2;
-  const offsetY = (vbH - H) / 2;
-  root.setAttribute('transform', `translate(${offsetX}, ${offsetY})`);
-
-  // --- draw edges (under nodes) — append to root
-  routed.forEach(e => {
-    const path = document.createElementNS(SVG_NS, 'path');
-    path.setAttribute('class', 'dagEdge');
-    path.setAttribute('d', e.d);
-    path.setAttribute('marker-end', 'url(#arrowHead)');
-    root.appendChild(path);
-  });
-
-  // --- draw nodes — append to root
-  pos.forEach(({ x, y }, id) => {
-    const isSelected = selectedForMerge.has(id);
-
-    const g = document.createElementNS(SVG_NS, 'g');
-    g.setAttribute('class', `dagNode${isSelected ? ' selected' : ''}`);
-    g.setAttribute('transform', `translate(${x},${y})`);
-    g.style.cursor = 'pointer';
-
-    const label = (runsIndex.get(id)?.name || id);
-    g.setAttribute('role', 'button');
-    g.setAttribute('tabindex', '0');
-    g.setAttribute('aria-label', label);
-    g.setAttribute('aria-pressed', String(isSelected));
-
-    const rect = document.createElementNS(SVG_NS, 'rect');
-    rect.setAttribute('width', String(nodeW));
-    rect.setAttribute('height', String(nodeH));
-    rect.setAttribute('rx', '10'); rect.setAttribute('ry', '10');
-    g.appendChild(rect);
-
-    // (unchanged foreignObject label)
-    const fo = document.createElementNS(SVG_NS, 'foreignObject');
-    fo.setAttribute('x', '0'); fo.setAttribute('y', '0');
-    fo.setAttribute('width', String(nodeW)); fo.setAttribute('height', String(nodeH));
-    fo.style.pointerEvents = 'none';
-
-    const outer = document.createElement('div');
-    outer.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
-    Object.assign(outer.style, {
-      display: 'flex', width: '100%', height: '100%',
-      alignItems: 'center', justifyContent: 'center',
-      padding: '4px 8px'
-    });
-
-    const inner = document.createElement('div');
-    Object.assign(inner.style, {
-      display: '-webkit-box',
-      WebkitBoxOrient: 'vertical',
-      WebkitLineClamp: '2',
-      overflow: 'hidden',
-      textAlign: 'center',
-      lineHeight: '1.2',
-      fontWeight: '600',
-      fontSize: '12px',
-      overflowWrap: 'anywhere',
-      wordBreak: 'break-word',
-    });
-    inner.textContent = label;
-
-    outer.appendChild(inner);
-    fo.appendChild(outer);
-    g.appendChild(fo);
-
-    const title = document.createElementNS(SVG_NS, 'title');
-    title.textContent = label;
-    g.appendChild(title);
-
-    // IMPORTANT: prevent the pan layer from hijacking node clicks.
-    // This stops pointerdown from bubbling to the SVG's pan handler,
-    // so Shift-click multi-select works reliably.
-    g.addEventListener('pointerdown', (evt) => {
-      evt.stopPropagation();
-    });
-
-    function handlePrimarySelect() {
-      followTemporarilyOff();
-      gotoPageByRunId(id);
-      closeDag();
-    }
-
-    function toggleMergeSelection() {
-      if (selectedForMerge.has(id)) selectedForMerge.delete(id);
-      else selectedForMerge.add(id);
-      // Update this node in place (no full re-render)
-      const selected = selectedForMerge.has(id);
-      g.classList.toggle('selected', selected);
-      g.setAttribute('aria-pressed', String(selected));
-      updateMergeUi?.();
-    }
-
-    g.addEventListener('click', (evt) => {
-      if (evt.shiftKey) toggleMergeSelection();
-      else handlePrimarySelect();
-    });
-    g.addEventListener('keydown', (evt) => {
-      if (evt.key === 'Enter' || evt.key === ' ') {
-        evt.preventDefault();
-        if (evt.shiftKey) toggleMergeSelection();
-        else handlePrimarySelect();
-      }
-    });
-
-    root.appendChild(g);
-  });
-
-  // If later we want to reset when the graph shape changes a lot, we can:
-  // panzoom?.reset();
-}
-
-function addAutoForkMarker(runKey, step, kind = 'suggested') {
-  const s = Number(step);
-  if (!Number.isFinite(s) || !runKey) return;
-  const arr = AF_MARKERS.get(runKey) || [];
-  // de-dupe by step+kind
-  if (!arr.some(m => m.step === s && m.kind === kind)) {
-    arr.push({ step: s, kind });
-    // keep memory bounded
-    if (arr.length > 128) arr.splice(0, arr.length - 128);
-    AF_MARKERS.set(runKey, arr);
-    scheduleChartsRedraw(); // redraw charts to show the line
-  }
-}
-
-function clearMarkersFor(runKey) {
-  if (!runKey) return;
-  AF_MARKERS.delete(runKey);
-}

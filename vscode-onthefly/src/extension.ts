@@ -10,6 +10,7 @@ import {
   insertMetric,
   insertCheckpoint,
   upsertSummary,
+  upsertFinalModel,
   listRuns,
   getRunRows,
   setRunSubset,
@@ -144,94 +145,7 @@ async function ensureOntheflyInPrivateVenv(
 }
 
 
-/* ============================ AutoFork config ============================ */
-
-type AutoForkRuntime = {
-  auto_execute?: boolean;
-  auto_merge_execute?: boolean;
-  variant_policy?: 'first' | 'round_robin' | 'random' | 'index';
-  variant_index?: number;
-  name_template?: string;
-  min_train_steps_between_autoforks?: number;
-};
-
-type AutoForkConfig = {
-  rules: {
-    // keep the commonly used ones for intellisense...
-    enabled?: boolean;
-    loss_plateau_patience?: number;
-    loss_plateau_delta?: number;
-    per_sample_window?: number;
-    kmeans_k?: number;
-    dead_cluster_z?: number;
-    high_loss_quantile?: number;
-    spike_sigma?: number;
-    ema_decay?: number;
-    max_parallel_children?: number;
-    fork_cooldown_steps?: number;
-    gate_epochs?: number;
-
-    
-    merge_on_plateau?: boolean;
-    reunify_every_steps?: number;
-    min_child_steps_before_merge?: number;
-    merge_uplift_threshold?: number;
-    inter_fork_improvement?: number;
-    fork_backpressure_alpha?: number;
-
-    // accept anything backend adds in future
-    [k: string]: any;
-  };
-  sampling: {
-    psl_every: number;
-    psl_budget: number;
-    mirror_train: boolean;
-    amp_for_psl: boolean;
-    compute_margins?: boolean;
-    compute_embeddings?: boolean;
-    embed_max_dim?: number;
-    [k: string]: any;
-  };
-  runtime?: AutoForkRuntime;
-};
-
-
 // Stash latest config (webview can set it before or after starting the run)
-let autoForkConfig: AutoForkConfig | null = {
-  rules: {
-    enabled: true,
-    loss_plateau_patience: 200,
-    loss_plateau_delta: 1e-4,
-    per_sample_window: 5000,
-    kmeans_k: 5,
-    dead_cluster_z: 1.0,
-    high_loss_quantile: 0.85,
-    spike_sigma: 3.0,
-    ema_decay: 0.98,
-    max_parallel_children: 2,
-    fork_cooldown_steps: 1000,
-    gate_epochs: 30,
-    warmup_steps_before_first_fork: 200, // not implemented yet
-    base_cooldown_steps: 200,            // not implemented yet
-  },
-  sampling: {
-    psl_every: 200,
-    psl_budget: 4000,
-    mirror_train: true,
-    amp_for_psl: true,
-    compute_margins: true,
-    compute_embeddings: false,
-    embed_max_dim: 256,
-  },
-  runtime: {
-    auto_execute: false,
-    variant_policy: 'first',
-    variant_index: 0,
-    name_template: '{parent}-auto@{step}',
-    min_train_steps_between_autoforks: 200
-  }
-};
-
 /* ============================ RPC state ============================ */
 
 type Pending = {
@@ -266,8 +180,6 @@ function isRunImportedForThisSession(runId: string): boolean {
 }
 
 
-
-
 /* ============================ Persisted keys ============================ */
 
 const enum Keys {
@@ -277,33 +189,31 @@ const enum Keys {
 
 /* ============================ Webview -> Ext messages ============================ */
 
-type CompareView = 'train' | 'test' | 'info';
+type CompareView = 'train' | 'test' | 'info'; //not using but hypothetically, ifwe wanted to display test/train logs separate, or do cross-session compare
 
 type WebMsg =
   | { command: 'chooseScript' }
   | { command: 'setPython'; path: string }
   | { command: 'pause' }
   | { command: 'resume' }
+  | { command: 'testNow'; runId?: string }
   | { command: 'fork'; payload?: any }
-  | { command: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string } }
+  | { command: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string; new_name?: string } }
   | { command: 'exportSession' }
   | { command: 'loadSession' }
-  | { command: 'setMode'; mode: 'single' | 'sweep' }
   | { command: 'requestRuns' }
   | { command: 'requestRows'; runId: string }
   | { command: 'requestReport'; runId: string }
   | { command: 'generateReport'; runId?: string; reqId?: number }
-  | {
-      command: 'manualFork';
-      runId: string;
-      region: { minLoss: number; maxLoss: number };
-      hparams: { lr: number; batch_size: number; patience: number };
-    }
+  | { command: 'dist_health' }
+  | { command: 'throughput_health' }
+  | { command: 'numerics_health' }
+  | { command: 'activations_health' }
+  | { command: 'determinism_health' }
+  | { command: 'throughput_health' }
   | { command: 'notify'; level?: 'info' | 'warn' | 'error'; text: string }
   | { command: 'modelNav.select'; runId: string }
   | { command: 'exportChart'; filename?: string; dataUrl: string }
-  | { command: 'applyAutoForkRules'; config: AutoForkConfig }
-  | { command: 'executeAutoForkPlan'; plan: any; variantIndex?: number; runId?: string }
   | { command: 'resetAll' }
   | { command: 'requestLogs'; runId: string; phase?: CompareView }
   | { command: 'requestTestRows'; runId: string }
@@ -320,19 +230,15 @@ type WebMsg =
 type Ctl =
   | { cmd: 'pause' }
   | { cmd: 'resume' }
-  | { cmd: 'rewind_steps'; steps: number }   // renamed to match session.py
   | { cmd: 'save_ckpt' }
   | { cmd: 'fork'; payload?: any }
-  | { cmd: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string } }
-  | { cmd: 'set_mode'; mode: 'single' | 'sweep' };
+  | { cmd: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string; new_name?: string } };
 
 const optimisticEcho: Record<string, string> = {
   pause: 'paused',
   resume: 'resumed',
-  rewind_steps: 'rewound',            // updated
   save_ckpt: 'checkpointSaved',
-  merge: 'merged',
-  set_mode: 'mode_set',
+  merge: 'merged'
 };
 
 /* ============================ Globals ============================ */
@@ -340,12 +246,14 @@ const optimisticEcho: Record<string, string> = {
 let panel: vscode.WebviewPanel | null = null;
 let proc: ChildProcessWithoutNullStreams | null = null;
 const CHILD_KILL_TIMEOUT_MS = 1500;
-let lastMode: 'single' | 'sweep' = 'single';   ///////////////
 let currentRunId: string | null = null;
 const seenRuns = new Set<string>();
 let currentSessionId: string | null = null;   // sticky session id for log stamping
 const nativeRunsThisSession = new Set<string>(); // runs touched by THIS python session
 let modelNavSelectedRunId: string | null = null;
+let pythonConfigConfirmedThisSession = false;
+let scriptConfigConfirmedThisSession = false;
+let needDiskCleanOnNextBackend = true;
 
 
 /* ============================ Types ============================ */
@@ -355,15 +263,23 @@ type StepRow = {
   step: number;
   loss: number | null;
   val_loss: number | null;
+  accuracy?: number | null;
+  lr?: number | null;
+  grad_norm?: number | null;
+  weight_norm?: number | null;
+  activation_zero_frac?: number | null;
+  throughput?: number | null;
+  mem_vram?: number | null;
+  gpu_util?: number | null;
 };
 
 /* ============================ Activate / Deactivate ============================ */
 
-export function activate(context: vscode.ExtensionContext) {
+export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('onthefly.showDashboard', () => openPanel(context)),
   );
-  initStorage(context);
+  await initStorage(context);
 }
 
 export function deactivate() {
@@ -371,10 +287,63 @@ export function deactivate() {
   try { closeStorage(); } catch {}
 }
 
+async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromUser?: boolean }) {
 
-/* ============================ Model Comparison Compact Text-Only Column ============================ */
+  // 0) If a backend is alive, ask it to clean its save_dir now (best effort).
+  if (proc && proc.stdin?.writable) {
+    try {
+      const res = await sendReq('clean_disk', { scope: 'all' }, 60000);
+      post({
+        type: 'log',
+        level: res?.ok ? 'info' : 'warn',
+        text: res?.ok
+          ? `[reset] Disk cleanup ok: removed ${res.removed?.length ?? 0} run(s)`
+          : `[reset] Disk cleanup reported an issue: ${res?.error ?? 'unknown error'}`,
+      });
+    } catch (e: any) {
+      post({
+        type: 'log',
+        level: 'warn',
+        text: `[reset] Disk cleanup skipped or failed: ${e?.message || String(e)}`,
+      });
+    }
+  }
+  // 1) Kill Python
+  try { killProc(); } catch {}
 
-//deprecated
+  // 2) Reject outstanding RPCs
+  try {
+    for (const [, p] of pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error('Reset requested'));
+    }
+    pending.clear();
+  } catch {}
+
+  // 3) Clear in-memory extension state
+  currentRunId = null;
+  seenRuns.clear();
+  currentSessionId = null;
+  nativeRunsThisSession.clear();
+  modelNavSelectedRunId = null;
+  pythonConfigConfirmedThisSession = false;
+  scriptConfigConfirmedThisSession = false;
+
+  // 4) Reset storage
+  try { closeStorage(); } catch {}
+  await initStorage(context);
+  needDiskCleanOnNextBackend = true;
+
+  // 5) Tell webview, if it exists
+  post({ type: 'resetOk' });
+  post({ type: 'runs', rows: [] });
+  postStatus(false);
+
+  if (opts?.fromUser) {
+    vscode.window.setStatusBarMessage('Onthefly: session reset', 2000);
+  }
+}
+
 
 /* ============================ Panel & HTML ============================ */
 
@@ -428,7 +397,8 @@ async function openPanel(context: vscode.ExtensionContext) {
 
     // fresh ephemeral storage
     try { closeStorage(); } catch {}
-    initStorage(context);
+    await initStorage(context);
+    needDiskCleanOnNextBackend = true;
     panel = null;
   });
 
@@ -452,9 +422,74 @@ function getHtml(context: vscode.ExtensionContext, webview: vscode.Webview, nonc
     path.join(context.extensionPath, 'src', 'webview', 'dashboard.js'),
   ].find(fs.existsSync);
 
+  const autoforkPanelPath = [
+    path.join(context.extensionPath, 'autofork_panel.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'autofork_panel.js'),
+  ].find(fs.existsSync);
+
   const dagLayoutPath = [
     path.join(context.extensionPath, 'dag_layout.js'),
     path.join(context.extensionPath, 'src', 'webview', 'dag_layout.js'),
+  ].find(fs.existsSync);
+
+  const dagRenderPath = [
+    path.join(context.extensionPath, 'dag_render.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'dag_render.js'),
+  ].find(fs.existsSync);
+
+  const healthPath = [
+    path.join(context.extensionPath, 'health_monitor.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'health_monitor.js'),
+  ].find(fs.existsSync);
+
+  const chartCreationPath = [
+    path.join(context.extensionPath, 'chart_creation.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'chart_creation.js'),
+  ].find(fs.existsSync);
+
+  const chartPluginsPath = [
+    path.join(context.extensionPath, 'chart_plugins.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'chart_plugins.js'),
+  ].find(fs.existsSync);
+
+  const chartBootstrapPath = [
+    path.join(context.extensionPath, 'chart_bootstrap.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'chart_bootstrap.js'),
+  ].find(fs.existsSync);
+
+  const chartReportPath = [
+    path.join(context.extensionPath, 'chart_report.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'chart_report.js'),
+  ].find(fs.existsSync);
+
+  const reportSelectionPath = [
+    path.join(context.extensionPath, 'report_selection.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'report_selection.js'),
+  ].find(fs.existsSync);
+
+  const chartStreamPath = [
+    path.join(context.extensionPath, 'chart_stream.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'chart_stream.js'),
+  ].find(fs.existsSync);
+
+  const logBufferPath = [
+    path.join(context.extensionPath, 'log_buffer.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'log_buffer.js'),
+  ].find(fs.existsSync);
+
+  const ipcControlsPath = [
+    path.join(context.extensionPath, 'ipc_controls.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'ipc_controls.js'),
+  ].find(fs.existsSync);
+
+  const runStatePath = [
+    path.join(context.extensionPath, 'run_state.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'run_state.js'),
+  ].find(fs.existsSync);
+
+  const chartUtilsPath = [
+    path.join(context.extensionPath, 'chart_utils.js'),
+    path.join(context.extensionPath, 'src', 'webview', 'chart_utils.js'),
   ].find(fs.existsSync);
 
   const chartPathCandidates = [
@@ -468,6 +503,19 @@ function getHtml(context: vscode.ExtensionContext, webview: vscode.Webview, nonc
 
   const jsUri = jsPath ? webview.asWebviewUri(vscode.Uri.file(jsPath)).toString() : '';
   const dagLayoutUri = dagLayoutPath ? webview.asWebviewUri(vscode.Uri.file(dagLayoutPath)).toString() : '';
+  const dagRenderUri = dagRenderPath ? webview.asWebviewUri(vscode.Uri.file(dagRenderPath)).toString() : '';
+  const chartCreationUri = chartCreationPath ? webview.asWebviewUri(vscode.Uri.file(chartCreationPath)).toString() : '';
+  const chartPluginsUri = chartPluginsPath ? webview.asWebviewUri(vscode.Uri.file(chartPluginsPath)).toString() : '';
+  const chartBootstrapUri = chartBootstrapPath ? webview.asWebviewUri(vscode.Uri.file(chartBootstrapPath)).toString() : '';
+  const chartReportUri = chartReportPath ? webview.asWebviewUri(vscode.Uri.file(chartReportPath)).toString() : '';
+  const reportSelectionUri = reportSelectionPath ? webview.asWebviewUri(vscode.Uri.file(reportSelectionPath)).toString() : '';
+  const chartStreamUri = chartStreamPath ? webview.asWebviewUri(vscode.Uri.file(chartStreamPath)).toString() : '';
+  const logBufferUri = logBufferPath ? webview.asWebviewUri(vscode.Uri.file(logBufferPath)).toString() : '';
+  const ipcControlsUri = ipcControlsPath ? webview.asWebviewUri(vscode.Uri.file(ipcControlsPath)).toString() : '';
+  const runStateUri = runStatePath ? webview.asWebviewUri(vscode.Uri.file(runStatePath)).toString() : '';
+  const chartUtilsUri = chartUtilsPath ? webview.asWebviewUri(vscode.Uri.file(chartUtilsPath)).toString() : '';
+  const hmUri = healthPath ? webview.asWebviewUri(vscode.Uri.file(healthPath)).toString() : '';
+  // const autoforkPanelUri = autoforkPanelPath ? webview.asWebviewUri(vscode.Uri.file(autoforkPanelPath)).toString() : '';
   const chartUri = chartPath ? webview.asWebviewUri(vscode.Uri.file(chartPath)).toString() : '';
   const flyPath = path.join(context.extensionPath, 'src', 'webview', 'images', 'fly.png');
   const flyUri  = webview.asWebviewUri(vscode.Uri.file(flyPath)).toString();
@@ -478,6 +526,19 @@ function getHtml(context: vscode.ExtensionContext, webview: vscode.Webview, nonc
     .replace(/__DASHBOARD_JS__/g, jsUri || '')
     .replace(/__CHART_JS__/g, chartUri || '')
     .replace(/__DAG_LAYOUT_JS__/g, dagLayoutUri || '')
+    .replace(/__DAG_RENDER_JS__/g, dagRenderUri || '')
+    .replace(/__HEALTH_MONITOR_JS__/g, hmUri || '')
+    .replace(/__CHART_CREATION_JS__/g, chartCreationUri || '')
+    .replace(/__CHART_PLUGINS_JS__/g, chartPluginsUri || '')
+    .replace(/__CHART_BOOTSTRAP_JS__/g, chartBootstrapUri || '')
+    .replace(/__CHART_REPORT_JS__/g, chartReportUri || '')
+    .replace(/__REPORT_SELECTION_JS__/g, reportSelectionUri || '')
+    .replace(/__CHART_STREAM_JS__/g, chartStreamUri || '')
+    .replace(/__LOG_BUFFER_JS__/g, logBufferUri || '')
+    .replace(/__IPC_CONTROLS_JS__/g, ipcControlsUri || '')
+    .replace(/__CHART_UTILS__/g, chartUtilsUri || '')
+    // .replace(/__AUTOFORK_PANEL_JS__/g, autoforkPanelUri || '')
+    .replace(/__RUN_STATE_JS__/g, runStateUri || '')
     .replace(/__FLY__/g, flyUri || '');;
 
   if (!/__DASHBOARD_JS__/.test(html) && jsUri) {
@@ -507,7 +568,13 @@ function getHtml(context: vscode.ExtensionContext, webview: vscode.Webview, nonc
 
   if (!chartUri) console.warn('[onthefly] Chart.js not found at media/chart.umd.js or node_modules/chart.js/dist/chart.umd.js');
   if (!jsUri) console.warn('[onthefly] dashboard.js not found. Buttons will not work.');
+  if (!runStateUri) console.warn('[onthefly] run_state.js not found. Lineage store will not load.');
+  if (!ipcControlsUri) console.warn('[onthefly] ipc_controls.js not found. Button wiring will not initialize.');
+  // if (!autoforkPanelUri) console.warn('[onthefly] autofork_panel.js not found. AutoFork UI will be disabled.');
   if (!dagLayoutUri) console.warn('[onthefly] dag_layout.js not found. DAG will fall back or render linearly.');
+  if (!dagRenderUri) console.warn('[onthefly] dag_render.js not found. DAG overlay will not render.');
+  if (!logBufferUri) console.warn('[onthefly] log_buffer.js not found. Log textarea will not update.');
+  if (!reportSelectionUri) console.warn('[onthefly] report_selection.js not found. Report selection overlay will not load.');
 
   return html;
 }
@@ -522,10 +589,11 @@ function getNonce() {
 /* ============================ Utilities ============================ */
 
 function post(msg: any) {
+  
   try { panel?.webview.postMessage(msg); } catch (e) { console.log('[EXT->WEB] post threw:', e); }
 }
 function postErr(e: any) { post({ type: 'error', text: String(e?.message || e) }); }
-function postStatus(running: boolean) { post({ type: 'status', running, mode: lastMode }); }
+function postStatus(running: boolean) { post({ type: 'status', running}); }
 
 function postCurrentSession() {
   if (currentSessionId) post({ type: 'fs.session.current', id: currentSessionId });
@@ -543,7 +611,46 @@ function haveScript(context: vscode.ExtensionContext): boolean {
   return !!s && fs.existsSync(s);
 }
 
+async function ensureTrainingConfigConfirmed(context: vscode.ExtensionContext): Promise<boolean> {
+  const ws = context.workspaceState;
+  const python = (ws.get(Keys.PythonPath) as string | undefined)?.trim();
+  const script = (ws.get(Keys.ScriptPath) as string | undefined)?.trim();
 
+  if (!python) {
+    vscode.window.showErrorMessage('Set a Python interpreter first.');
+    return false;
+  }
+  if (!script) {
+    vscode.window.showErrorMessage('Choose a Python training script first.');
+    return false;
+  }
+
+  // If both were set explicitly in this session, we’re done.
+  if (pythonConfigConfirmedThisSession && scriptConfigConfirmedThisSession) {
+    return true;
+  }
+
+  // Otherwise, they came from a previous session → ask once.
+  const choice = await vscode.window.showWarningMessage(
+    `Use saved Python interpreter:\n${python}\nand training script:\n${script}?`,
+    {
+      modal: true,
+      detail: 'These were remembered from a previous session. If they look wrong, cancel and set them again from the dashboard.',
+    },
+    'Use',
+  );
+
+  if (choice === 'Use') {
+    pythonConfigConfirmedThisSession = true;
+    scriptConfigConfirmedThisSession = true;
+    return true;
+  }
+
+  return false;
+}
+
+
+const TEST_NOW_TIMEOUT_MS = 10 * 60 * 1000;
 const LAST_EXPORT_DIR_KEY = 'onthefly.lastExportDir';
 
 function ensurePng(name: string) {
@@ -608,15 +715,51 @@ export function stripUiOnlyFields(rows: unknown): unknown {
   return Array.isArray(rows) ? rows.map(cleanOne) : cleanOne(rows);
 }
 
+function computeForkMergeCounters(): { forkMax: number; mergeMax: number } {
+  let forkMax = 0;
+  let mergeMax = 0;
+
+  try {
+    const runs = listRuns() as Array<{ run_id: string; name?: string }>;
+    const reFork = /^fork(\d+)$/i;
+    const reMerge = /^merge(\d+)$/i;
+
+    for (const r of runs) {
+      for (const v of [r.name, r.run_id]) {
+        if (!v) continue;
+        const s = String(v).trim();
+        let m = reFork.exec(s);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (Number.isFinite(n) && n > forkMax) forkMax = n;
+        }
+        m = reMerge.exec(s);
+        if (m) {
+          const n = parseInt(m[1], 10);
+          if (Number.isFinite(n) && n > mergeMax) mergeMax = n;
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('[onthefly] computeForkMergeCounters failed:', e);
+  }
+
+  return { forkMax, mergeMax };
+}
+
+
 async function switchToRun(context: vscode.ExtensionContext, runId: string) {
-  try { sendCtl({ cmd: 'pause' }); } catch {}
+  try { await sendReq('pause', {}, 30_000); } catch {}
+  try { await sendReq('save_ckpt', {}, 120_000); } catch {}
   try { await new Promise(res => setTimeout(res, 200)); } catch {}
+
   try { killProc(); } catch {}
-  // Point selection to the requested run and launch a fresh process
+
   modelNavSelectedRunId = runId;
   currentRunId = runId;
-  await startRun(context, lastMode);
+  await startRun(context);
 }
+
 
 
 /* ============================ Message handling ============================ */
@@ -635,6 +778,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       if (!picked || !picked[0]) return;
       const p = picked[0].fsPath;
       await ws.update(Keys.ScriptPath, p);
+      scriptConfigConfirmedThisSession = true;  // <-- NEW
       vscode.window.showInformationMessage(`Training script selected: ${path.basename(p)}`);
       post({ type: 'scriptChosen', file: p });
       break;
@@ -643,17 +787,11 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'setPython': {
       const chosen = m.path || 'python';
       await ws.update(Keys.PythonPath, chosen);
+      pythonConfigConfirmedThisSession = true;  // <-- NEW
       post({ type: 'log', text: `Python set to: ${chosen}` });
       vscode.window.showInformationMessage(`Python interpreter set to: ${chosen}`);
       break;
     }
-
-    case 'setMode': {
-      lastMode = m.mode;
-      sendCtl({ cmd: 'set_mode', mode: m.mode });
-      break;
-    }
-
 
     case 'exportChart': {
       try {
@@ -720,7 +858,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           if (norm.length > 0) payload.subset_indices = norm;
         }
 
-        // --- Fallbacks (optional) ---
+        // --- Fallbacks ---
         if (!payload.subset_indices) {
           const region = (m as any).region as { minLoss: number; maxLoss: number } | undefined;
           const stored = getRunSubset(String(runId)) || [];
@@ -753,7 +891,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         modelNavSelectedRunId = id;
 
         post({ type: 'log', text: `[modelNav] selected: ${id}` });
-
+        post({ type: 'modelNav.select', runId: id }); // echo to webview so it knows which run is selected
         try {
           const rows = getLogs(id); // all phases
           post({ type: 'logs', run_id: id, rows: stripUiOnlyFields(rows) });
@@ -790,62 +928,384 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       break;
     }
 
-    case 'pause': sendCtl({ cmd: 'pause' }); break;
+    case 'pause': {
+      try {
+        // 1) Ask the backend to pause (finish current step, flush state, etc.)
+        await sendReq('pause', {}, 30_000); // backend will do its own checkpointing if it wants
+
+        // 2) Figure out which run this pause applies to
+        const runId =
+          (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
+          (currentRunId && currentRunId.trim()) ||
+          null;
+
+        if (!runId) {
+          post({ type: 'warn', text: '[pause] No runId available to attach checkpoint to.' });
+          break;
+        }
+
+        // 3) Explicitly save a checkpoint and persist it in storage
+        try {
+          const ck = await sendReq('save_ckpt', {}, 120_000);
+          if (ck?.path) {
+            const stepNum = Number(ck.step) || 0;
+            const ckptId = `${runId}:${stepNum}:${Date.now()}`; // same style as elsewhere
+
+            insertCheckpoint(
+              ckptId,
+              runId,
+              stepNum,
+              String(ck.path),
+            );
+
+            post({
+              type: 'log',
+              level: 'info',
+              text: `[pause] checkpoint saved for run ${runId} at step ${stepNum}`,
+            });
+          } else {
+            post({
+              type: 'warn',
+              text: '[pause] save_ckpt returned no path; checkpoint not recorded in DB.',
+            });
+          }
+        } catch (ckErr: any) {
+          console.warn('[onthefly] pause: save_ckpt / insertCheckpoint failed:', ckErr);
+          post({
+            type: 'warn',
+            text: `[pause] Failed to save/persist checkpoint: ${ckErr?.message || String(ckErr)}`,
+          });
+        }
+      } catch (e: any) {
+        postErr(e);
+      }
+      break;
+    }
+
+
     case 'resume': {
       try {
         const requested = String((m as any).runId || '').trim();
         if (requested) modelNavSelectedRunId = requested;
 
-        // If a process exists and the user is trying to resume a different run,
-        // do a clean switch to avoid GPU/Metal assertion and stale state.
-        const target = modelNavSelectedRunId || currentRunId || null;
+        const target =
+          requested ||
+          currentRunId ||
+          modelNavSelectedRunId ||
+          null;
+
+        // If a process exists AND user wants a different run → clean switch
         if (proc && target && currentRunId && target !== currentRunId) {
           post({ type: 'log', text: `Switching active run: ${currentRunId} → ${target}` });
           await switchToRun(context, target);
+          post({ type: 'resumed', payload: { run_id: target } });
           break;
         }
 
+        // If the process exists and we are already on the correct run → send resume
         if (proc) {
           sendCtl({ cmd: 'resume' });
           break;
         }
 
-        // No process → start fresh with currently selected run
-        if (!havePython(context)) { vscode.window.showErrorMessage('Set a Python interpreter first.'); postStatus(false); break; }
-        if (!haveScript(context)) { vscode.window.showErrorMessage('Choose a Python training script first.'); postStatus(false); break; }
-
+        // No process → start a run (startRun handles interpreter/script validation + user confirmation)
         post({ type: 'log', text: 'Starting training (via Resume)...' });
-        await startRun(context, lastMode);
-      } catch (e: any) { postErr(e); postStatus(false); }
+        await startRun(context);
+
+      } catch (e: any) {
+        postErr(e);
+        postStatus(false);
+      }
       break;
     }
 
 
-    case 'fork': sendCtl({ cmd: 'fork', payload: (m as any).payload }); break;
+    case 'testNow': {
+      const requested = (m as any).runId as string | undefined;
+      const candidate = (requested && requested.trim())
+        || (modelNavSelectedRunId && modelNavSelectedRunId.trim())
+        || (currentRunId && currentRunId.trim())
+        || null;
+      try {
+        if (!candidate) {
+          post({ type: 'log', text: 'Select a model in Model Nav before testing.' });
+          break;
+        }
+
+        const runs = listRuns() as Array<{ run_id: string; name?: string }>;
+        const friendly = runs.find(r => r.run_id === candidate)?.name || candidate;
+        const choice = await vscode.window.showWarningMessage(
+          `This will override the final tested model for this session. Test model "${friendly}" now?`,
+          {
+            modal: true,
+            detail: 'Confirming will test immediately and replace the stored final checkpoint for this session. You can continue training this and other models after.'
+          },
+          'Confirm Test'
+        );
+        if (choice !== 'Confirm Test') {
+          post({ type: 'log', text: 'Test cancelled.' });
+          break;
+        }
+
+        const target = await ensureProcOnRun(context, candidate);
+        try { await sendReq('pause', {}, 30_000); }
+        catch (pauseErr) {
+          console.warn('[onthefly] pause before test failed', pauseErr);
+        }
+        post({ type: 'testNow', status: 'pending', run_id: target });
+        const data = await sendReq('test_now', { label: 'final' }, TEST_NOW_TIMEOUT_MS);
+        const normalizedLoss = Number.isFinite(Number(data?.avg_loss)) ? Number(data.avg_loss) : null;
+        const sessionIdRaw = (data?.session_id && String(data.session_id)) || currentSessionId || '';
+        const sessionId = (sessionIdRaw && sessionIdRaw.trim()) || `session-${target}`;
+        const ckptPath = data?.ckpt_path ? String(data.ckpt_path) : '';
+        if (sessionId && ckptPath) {
+          try {
+            upsertFinalModel({
+              session_id: sessionId,
+              run_id: target,
+              ckpt_path: ckptPath,
+              step: Number(data?.step) || 0,
+              avg_test_loss: normalizedLoss,
+            });
+          } catch (persistErr) {
+            console.warn('[onthefly] failed to persist final model', persistErr);
+          }
+        }
+        post({
+          type: 'testNow',
+          status: 'completed',
+          run_id: target,
+          data: { ...data, avg_loss: normalizedLoss, ckpt_path: ckptPath },
+        });
+      } catch (e: any) {
+        const fallback = candidate || modelNavSelectedRunId || currentRunId || null;
+        post({ type: 'testNow', status: 'error', run_id: fallback, error: String(e?.message || e) });
+        postErr(e);
+      }
+      break;
+    }
+
+    case 'fork': {
+      try {
+        // Accept both message shapes
+        const payloadIn = (() => {
+          const top = m as any;
+          const inner = (top && top.payload) || {};
+          const merged = { ...inner, ...top };
+          delete (merged as any).command;
+          delete (merged as any).type;
+          delete (merged as any).payload;
+          return merged;
+        })();
+
+        // Also consider runId as a parent hint
+        const hinted = String(
+          payloadIn.owner_run_id || payloadIn.parent_run_id || payloadIn.runId || ''
+        ).trim();
+
+        const target =
+          hinted ||
+          modelNavSelectedRunId ||
+          currentRunId ||
+          pickAnchorRunForAction(payloadIn) ||
+          '';
+
+        if (!target) { postErr('No run selected to fork from.'); break; }
+
+        // Ensure backend on target…
+        if (!proc || !proc.stdin?.writable) {
+          await ensureMaintenanceBackend(context, target);
+          modelNavSelectedRunId = target;
+          post({ type: 'modelNav.select', runId: target });
+        } else if (currentRunId && currentRunId !== target) {
+          await switchToRun(context, target);
+        }
+
+        try { await sendReq('pause', {}, 30_000); } catch {}
+        let ckptPath: string | undefined = latestCheckpointForRun(target)?.path;
+        if (!ckptPath) {
+          try { const ck = await sendReq('save_ckpt', {}, 120_000); ckptPath = ck?.path; } catch {}
+        }
+
+        // Forward region/hparams through to backend
+        const data = await sendReq('fork', {
+          parent_run_id: target,
+          owner_run_id: target,
+          ...payloadIn,
+          ...(ckptPath ? { parent_ckpt_path: ckptPath } : {}),
+        }, 120_000);
+
+        const child = String(data?.new_run || data?.child_id || data?.run_id || '').trim();
+        if (child) {
+          currentRunId = child;
+          modelNavSelectedRunId = child;
+          nativeRunsThisSession.add(child);
+          post({ type: 'modelNav.select', runId: child });
+          if (Array.isArray(data?.subset_indices)) {
+            try { setRunSubset(child, data.subset_indices.map((n: any) => Number(n) | 0)); } catch {}
+          }
+          try { sendCtl({ cmd: 'resume' }); } catch {}
+        }
+      } catch (e:any) {
+        postErr(e);
+      }
+      break;
+    }
 
     case 'merge': {
       try {
-        await sendReq('merge', (m as any).payload, 120000);
-        // Python will emit `newRun` → handled in handleLine().
-      } catch (e: any) { postErr(e); }
+        const payload = m.payload;
+
+        // Ensure we have a backend anchored to something sensible for merge ops.
+        if (!proc || !proc.stdin?.writable) {
+          const anchor = pickAnchorRunForAction(payload);
+          if (!anchor) {
+            postErr('No runs available to anchor the merge. Select a run or include parents[].');
+            break;
+          }
+          await ensureMaintenanceBackend(context, anchor);
+          modelNavSelectedRunId = anchor;
+          post({ type: 'modelNav.select', runId: anchor });
+        } else {
+          try { await sendReq('pause', {}, 30_000); } catch {}
+        }
+
+        // Preflight: all parents must have checkpoints.
+        const parents: string[] = Array.isArray(payload.parents) ? payload.parents : [];
+        for (const p of parents) {
+          if (!latestCheckpointForRun(p)) {
+            await ensureProcOnRun(context, p);
+            try { await sendReq('pause', {}, 30_000); } catch {}
+            try {
+              const ck = await sendReq('save_ckpt', {}, 120_000);
+              // belt-and-suspenders: persist immediately in case the backend doesn't emit the JSON event
+              if (ck?.path) insertCheckpoint(`${p}:${ck.step}:${Date.now()}`, p, Number(ck.step) || 0, String(ck.path));
+            } catch {}
+          }
+        }
+
+        // now run the existing preflight
+        const missing = parents.filter(p => !latestCheckpointForRun(p));
+
+        // Perform the merge.
+        const data = await sendReq('merge', payload, 120000);
+
+        // --- immediately navigate to the merged child & start running (mirror fork behavior) ---
+        const child =
+          String(
+            (data && (data.new_run ?? data.child_id ?? data.run_id)) || ''
+          ).trim();
+
+        if (child) {
+          currentRunId = child;
+          modelNavSelectedRunId = child;
+          nativeRunsThisSession.add(child);
+          post({ type: 'modelNav.select', runId: child });
+
+          // If backend provided a subset (optional), persist it like we do on fork.
+          if (Array.isArray(data?.subset_indices)) {
+            try {
+              setRunSubset(child, data.subset_indices.map((n: any) => Number(n) | 0));
+            } catch {}
+          }
+
+          // Nudge the backend to resume the new merged run.
+          try { sendCtl({ cmd: 'resume' }); } catch {}
+        } else {
+          // If the backend didn't return an explicit child id, the usual 'newRun' event
+          // will still keep things in sync. No-op here.
+        }
+      } catch (e: any) {
+        postErr(e);
+      }
+      break;
+    }
+
+    case 'dist_health': {
+      try {
+        const rid = (m as any).runId as string | undefined;
+        const target = await ensureProcOnRun(context, rid);
+        modelNavSelectedRunId = target;
+        post({ type: 'modelNav.select', runId: target });
+        await runHealth('dist_health', { require_all_ranks: false, sample_weights: 0 }, 'distHealth', 30_000, target);
+      } catch (e:any) { postErr(e); }
+      break;
+    }
+
+    case 'throughput_health': {
+      try {
+        const rid = (m as any).runId as string | undefined;
+        const target = await ensureProcOnRun(context, rid);
+        modelNavSelectedRunId = target;
+        post({ type: 'modelNav.select', runId: target });
+        await runHealth('throughput_health', { budget_steps: 2, micro_backward: false }, 'throughputHealth', 45_000, target);
+      } catch (e:any) { postErr(e); }
+      break;
+    }
+
+    case 'activations_health': {
+      try {
+        const rid = (m as any).runId as string | undefined;
+        const target = await ensureProcOnRun(context, rid);
+        modelNavSelectedRunId = target;
+        post({ type: 'modelNav.select', runId: target });
+        await runHealth('activations_health', { budget_steps: 2, topk: 12, eps: 1e-3 }, 'activationsHealth', 60_000, target);
+      } catch (e:any) { postErr(e); }
+      break;
+    }
+
+    case 'numerics_health': {
+      try {
+        const rid = (m as any).runId as string | undefined;
+        const target = await ensureProcOnRun(context, rid);
+        modelNavSelectedRunId = target;
+        post({ type: 'modelNav.select', runId: target });
+        await runHealth('numerics_health', { sample_layers: 25 }, 'numericsHealth', 30_000, target);
+      } catch (e:any) { postErr(e); }
+      break;
+    }
+
+    case 'determinism_health': {
+      try {
+        const rid = (m as any).runId as string | undefined;
+        const target = await ensureProcOnRun(context, rid);
+        modelNavSelectedRunId = target;
+        post({ type: 'modelNav.select', runId: target });
+        await runHealth('determinism_health', {}, 'determinismHealth', 20_000, target);
+      } catch (e:any) { postErr(e); }
       break;
     }
 
     case 'generateReport': {
       try {
-        const runId = (m as any).runId ?? currentRunId;
-        const reqId = (m as any).reqId;
-        if (!runId) { post({ type: 'error', text: 'No active run selected for report.' }); break; }
+        let runId: string | undefined = (m as any).runId ?? undefined;
+        if (!runId || !String(runId).trim()) {
+          const anchor = pickAnchorRunForAction(); // choose something sensible if not provided
+          if (!anchor) { post({ type: 'error', text: 'No active run selected for report.' }); break; }
+          runId = anchor;
+        }
+        runId = String(runId).trim();
+
+        // If nothing is running yet, spin up a maintenance backend on the target.
+        if (!proc || !proc.stdin?.writable) {
+          await ensureMaintenanceBackend(context, runId);
+          modelNavSelectedRunId = runId;
+          post({ type: 'modelNav.select', runId });
+        } else if (currentRunId && currentRunId !== runId) {
+          // Running but on a different model → switch cleanly.
+          await switchToRun(context, runId);
+        }
+
+        await sendReq('pause', {}, 30_000);
 
         const subset = getRunSubset(String(runId));
         const subset_on: 'train' = 'train';
 
         const data = await sendReq('generate_report', {
           owner_run_id: runId,
-          run_id: runId,
           subset_indices: subset.length ? subset : undefined,
           subset_on,
-          reqId
+          reqId: (m as any).reqId
         });
 
         const losses: number[] = Array.isArray(data?.losses)
@@ -853,8 +1313,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           : [];
 
         let sample_indices: number[] = Array.isArray(data?.sample_indices)
-          ? (data.sample_indices as any[]).map(v => Math.trunc(Number(v)))
-              .filter(v => Number.isFinite(v) && v >= 0)
+          ? (data.sample_indices as any[]).map(v => Math.trunc(Number(v))).filter(v => Number.isFinite(v) && v >= 0)
           : [];
 
         if (sample_indices.length !== losses.length) {
@@ -881,7 +1340,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           type: 'reportData',
           run_id: String(runId),
           owner_run_id: String(runId),
-          reqId,
+          reqId: (m as any).reqId,
           losses,
           sample_indices,
           meta: { ...meta, at_step, at_epoch, subset_on, samples: losses.length, note }
@@ -906,97 +1365,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           });
         }
       } catch (e:any) { postErr(e); }
-      break;
-    }
-
-    case 'applyAutoForkRules': {
-      try {
-        autoForkConfig = (m as any).config;
-        if (proc) {
-          await sendReq('set_autofork_rules', autoForkConfig, 30000);
-          post({ type: 'log', text: '[AutoFork] rules applied to running session.' });
-        } else {
-          post({ type: 'log', text: '[AutoFork] rules staged; will apply at next start.' });
-        }
-      } catch (e:any) { postErr(e); }
-      break;
-    }
-
-    case 'executeAutoForkPlan': {
-      try {
-        const plan = (m as any).plan || {};
-        const parent = String((m as any).runId || currentRunId || '');
-        const vIdx = Math.max(0, Number((m as any).variantIndex ?? 0));
-        const variants: any[] = Array.isArray(plan?.training_recipe?.variants)
-          ? plan.training_recipe.variants
-          : [];
-        const chosen = variants[vIdx] || {};
-
-        // provenance from the background worker
-        const initFrom: string | undefined =
-          typeof plan?.init_from === 'string' ? plan.init_from :
-          typeof plan?.initFrom === 'string' ? plan.initFrom : undefined;
-
-        const payload: any = {
-          parent_run_id: parent,
-          owner_run_id: parent,
-          selection: plan.selection || undefined,
-          hparams: chosen || {},
-          run_name: plan.proposed_run_name || undefined,
-          //  execute the fork FROM the exact checkpoint the plan used
-          parent_ckpt_path: initFrom,
-        };
-
-        const data = await sendReq('fork', payload, 120000);
-
-        if (data?.new_run && Array.isArray(data?.subset_indices)) {
-          try {
-            setRunSubset(
-              String(data.new_run),
-              data.subset_indices.map((n: any) => Number(n) | 0)
-            );
-          } catch (e) {
-            console.warn('[onthefly] persist subset failed:', e);
-          }
-        }
-
-        post({
-          type: 'log',
-          text: `[AutoFork] executed fork for plan "${plan.reason || 'plan'}"${
-            initFrom ? ` (from ckpt: ${path.basename(initFrom)})` : ''
-          }.`,
-        });
-      } catch (e: any) {
-        postErr(e);
-      }
-      break;
-    }
-
-
-    case 'manualFork': {
-      try { await sendReq('pause', {}, 30000); } catch { /* ignore */ }
-      try {
-        const parent = String((m as any).runId || currentRunId || '');
-
-        const data = await sendReq('fork', {
-          parent_run_id: parent,
-          owner_run_id: parent,
-          region: (m as any).region,
-          hparams: (m as any).hparams
-        });
-
-        if (data?.new_run && Array.isArray(data?.subset_indices)) {
-          try {
-            setRunSubset(String(data.new_run), data.subset_indices.map((n: any) => Number(n) | 0));
-          } catch (e) {
-            console.warn('[onthefly] failed to persist subset:', e);
-          }
-        }
-
-        sendCtl({ cmd: 'resume' });
-      } catch (e: any) {
-        postErr(e);
-      }
       break;
     }
 
@@ -1060,7 +1428,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
             console.warn('[export] failed to insert spilled snapshots into DB:', e);
           }
 
-          // 3) if python returned a ring ckpt for the current run, stash it too (nice-to-have)
+          // 3) if python returned a ring ckpt for the current run, stash it too
           try {
             const ck = prep?.ckpt;
             if (ck?.path && ck?.run) {
@@ -1122,135 +1490,98 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       break;
     }
 
-  case 'loadSession': {
-    try {
-      const initialDir = getInitialExportDir(context);
-      const picked = await vscode.window.showOpenDialog({
-        title: 'Load bundle',
-        canSelectMany: false,
-        canSelectFiles: true,
-        canSelectFolders: true,
-        defaultUri: vscode.Uri.file(initialDir),
-        openLabel: 'Load',
-      });
-      if (!picked || !picked[0]) break;
-
-      const chosen = picked[0].fsPath;
-      const isDir = fs.existsSync(chosen) && fs.statSync(chosen).isDirectory();
-      await context.globalState.update(LAST_EXPORT_DIR_KEY, isDir ? chosen : path.dirname(chosen));
-
-      let bundleDir: string | null = null;
-      if (isDir) {
-        const manifestPath = path.join(chosen, 'bundle.json');
-        if (!fs.existsSync(manifestPath)) {
-          vscode.window.showErrorMessage(`No bundle.json found in folder:\n${chosen}`);
-          break;
-        }
-        bundleDir = chosen;
-      } else {
-        const base = path.basename(chosen).toLowerCase();
-        if (base !== 'bundle.json') {
-          vscode.window.showErrorMessage(
-            'Unsupported selection. Pick a bundle folder (with bundle.json) or bundle.json itself.'
-          );
-          break;
-        }
-        bundleDir = path.dirname(chosen);
-      }
-
-      // Load the bundle into the live DB
-      storageLoadBundle(bundleDir, context);
-
-      for (const s of listSessions()) {
-        post({ type: 'log', text: `[print] session ${s.session_id}: ${getLogsBySession(String(s.session_id)).length} logs` });
-      }
-
-      // Notify UI & refresh runs
-      post({ type: 'sessionLoaded' });
-      const runs = listRuns() as Array<{ run_id: string }>;
-      post({ type: 'runs', rows: runs });
+    case 'loadSession': {
       try {
-        const sessions = listSessions();
-        post({ type: 'fs.session.list', items: sessions });
+        const initialDir = getInitialExportDir(context);
+        const picked = await vscode.window.showOpenDialog({
+          title: 'Load bundle',
+          canSelectMany: false,
+          canSelectFiles: true,
+          canSelectFolders: true,
+          defaultUri: vscode.Uri.file(initialDir),
+          openLabel: 'Load',
+        });
+        if (!picked || !picked[0]) break;
 
-        
-        
+        const chosen = picked[0].fsPath;
+        const isDir = fs.existsSync(chosen) && fs.statSync(chosen).isDirectory();
+        await context.globalState.update(LAST_EXPORT_DIR_KEY, isDir ? chosen : path.dirname(chosen));
 
-      } catch {}
-
-      // Hydrate logs for each run so the webview has something to render immediately
-      for (const r of runs) {
-        try {
-          const rows = getLogs(String(r.run_id)); // all phases
-          post({ type: 'logs', run_id: String(r.run_id), rows: stripUiOnlyFields(rows) });
-        } catch (e:any) {
-          console.warn('[onthefly] failed to load logs for run', r.run_id, e);
-        }
-      }
-
-      const choice = await vscode.window.showInformationMessage(
-        `Bundle loaded from: ${bundleDir}`,
-        'Reveal in Finder/Explorer'
-      );
-      if (choice) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(bundleDir));
-
-    } catch (e: any) {
-      postErr(e);
-    }
-    break;
-  }
-
-
-    case 'resetAll': {
-      // (We already show a confirm dialog in the webview, but this native modal is a safe second guard.)
-      const pick = await vscode.window.showWarningMessage(
-        'This will erase all models from memory, are you sure you want to refresh?',
-        { modal: true, detail: 'Any running training will be stopped. Nothing will be saved if you have not exported session.' },
-        'Erase & Refresh',
-        'Cancel'
-      );
-      if (pick !== 'Erase & Refresh') {
-        post({ type: 'log', text: 'Refresh cancelled.' });
-        break;
-      }
-
-      try {
-        // 1) Stop Python if running
-        try { killProc(); } catch {}
-
-        // 2) Reject any outstanding RPCs cleanly
-        try {
-          for (const [, p] of pending) {
-            clearTimeout(p.timer);
-            // make the rejection explicit so callers don’t hang
-            p.reject(new Error('Reset requested'));
+        let bundleDir: string | null = null;
+        if (isDir) {
+          const manifestPath = path.join(chosen, 'bundle.json');
+          if (!fs.existsSync(manifestPath)) {
+            vscode.window.showErrorMessage(`No bundle.json found in folder:\n${chosen}`);
+            break;
           }
-          pending.clear();
+          bundleDir = chosen;
+        } else {
+          const base = path.basename(chosen).toLowerCase();
+          if (base !== 'bundle.json') {
+            vscode.window.showErrorMessage(
+              'Unsupported selection. Pick a bundle folder (with bundle.json) or bundle.json itself.'
+            );
+            break;
+          }
+          bundleDir = path.dirname(chosen);
+        }
+
+        // Load the bundle into the live DB
+        storageLoadBundle(bundleDir, context);
+
+        for (const s of listSessions()) {
+          post({ type: 'log', text: `[print] session ${s.session_id}: ${getLogsBySession(String(s.session_id)).length} logs` });
+        }
+
+        // Notify UI & refresh runs
+        post({ type: 'sessionLoaded' });
+        const runs = listRuns() as Array<{ run_id: string }>;
+        post({ type: 'runs', rows: runs });
+        try {
+          const sessions = listSessions();
+          post({ type: 'fs.session.list', items: sessions });
+
         } catch {}
 
-        // 3) Clear in-memory extension state
-        currentRunId = null;
-        seenRuns.clear();
-        currentSessionId = null;
-        nativeRunsThisSession.clear();
+        // Hydrate logs for each run so the webview has something to render immediately
+        for (const r of runs) {
+          try {
+            const rows = getLogs(String(r.run_id)); // all phases
+            post({ type: 'logs', run_id: String(r.run_id), rows: stripUiOnlyFields(rows) });
+          } catch (e:any) {
+            console.warn('[onthefly] failed to load logs for run', r.run_id, e);
+          }
+        }
 
-        // 4) Reset storage: close and re-init a fresh DB
-        try { closeStorage(); } catch {}
-        initStorage(context);
+        const choice = await vscode.window.showInformationMessage(
+          `Bundle loaded from: ${bundleDir}`,
+          'Reveal in Finder/Explorer'
+        );
+        if (choice) vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(bundleDir));
 
-        // 5) Tell the webview we’re clean
-        post({ type: 'resetOk' });              // “done” signal for UI log
-        post({ type: 'runs', rows: [] });      // empty list = nothing to select
-        postStatus(false);                      // not running
-        
-
-        vscode.window.setStatusBarMessage('ForkSmith: session reset', 2000);
       } catch (e: any) {
         postErr(e);
       }
       break;
     }
 
+    case 'resetAll': {
+      const pick = await vscode.window.showWarningMessage(
+        'This will erase all models from memory, are you sure you want to refresh?',
+        {
+          modal: true,
+          detail: 'Any running training will be stopped. Nothing will be saved if you have not exported session.',
+        },
+        'Erase & Refresh',
+      );
+      if (pick !== 'Erase & Refresh') {
+        post({ type: 'log', text: 'Refresh cancelled.' });
+        break;
+      }
+
+      await hardResetSession(context, { fromUser: true });
+      break;
+    }
 
     case 'requestRuns': {
       try {
@@ -1271,9 +1602,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
 /* ============================ Python process (training) ============================ */
 
-async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'sweep') {
+async function startRun(context: vscode.ExtensionContext) {
   if (proc) { vscode.window.showWarningMessage('A run is already active.'); return; }
-
+  
   // Ensure onthefly-ai is available in our private venv (required)
   try {
     await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: true });
@@ -1283,10 +1614,15 @@ async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'swee
     return;
   }
 
-  // hydrate confirmations from persisted values
+  // confirm we’re allowed to use the stored interpreter + script
+  if (!(await ensureTrainingConfigConfirmed(context))) {
+    postStatus(false);
+    return;
+  }
+
+  // Still keep the runtime sanity checks (path exists, python runs).
   if (!havePython(context)) { vscode.window.showErrorMessage('Set a Python interpreter first.'); postStatus(false); return; }
   if (!haveScript(context)) { vscode.window.showErrorMessage('Choose a Python training script first.'); postStatus(false); return; }
-
 
   const ws = context.workspaceState;
   const python = (ws.get(Keys.PythonPath) as string | undefined)?.trim();
@@ -1300,6 +1636,8 @@ async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'swee
     return;
   }
 
+  const { forkMax, mergeMax } = computeForkMergeCounters();
+
   const args = ['-u', script];
   post({ type: 'log', text: `Spawning: ${python} ${args.join(' ')}` });
 
@@ -1310,29 +1648,21 @@ async function startRun(context: vscode.ExtensionContext, mode: 'single' | 'swee
 
   const imported = resumeRunId ? isRunImportedForThisSession(resumeRunId) : false;
   const resume   = resumeRunId ? latestCheckpointForRun(resumeRunId) : null;
-  
 
-  console.log('[onthefly] starting run', JSON.stringify({ mode, resumeRunId, imported }, null, 2));
-  console.log('[onthefly] resume lookup', JSON.stringify({ resumeRunId, resume }, null, 2));
-
+  if (resumeRunId && !resume) {
+    post({ type: 'warn', text: `[resume] No checkpoint found for run ${resumeRunId}; starting fresh.` });
+  }
 
   const envBlock = {
     ...process.env,
-    ONTHEFLY_MODE: mode,
-    // If we have a resume candidate, provide it. Imported heuristic helps, but isn't mandatory.
     ...(resumeRunId ? { ONTHEFLY_RESUME_RUN_ID: resumeRunId } : {}),
     ...(resume && resume.path ? {
       ONTHEFLY_INIT_CKPT: resume.path,
       ONTHEFLY_INIT_STEP: String(resume.step ?? 0),
     } : {}),
+    ONTHEFLY_FORK_COUNTER_INIT: String(forkMax || 0),
+    ONTHEFLY_MERGE_COUNTER_INIT: String(mergeMax || 0),
   };
-
-  console.log('[onthefly] env resume block', {
-    ONTHEFLY_RESUME_RUN_ID: envBlock.ONTHEFLY_RESUME_RUN_ID,
-    ONTHEFLY_INIT_CKPT: envBlock.ONTHEFLY_INIT_CKPT,
-    ONTHEFLY_INIT_STEP: envBlock.ONTHEFLY_INIT_STEP,
-  });
-
 
   try {
     proc = spawn(python, args, {
@@ -1416,6 +1746,78 @@ function sendCtl(cmd: Ctl) {
     postErr(e);
   }
 }
+
+async function runHealth(
+  cmd: string,
+  payload: any,
+  eventType: string,
+  timeoutMs = 60_000,
+  forRunId?: string
+) {
+  const run_id = forRunId || modelNavSelectedRunId || currentRunId || null;
+
+  try {
+    // tell the webview to show a loading placeholder
+    post({ type: eventType, run_id, pending: true });
+
+    try { await sendReq('pause', {}, 30_000); } catch {}
+
+    const data = await sendReq(cmd, payload, timeoutMs);
+
+    // normal success event (what your webview already handles)
+    post({ type: eventType, cmd, payload, data, run_id });
+  } catch (e:any) {
+    // let the UI show an error if needed
+    post({ type: eventType, run_id, error: String(e?.message || e) });
+    postErr(e);
+  }
+}
+
+
+async function ensureProcOnRun(context: vscode.ExtensionContext, requestedRunId?: string): Promise<string> {
+  const target = String(requestedRunId || modelNavSelectedRunId || currentRunId || '').trim();
+  if (!target) throw new Error('No run selected. Open Model Nav and pick a run first.');
+
+  // Already on target?
+  if (proc && currentRunId === target) return target;
+
+  // Switch if a different run is active
+  if (proc && currentRunId && currentRunId !== target) {
+    await switchToRun(context, target);
+    return target;
+  }
+
+  // No proc → start on the target (same behavior as Resume/Report)
+  modelNavSelectedRunId = target;
+  await startRun(context);
+  return target;
+}
+
+function pickAnchorRunForAction(hint?: { parents?: string[]; runId?: string } | any): string | null {
+  const fromRunId =
+    typeof hint?.runId === 'string' && hint.runId.trim() ? String(hint.runId).trim() : null;
+
+  const fromParents =
+    Array.isArray(hint?.parents) && hint.parents.length ? String(hint.parents[0]) : null;
+
+  if (fromRunId) return fromRunId;
+  if (fromParents) return fromParents;
+  if (modelNavSelectedRunId?.trim()) return modelNavSelectedRunId.trim();
+  if (currentRunId?.trim()) return currentRunId.trim();
+
+  try {
+    const first = (listRuns() as Array<{ run_id: string }>)[0]?.run_id;
+    if (first) return String(first);
+  } catch {}
+
+  return null;
+}
+
+async function ensureMaintenanceBackend(context: vscode.ExtensionContext, anchor: string) {
+  // Start/attach to backend on the chosen run, then pause to avoid races.
+  await ensureProcOnRun(context, anchor);
+}
+
 
 function killProc() {
   const p = proc;                // snapshot + narrow (TS knows p !== null after guard)
@@ -1548,7 +1950,6 @@ function handleLine(line: string) {
 
   // swallow unsolicited reportData (RPC handles reply)
   if (obj?.type === 'reportData') {
-    console.log('[onthefly] swallowed unsolicited reportData from python');
     return;
   }
 
@@ -1568,12 +1969,21 @@ function handleLine(line: string) {
   // ==== streaming steps ====
   if (obj && obj.type === 'trainStep') {
     const run_id = obj.run_id || currentRunId || 'live';
+    const num = (value: any) => (Number.isFinite(value) ? Number(value) : null);
 
     const row: StepRow = {
       run_id,
       step: Number(obj.step) || 0,
-      loss: Number.isFinite(obj.loss)  ? obj.loss  : null,
-      val_loss: Number.isFinite(obj.val_loss) ? obj.val_loss : null,
+      loss: num(obj.loss),
+      val_loss: num(obj.val_loss),
+      accuracy: num(obj.accuracy),
+      lr: num(obj.lr),
+      grad_norm: num(obj.grad_norm),
+      weight_norm: num(obj.weight_norm),
+      activation_zero_frac: num(obj.activation_zero_frac),
+      throughput: num(obj.throughput),
+      mem_vram: num(obj.mem_vram),
+      gpu_util: num(obj.gpu_util),
     };
 
     post({ type: 'trainStep', ...row, ts: Date.now() });
@@ -1603,9 +2013,16 @@ function handleLine(line: string) {
       seenRuns.add(id);
       currentRunId = id;
 
+      // modelNavSelectedRunId = id;   // keep selection in sync with what the UI shows
+      
       // If storage only supports single parent, store the first (primary)
       const primaryParent = (parents && parents[0]) ?? null;
-      insertRun(id, project, name, lastMode || 'single', primaryParent);
+      const existingRuns = listRuns() as Array<{ run_id: string }>;
+      const existsInDb = existingRuns.some(r => r.run_id === id);
+  
+      if (!existsInDb) {
+        insertRun(id, project, name, primaryParent);
+      }
     } else {
       currentRunId = id;
     }
@@ -1622,72 +2039,41 @@ function handleLine(line: string) {
     return;
   }
 
-  // ==== map event names to what dashboard.js expects ====
-  if (obj?.type === 'auto_fork_suggested') {
-    const plan = obj.plan || obj || {};
-    post({
-      type: 'autoForkSuggested',
-      step: Number(obj.step) || null,
-      run_id: obj.run_id || currentRunId || null,
-      plan: {
-        ...plan,
-        at_step: plan.at_step ?? obj.at_step ?? null,
-        init_from: plan.init_from ?? obj.init_from ?? null,
-      },
-    });
-    return;
-  }
-  
-  if (obj?.type === 'auto_fork_executed') {
-    const plan = obj.plan || {};
-    post({
-      type: 'autoForkExecuted',
-      step: Number(obj.step) || null,
-      run_id: obj.run_id || currentRunId || null,
-      plan: {
-        ...plan,
-        at_step: plan.at_step ?? obj.at_step ?? null,
-        init_from: plan.init_from ?? obj.init_from ?? null,
-      },
-      child_run: obj.child_run || null,
-      variant_index: Number.isFinite(obj.variant_index) ? Number(obj.variant_index) : null,
-    });
-    return;
-  }
+  if (obj?.type === 'auto_test_complete') {
+    const runId = String(obj.run_id || currentRunId || '').trim();
+    const ckptPath = obj.ckpt_path ? String(obj.ckpt_path) : '';
+    const step = Number(obj.step) || 0;
 
-  if (obj?.type === 'auto_merge_suggested') {
-    const plan = obj.plan || {};
-    post({
-      type: 'autoMergeSuggested',
-      step: Number(obj.step) || null,
-      run_id: obj.run_id || currentRunId || null,
-      // pass through diagnostics so UI can render context/tooltips
-      plan,
-    });
-    return;
-  }
+    if (runId && ckptPath) {
+      try {
+        const ckptId = `${runId}:${step}:${Date.now()}`;
+        insertCheckpoint(ckptId, runId, step, ckptPath);
+        post({
+          type: 'log',
+          level: 'info',
+          text: `[auto-test] checkpoint recorded for run ${runId} at step ${step}`,
+        });
+      } catch (e) {
+        console.warn('[onthefly] failed to persist auto-test checkpoint', e);
+        post({
+          type: 'log',
+          level: 'warn',
+          text: `[auto-test] failed to persist checkpoint for run ${runId}: ${String(
+            (e as any)?.message || e,
+          )}`,
+        });
+      }
+    } else {
+      post({
+        type: 'log',
+        level: 'warn',
+        text: '[auto-test] auto_test_complete event missing run_id or ckpt_path; not recorded.',
+      });
+    }
 
-  if (obj?.type === 'auto_merge_executed') {
-    post({
-      type: 'autoMergeExecuted',
-      step: Number(obj.step) || null,
-      run_id: obj.run_id || currentRunId || null,
-      new_run: obj.new_run || null,
-      merged: Array.isArray(obj.merged) ? obj.merged.map(String) : [],
-    });
-    return;
-  }
-
-
-  if (obj?.type === 'autofork_rules_set') {
-    autoForkConfig = obj.config as AutoForkConfig;
-    post({ type: 'autoforkRulesSet', config: obj.config });
-    return;
-  }
-
-  if (obj?.type === 'training_finished') {
-    post({ type: 'trainingFinished', code: obj.code });
-    postStatus(false);
+    // We already emitted a generic test_complete earlier, and that fell
+    // through to the default `post(obj)` below. This extra event is
+    // extension-only plumbing; no need to forward it again.
     return;
   }
 
@@ -1698,18 +2084,38 @@ function handleLine(line: string) {
     switch (obj?.type) {
       case 'session_started': {
         currentRunId = obj.run_id || currentRunId;
-        // Remember active session for later log writes
         if (obj.session_id || obj.sessionId) {
           currentSessionId = String(obj.session_id || obj.sessionId);
           postCurrentSession();
         }
-        // Apply staged AutoFork rules as soon as the session is live
-        if (autoForkConfig) {
-          sendReq('set_autofork_rules', normalizeRulesForServer(autoForkConfig), 30000)
-            .catch(e => post({ type: 'error', text: `[AutoFork] failed to apply rules: ${String(e?.message || e)}` }));
+
+        // Backend has finished booting and announced the session.
+        // Safe to call clean_disk once for this logical backend.
+        if (needDiskCleanOnNextBackend && proc && proc.stdin?.writable) {
+          needDiskCleanOnNextBackend = false;
+          (async () => {
+            try {
+              const res = await sendReq('clean_disk', { scope: 'all' }, 60000);
+              post({
+                type: 'log',
+                level: res?.ok ? 'info' : 'warn',
+                text: res?.ok
+                  ? '[startup] clean_disk: removed old runs from save_dir'
+                  : `[startup] clean_disk reported an issue: ${res?.error ?? 'unknown error'}`,
+              });
+            } catch (e: any) {
+              post({
+                type: 'log',
+                level: 'warn',
+                text: `[startup] clean_disk failed (will continue anyway): ${e?.message || String(e)}`,
+              });
+            }
+          })();
         }
+
         break;
       }
+
       case 'checkpoint_saved': {
         const ckptId = `${obj.run_id}:${obj.step}:${Date.now()}`;
         insertCheckpoint(ckptId, obj.run_id, Number(obj.step) || 0, obj.path || '');
@@ -1729,27 +2135,7 @@ function handleLine(line: string) {
   }
 }
 
-/* ============================ Data explorer helper ============================ */
-
-async function runDataExplorer(context: vscode.ExtensionContext, subArgs: string[]): Promise<any> {
-  const ws = context.workspaceState;
-  const python = (ws.get(Keys.PythonPath) as string) || 'python';
-
-  return new Promise((resolve, reject) => {
-    const p = spawn(python, ['-m', 'onthefly_backend.data_explorer', ...subArgs], { env: process.env });
-    let out = ''; let err = '';
-    p.stdout.on('data', (d) => (out += d.toString()));
-    p.stderr.on('data', (d) => (err += d.toString()));
-    p.on('close', (code) => {
-      if (code === 0) {
-        try { resolve(JSON.parse(out || 'null')); }
-        catch (e) { reject(new Error(`Failed to parse JSON from data explorer.\n${String(e)}\nSTDOUT:\n${out}\nSTDERR:\n${err}`)); }
-      } else {
-        reject(new Error(`data_explorer exited with code ${code}\nSTDERR:\n${err}`));
-      }
-    });
-  });
-}
+//helpers
 
 async function getSelectedRegionIndices(runId: string, minLoss: number, maxLoss: number): Promise<number[]> {
   const data = await sendReq('get_selected_region_indices', {
@@ -1763,30 +2149,4 @@ async function getSelectedRegionIndices(runId: string, minLoss: number, maxLoss:
     .map((n: number) => Number(n) | 0)
     .filter((n: number) => Number.isFinite(n) && n >= 0);
 
-}
-
-// auto fork helper
-
-function normalizeRulesForServer(cfg: AutoForkConfig): any {
-  const rules = { ...(cfg.rules || {}) };
-
-  // cluster.k from legacy kmeans_k
-  const cluster: any = { ...(rules as any).cluster };
-  if (typeof (rules as any).kmeans_k === 'number') {
-    cluster.k = (rules as any).kmeans_k;
-    delete (rules as any).kmeans_k;
-  }
-  if (Object.keys(cluster).length) (rules as any).cluster = cluster;
-
-  // base_cooldown_steps from legacy fork_cooldown_steps
-  if (typeof (rules as any).fork_cooldown_steps === 'number') {
-    (rules as any).base_cooldown_steps = (rules as any).fork_cooldown_steps;
-    delete (rules as any).fork_cooldown_steps;
-  }
-
-  return {
-    rules,
-    sampling: { ...(cfg.sampling || {}) },
-    runtime: { ...(cfg.runtime || {}) },
-  };
 }

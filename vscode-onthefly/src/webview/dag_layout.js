@@ -1,68 +1,103 @@
 (function (global) {
+  'use strict';
   const SVG_NS = 'http://www.w3.org/2000/svg';
 
-  // -------------------- PAN / ZOOM: lightweight helper --------------------
-  // Usage:
-  //   const { reset, set, get } = enablePanZoom(svgEl, viewportG, { minScale: 0.2, maxScale: 6, step: 0.12 });
-  //
-  // - Wheel to zoom (anchored at cursor)
-  // - Drag (mouse/touch/pen) to pan
-  // - Double-click to zoom in at cursor
-  // - Press "0" to reset
+  // =====================================================================
+  // PAN / ZOOM (pointer + wheel + keyboard), cursor-centric zoom (CTM-based)
+  // API: enablePanZoom(svg, viewport, opts?) -> { set, reset, get, destroy }
+  // =====================================================================
   function enablePanZoom(svg, viewport, opts = {}) {
+    if (!svg || svg.tagName?.toLowerCase?.() !== 'svg') {
+      throw new Error('enablePanZoom: first arg must be an <svg>');
+    }
+    if (!viewport || typeof viewport.setAttribute !== 'function') {
+      throw new Error('enablePanZoom: second arg must be an SVG graphics element (e.g. <g>)');
+    }
+
     const minScale = opts.minScale ?? 0.25;
     const maxScale = opts.maxScale ?? 6;
-    const step     = Math.max(0.01, opts.step ?? 0.1); // zoom step per wheel tick
-    // NOTE: ensure pointer events work (prevents touch panning the page instead of the svg)
+    const zoomSpeed = opts.zoomSpeed ?? 0.006; // Lower = smoother
+
     svg.style.touchAction = 'none';
 
-    const state = { x: 0, y: 0, k: 1 }; // translate (x,y), scale k
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+    const state = { x: 0, y: 0, k: 1 };
     let dragging = false;
     let dragStart = { x: 0, y: 0, sx: 0, sy: 0 };
 
     function apply() {
+      // Keep original order; math below matches translate then scale
       viewport.setAttribute('transform', `translate(${state.x} ${state.y}) scale(${state.k})`);
     }
 
-    function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
-    function svgPointFromClient(clientX, clientY) {
-      const r = svg.getBoundingClientRect();
-      // convert screen point -> local graph space (before transform)
-      const px = clientX - r.left;
-      const py = clientY - r.top;
-      const gx = (px - state.x) / state.k;
-      const gy = (py - state.y) / state.k;
-      return { gx, gy, px, py };
+    // --- CTM helpers: robust screen<->graph mapping ----------------------
+    function getCTM() {
+      // CTM mapping object coords -> screen coords for the <g> viewport
+      // Use current transform matrix from the SVG DOM; fallback to identity
+      return viewport.getCTM?.() || svg.createSVGMatrix();
     }
 
-    function zoomAt(clientX, clientY, dz) {
-      const { gx, gy, px, py } = svgPointFromClient(clientX, clientY);
-      const kOld = state.k;
-      const kNew = clamp(kOld * (dz > 0 ? (1 - step) : (1 + step)), minScale, maxScale);
+    function clientToGraph(clientX, clientY) {
+      const pt = svg.createSVGPoint();
+      pt.x = clientX;
+      pt.y = clientY;
+      const inv = getCTM().inverse();
+      const p = pt.matrixTransform(inv);
+      return { gx: p.x, gy: p.y };
+    }
 
-      if (kNew === kOld) return;
-      // keep (gx,gy) under the cursor after zoom:
-      // new screen pos: px' = (gx * kNew + x'), we want px' == px => x' = px - gx*kNew
-      // same for y
-      state.x = px - gx * kNew;
-      state.y = py - gy * kNew;
+    function zoomAt(clientX, clientY, deltaY) {
+      const r = svg.getBoundingClientRect();
+
+      const inRect = (x, y) =>
+        Number.isFinite(x) && Number.isFinite(y) &&
+        x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+
+      const useX = inRect(clientX, clientY) ? clientX : (r.left + r.width / 2);
+      const useY = inRect(clientX, clientY) ? clientY : (r.top + r.height / 2);
+
+      // Graph-space coords under the cursor BEFORE changing k
+      const { gx, gy } = clientToGraph(useX, useY);
+
+      const kOld = state.k;
+      const factor = Math.exp(-deltaY * zoomSpeed); // smooth multiplicative zoom
+      const kNew = clamp(kOld * factor, minScale, maxScale);
+      if (Math.abs(kNew - kOld) < 1e-4) return;
+
+      // Incremental update keeps (gx,gy) fixed on screen
+      state.x += (kOld - kNew) * gx;
+      state.y += (kOld - kNew) * gy;
       state.k = kNew;
       apply();
     }
 
-    // Wheel to zoom (trackpads and standard wheels)
+    function zoomIncrementAt(clientX, clientY, factor) {
+      const r = svg.getBoundingClientRect();
+      const useX = Number.isFinite(clientX) ? clientX : (r.left + r.width / 2);
+      const useY = Number.isFinite(clientY) ? clientY : (r.top + r.height / 2);
+
+      const { gx, gy } = clientToGraph(useX, useY);
+
+      const kOld = state.k;
+      const kNew = clamp(kOld * factor, minScale, maxScale);
+      if (Math.abs(kNew - kOld) < 1e-4) return;
+
+      state.x += (kOld - kNew) * gx;
+      state.y += (kOld - kNew) * gy;
+      state.k = kNew;
+      apply();
+    }
+
     const onWheel = (e) => {
-      // prevent page scroll/zoom (especially in VS Code webview)
       e.preventDefault();
-      // Prefer deltaY sign; ctrlKey may indicate pinch zoom on some platforms
-      const dy = e.deltaY;
+      // Normalize delta across devices (pixels/lines/pages)
+      let dy = e.deltaY;
+      if (e.deltaMode === 1) dy *= 15;       // lines -> px
+      else if (e.deltaMode === 2) dy *= 120; // pages -> px
       zoomAt(e.clientX, e.clientY, dy);
     };
 
-    // Pointer drag to pan
     const onPointerDown = (e) => {
-      // Only primary button or touch/pen
       if (e.button !== undefined && e.button !== 0) return;
       dragging = true;
       svg.setPointerCapture?.(e.pointerId);
@@ -84,22 +119,20 @@
     };
 
     const onDblClick = (e) => {
-      // Zoom in by one "step" at cursor
-      zoomAt(e.clientX, e.clientY, -1);
+      e.preventDefault?.();
+      zoomIncrementAt(e.clientX, e.clientY, 1.5); // Zoom in by 50%
     };
 
     const onKeyDown = (e) => {
+      if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) return;
       if (e.key === '0') { reset(); }
       else if ((e.key === '+' || e.key === '=') && !e.ctrlKey && !e.metaKey) {
-        zoomAt(svg.getBoundingClientRect().left + svg.clientWidth/2,
-               svg.getBoundingClientRect().top + svg.clientHeight/2, -1);
+        zoomIncrementAt(null, null, 1.2);
       } else if (e.key === '-' && !e.ctrlKey && !e.metaKey) {
-        zoomAt(svg.getBoundingClientRect().left + svg.clientWidth/2,
-               svg.getBoundingClientRect().top + svg.clientHeight/2, +1);
+        zoomIncrementAt(null, null, 1 / 1.2);
       }
     };
 
-    // Passive must be false to call preventDefault on wheel
     svg.addEventListener('wheel', onWheel, { passive: false });
     svg.addEventListener('pointerdown', onPointerDown);
     window.addEventListener('pointermove', onPointerMove);
@@ -107,9 +140,7 @@
     svg.addEventListener('dblclick', onDblClick);
     window.addEventListener('keydown', onKeyDown);
 
-    function reset() {
-      state.x = 0; state.y = 0; state.k = 1; apply();
-    }
+    function reset() { state.x = 0; state.y = 0; state.k = 1; apply(); }
     function set(next) {
       if (typeof next.k === 'number') state.k = clamp(next.k, minScale, maxScale);
       if (typeof next.x === 'number') state.x = next.x;
@@ -126,225 +157,328 @@
       window.removeEventListener('keydown', onKeyDown);
     }
 
-    // initial paint
     apply();
-    return { reset, set, get, destroy };
+    return { set, reset, get, destroy };
   }
 
-  // -------------------- LAYOUT --------------------
+  // =====================================================================
+  // GRID DAG LAYOUT (discrete 20x20 by default; squares 4x node size)
+  // API: layoutDAG(nodes, edges, opts?) -> { pos, depth, routed, size, grid, initial }
+  // =====================================================================
   function layoutDAG(nodes, edges, opts = {}) {
-    const nodeW   = opts.nodeW   ?? 150;
-    const nodeH   = opts.nodeH   ?? 42;
-    const margin  = opts.margin  ?? 48;
-    const rankSep = opts.rankSep ?? 200;
-    const nodeSep = opts.nodeSep ?? 28;
+    // ---- Geometry & grid ----
+    const nodeW      = opts.nodeW   ?? 150;
+    const nodeH      = opts.nodeH   ?? 42;
+    const gridCols   = Math.max(1, opts.gridCols ?? 20);
+    const gridRows   = Math.max(1, opts.gridRows ?? 20);
+    const cellW      = (opts.cellW ?? (nodeW * 4));   // squares are 4x node size (wide)
+    const cellH      = (opts.cellH ?? (nodeH * 4));   // squares are 4x node size (tall)
+    const margin     = opts.margin  ?? 24;            // outer padding around whole grid
 
-    // ---------- adjacency ----------
-    const idSet = new Set(nodes.map(n => n.id));
-    const inEdges  = new Map();
-    const outEdges = new Map();
-    nodes.forEach(n => { inEdges.set(n.id, []); outEdges.set(n.id, []); });
-    edges.forEach(e => {
-      if (!idSet.has(e.source) || !idSet.has(e.target)) return;
-      inEdges.get(e.target).push(e.source);
-      outEdges.get(e.source).push(e.target);
-    });
+    // column 0 is "depth 0". We place the FIRST node at the center column,
+    // and we only grow to the RIGHT (left half remains empty forever).
+    const centerCol  = Math.floor(gridCols / 2);
+    const centerRow  = Math.floor(gridRows / 2);
 
-    // ---------- ranks (x = depth by longest path) ----------
+    // ---- Input sanitation ----
+    const idList = (nodes || []).filter(n => n && typeof n.id === 'string').map(n => n.id);
+    const idSet  = new Set(idList);
+    const E = (edges || []).filter(e => e && idSet.has(e.source) && idSet.has(e.target));
+
+    // ---- Build adjacency ----
+    const parents = new Map(); // id -> array of parent ids
+    const kids    = new Map(); // id -> array of child ids
+    for (const id of idSet) { parents.set(id, []); kids.set(id, []); }
+    for (const e of E) { parents.get(e.target).push(e.source); kids.get(e.source).push(e.target); }
+
+    // ---- Depths (strictly increasing to the right)
+    // Use 1 + MAX(parentDepth) to ensure all edges go left->right.
     const depth = new Map();
-    const vis = new Set();
-    const getDepth = (id) => {
+    const visiting = new Set();
+    const roots = [];
+    function getDepth(id) {
       if (depth.has(id)) return depth.get(id);
-      if (vis.has(id)) { depth.set(id, 0); return 0; }
-      vis.add(id);
-      const ps = inEdges.get(id) || [];
+      if (visiting.has(id)) { depth.set(id, 0); return 0; } // cycle guard
+      visiting.add(id);
+      const ps = parents.get(id);
       const d = ps.length ? Math.max(...ps.map(getDepth)) + 1 : 0;
-      vis.delete(id);
+      visiting.delete(id);
       depth.set(id, d);
       return d;
+    }
+    for (const id of idSet) if (getDepth(id) === 0) roots.push(id);
+
+    // ---- Grid occupancy --------------------------------------------------
+    // states: 0 = empty, 1 = node, 2 = corridor (edge passes through)
+    const occ = Array.from({ length: gridCols }, () => new Array(gridRows).fill(0));
+    const pos = new Map(); // id -> { col,row,x,y }
+    const colNodes = new Map(); // depth -> ids (stable order)
+    for (const id of idSet) {
+      const d = depth.get(id);
+      if (!colNodes.has(d)) colNodes.set(d, []);
+      colNodes.get(d).push(id);
+    }
+    // deterministic order inside columns
+    for (const [d, arr] of colNodes) arr.sort();
+
+    // ---- Helpers ---------------------------------------------------------
+    const colToX = (c) => margin + c * cellW + (cellW - nodeW) / 2;
+    const rowToY = (r) => margin + r * cellH + (cellH - nodeH) / 2;
+
+    const clampRow = (r) => Math.max(0, Math.min(gridRows - 1, r));
+    const clampCol = (c) => Math.max(0, Math.min(gridCols - 1, c));
+
+    function nearestFreeRow(col, targetRow) {
+      targetRow = clampRow(targetRow);
+      if (occ[col][targetRow] === 0) return targetRow;
+      for (let k = 1; k < gridRows; k++) {
+        const up = targetRow - k, dn = targetRow + k;
+        if (up >= 0 && occ[col][up] === 0) return up;
+        if (dn < gridRows && occ[col][dn] === 0) return dn;
+      }
+      return targetRow; // fallback (will be marked anyway)
+    }
+
+    // Even/odd fan-out offsets:
+    // N odd: [0, -1, +1, -2, +2, ...]
+    // N even: [-1, +1, -2, +2, ...]
+    function fanOffsets(count) {
+      const arr = [];
+      if (count <= 0) return arr;
+      if (count % 2 === 1) {
+        arr.push(0);
+        for (let k = 1; arr.length < count; k++) {
+          arr.push(-k, +k);
+        }
+      } else {
+        for (let k = 1; arr.length < count; k++) {
+          arr.push(-k, +k);
+        }
+      }
+      return arr;
+    }
+
+    // Rasterize a straight line across columns, picking one integer row per intermediate column.
+    // Returns { ok, cells } where cells = [{col,row}, ...] for intermediate columns.
+    function straightCorridor(colA, rowA, colB, rowB) {
+      const leftCol = Math.min(colA, colB);
+      const rightCol = Math.max(colA, colB);
+      const a = (colA < colB) ? { c: colA, r: rowA } : { c: colB, r: rowB };
+      const b = (colA < colB) ? { c: colB, r: rowB } : { c: colA, r: rowA };
+      const dx = b.c - a.c;
+      const dy = b.r - a.r;
+
+      const cells = [];
+      for (let c = a.c + 1; c < b.c; c++) {
+        const t = (c - a.c) / dx;
+        const r = Math.round(a.r + dy * t);
+        if (r < 0 || r >= gridRows) return { ok: false, cells: [] };
+        if (occ[c][r] === 1) return { ok: false, cells: [] }; // cannot pass through a node
+        cells.push({ col: c, row: r });
+      }
+      return { ok: true, cells };
+    }
+
+    function reserveCorridor(cells) {
+      for (const { col, row } of cells) {
+        if (occ[col][row] === 0) occ[col][row] = 2;
+      }
+    }
+
+    // For multi-parent children, place at the rounded vertical midpoint of parents' rows.
+    function midpointRowOfParents(pars) {
+      if (!pars.length) return centerRow;
+      const rs = pars.map(p => pos.get(p)?.row).filter(r => r !== undefined);
+      if (!rs.length) return centerRow;
+      const avg = rs.reduce((a,b)=>a+b,0) / rs.length;
+      return Math.round(avg);
+    }
+
+    // ---- Column coordinates (depth -> grid column) -----------------------
+    // Place depth 0 at centerCol, then depth d at centerCol + d. (strictly rightward)
+    function depthToCol(d) { return clampCol(centerCol + d); }
+
+    // ---- Stage 1: place depth 0 ------------------------------------------
+    // If there are multiple depth-0 nodes, stack around centerRow using the same offset rule.
+    if (colNodes.has(0)) {
+      const rootsInCol = colNodes.get(0);
+      const offs = fanOffsets(rootsInCol.length);
+      const col0 = depthToCol(0);
+      for (let i = 0; i < rootsInCol.length; i++) {
+        const id = rootsInCol[i];
+        const rWanted = centerRow + offs[i];
+        const r = nearestFreeRow(col0, rWanted);
+        occ[col0][r] = 1;
+        pos.set(id, { col: col0, row: r, x: colToX(col0), y: rowToY(r) });
+      }
+    }
+
+    // ---- Precompute per-parent child offsets for single-step children ----
+    // This satisfies the slope-magnitude rule for 1/2/3/4/... (evens/odds pattern).
+    const childOrder = new Map(); // parentId -> Map(childId -> offset)
+    for (const id of idSet) {
+      const ks = kids.get(id).slice().sort();
+      const offs = fanOffsets(ks.length);
+      const map = new Map();
+      for (let i = 0; i < ks.length; i++) map.set(ks[i], offs[i]);
+      childOrder.set(id, map);
+    }
+
+    // ---- Stage 2: place remaining depths left->right ---------------------
+    const maxDepth = Math.max(...Array.from(depth.values()));
+    for (let d = 1; d <= maxDepth; d++) {
+      const idsHere = (colNodes.get(d) || []).slice();
+      const col = depthToCol(d);
+
+      // Order: place nodes with multiple parents first (so single-parent ones can fan around them cleanly)
+      idsHere.sort((a, b) => (parents.get(b).length - parents.get(a).length) || a.localeCompare(b));
+
+      for (const id of idsHere) {
+        const ps = parents.get(id).slice();
+        // Desired row:
+        let rDesired;
+        if (ps.length === 1) {
+          const p = ps[0];
+          const pPos = pos.get(p);
+          const base = pPos ? pPos.row : centerRow;
+          // If this edge is a single-step (parent depth == d-1), use the fan offset.
+          if (depth.get(p) === d - 1) {
+            const off = childOrder.get(p)?.get(id) ?? 0;
+            rDesired = base + off;
+          } else {
+            // Long jump: aim to keep the same row by default.
+            rDesired = base;
+          }
+        } else {
+          // Multi-parent: place at midpoint of parents (halfway vertically)
+          rDesired = midpointRowOfParents(ps);
+        }
+        rDesired = clampRow(rDesired);
+
+        // Find nearest free row for the node itself
+        let rPlaced = nearestFreeRow(col, rDesired);
+
+        // Ensure corridors from ALL parents are clean; if not, adjust row until all are clean
+        // Try rows expanding around rDesired until corridors are valid
+        function corridorsOKForRow(testRow) {
+          for (const p of ps) {
+            const pPos = pos.get(p);
+            if (!pPos) continue; // parent not yet placed; unlikely but guard
+            const { ok } = straightCorridor(pPos.col, pPos.row, col, testRow);
+            if (!ok) return false;
+          }
+          return true;
+        }
+        if (!corridorsOKForRow(rPlaced)) {
+          // scan up/down for a row that allows clean corridors through intermediate layers
+          let found = false;
+          for (let k = 1; k < gridRows; k++) {
+            const up = rDesired - k;
+            const dn = rDesired + k;
+            if (up >= 0 && occ[col][up] === 0 && corridorsOKForRow(up)) { rPlaced = up; found = true; break; }
+            if (dn < gridRows && occ[col][dn] === 0 && corridorsOKForRow(dn)) { rPlaced = dn; found = true; break; }
+          }
+          if (!found) {
+            // As last resort, keep the nearest free row even if corridors will later get nudged (we still reserve)
+          }
+        }
+
+        // Reserve node cell
+        occ[col][rPlaced] = 1;
+        pos.set(id, { col, row: rPlaced, x: colToX(col), y: rowToY(rPlaced) });
+
+        // Reserve corridors from each parent to this child
+        for (const p of ps) {
+          const pPos = pos.get(p);
+          if (!pPos) continue;
+          const cr = straightCorridor(pPos.col, pPos.row, col, rPlaced);
+          if (cr.ok) reserveCorridor(cr.cells);
+          // If not ok, we leave routing to later, but edges still won't be allowed through node cells.
+        }
+      }
+    }
+
+    // ---- Edge routing: strict left->right from right-mid (src) to left-mid (tgt)
+    // Path is a simple polyline with a single straight segment that matches the grid corridor.
+    const routed = [];
+    for (const e of E) {
+      const s = pos.get(e.source);
+      const t = pos.get(e.target);
+      if (!s || !t) continue;
+      const x1 = s.x + nodeW;         // rightmost mid of source
+      const y1 = s.y + nodeH / 2;
+      const x2 = t.x;                  // leftmost mid of target
+      const y2 = t.y + nodeH / 2;
+
+      // For aesthetics, we keep it as a straight line matching the grid corridor.
+      const dPath = `M ${x1} ${y1} L ${x2} ${y2}`;
+      routed.push({ ...e, d: dPath, points: [{x:x1,y:y1},{x:x2,y:y2}] });
+    }
+
+    // ---- Output canvas size (entire grid extents)
+    const W = margin * 2 + gridCols * cellW;
+    const H = margin * 2 + gridRows * cellH;
+
+    // ---- Initial zoom/window (center on the occupied graph) --------------
+    // Frame a configurable CxR region centered on the middle of the occupied
+    // columns/rows. Defaults to 1x1 (very close). Override via opts.initialCols/Rows.
+    const initCols = Math.max(1, opts.initialCols ?? 1);
+    const initRows = Math.max(1, opts.initialRows ?? 1);
+
+    let initial = null;
+    if (pos.size > 0) {
+      // Compute occupied column/row extents from placed nodes
+      let minCol = Infinity, maxCol = -Infinity, minRow = Infinity, maxRow = -Infinity;
+      pos.forEach(({ col, row }) => {
+        if (col < minCol) minCol = col;
+        if (col > maxCol) maxCol = col;
+        if (row < minRow) minRow = row;
+        if (row > maxRow) maxRow = row;
+      });
+
+      // Center (can be fractional: e.g., 1.5 means "between col 1 and 2")
+      const centerColF = (minCol + maxCol) / 2;
+      const centerRowF = (minRow + maxRow) / 2;
+
+      // Convert grid center to absolute coords (allowing fractional centers)
+      const centerX = margin + centerColF * cellW + cellW / 2;
+      const centerY = margin + centerRowF * cellH + cellH / 2;
+
+      const viewW = initCols * cellW;
+      const viewH = initRows * cellH;
+
+      const x = centerX - viewW / 2;
+      const y = centerY - viewH / 2;
+
+      initial = {
+        viewBox: { x, y, width: viewW, height: viewH },
+        panZoom: { x: -x, y: -y, k: 1 }
+      };
+    }
+
+    // Build a simple debug grid description (optional for renderers)
+    const grid = {
+      cols: gridCols,
+      rows: gridRows,
+      cellW, cellH,
+      centerCol, centerRow,
+      occupancy: occ // 0 empty, 1 node, 2 corridor
     };
-    nodes.forEach(n => getDepth(n.id));
 
-    const byDepth = new Map(); // d -> ids[]
-    nodes.forEach(n => {
-      const d = depth.get(n.id);
-      if (!byDepth.has(d)) byDepth.set(d, []);
-      byDepth.get(d).push(n.id);
-    });
-    const depths = Array.from(byDepth.keys()).sort((a,b)=>a-b);
-    depths.forEach(d => byDepth.get(d).sort((a,b)=>a.localeCompare(b)));
-
-    // ---------- primary parent (used only for layout) ----------
-    const primaryParent = new Map();     // child -> parent
-    const primaryChildren = new Map();   // parent -> [children]
-    for (const d of depths) {
-      const prev = byDepth.get(d-1) || [];
-      for (const id of byDepth.get(d)) {
-        const ps = (inEdges.get(id) || []).slice();
-        if (!ps.length) continue;
-        ps.sort((a,b) => (prev.indexOf(a) - prev.indexOf(b)) || a.localeCompare(b));
-        primaryParent.set(id, ps[0]);
-        if (!primaryChildren.has(ps[0])) primaryChildren.set(ps[0], []);
-        primaryChildren.get(ps[0]).push(id);
-      }
-    }
-    for (const [p, kids] of primaryChildren) {
-      const d = (depth.get(p) || 0) + 1;
-      const nextOrder = byDepth.get(d) || [];
-      kids.sort((a,b)=> (nextOrder.indexOf(a) - nextOrder.indexOf(b)) || a.localeCompare(b));
-    }
-
-    // ---------- tidy lanes (y) ----------
-    const lane = new Map();  // id -> float lane
-    const seen = new Set();
-    let nextLane = 0;
-
-    function assign(id) {
-      if (seen.has(id)) return lane.get(id);
-      seen.add(id);
-      const kids = (primaryChildren.get(id) || []).filter(k => depth.get(k) === depth.get(id) + 1);
-      if (!kids.length) {
-        const y = nextLane++;
-        lane.set(id, y);
-        return y;
-      }
-      const ys = [];
-      for (const k of kids) ys.push(assign(k));
-      const y = ys.reduce((a,b)=>a+b,0) / ys.length;
-      lane.set(id, y);
-      return y;
-    }
-
-    const roots = depths[0] != null
-      ? byDepth.get(depths[0]).filter(id => !primaryParent.has(id))
-      : [];
-    for (const r of roots) assign(r);
-    for (const id of nodes.map(n=>n.id)) if (!lane.has(id)) assign(id);
-
-    // ---------- compact per column ----------
-    const minGap = nodeH + nodeSep;
-    const lanesUsed = Math.max(1, nextLane);
-    const H = margin * 2 + (lanesUsed - 1) * minGap + nodeH;
-
-    const pos = new Map(); // id -> {x,y,col,row}
-    for (const d of depths) {
-      const ids = byDepth.get(d) || [];
-      if (!ids.length) continue;
-
-      const targets = ids.map(id => ({ id, t: margin + (lane.get(id) || 0) * minGap }));
-      targets.sort((a,b)=> (a.t - b.t) || a.id.localeCompare(b.id));
-
-      let y = margin;
-      for (const s of targets) {
-        const top = Math.max(y, Math.min(s.t, H - margin - nodeH));
-        s.y = top;
-        y = top + minGap;
-      }
-      const overflow = (targets.length ? targets[targets.length-1].y + nodeH : margin) - (H - margin);
-      if (overflow > 0) for (const s of targets) s.y -= overflow;
-
-      const x = margin + d * (nodeW + rankSep);
-      targets.forEach((s, idx) => pos.set(s.id, { x, y: s.y, col: d, row: idx }));
-    }
-
-    // ---------- helpers for obstacle clearance ----------
-    const colLeft   = (col) => margin + col * (nodeW + rankSep);
-    const colCenter = (col) => colLeft(col) + nodeW / 2;
-    const colRight  = (col) => colLeft(col) + nodeW;
-
-    const PAD = 10;      // extra clearance beyond box
-    const EPS = 6;       // waypoint inset from a column's left/right edge
-
-    function gapsForColumn(col) {
-      // Build vertical gaps (inclusive) within [margin, H - margin]
-      const nodesHere = (byDepth.get(col) || [])
-        .map(id => ({ top: pos.get(id).y - PAD, bot: pos.get(id).y + nodeH + PAD }))
-        .sort((a,b)=> a.top - b.top);
-
-      const gaps = [];
-      let cur = margin;
-      for (const n of nodesHere) {
-        const top = Math.max(margin, n.top);
-        if (top - cur > 4) gaps.push([cur, top]); // [yMin, yMax)
-        cur = Math.max(cur, n.bot);
-      }
-      if ((H - margin) - cur > 4) gaps.push([cur, H - margin]); // tail gap
-      return gaps;
-    }
-
-    function pickYFromGaps(gaps, yPref) {
-      // If yPref falls in any gap, keep it; else snap to nearest gap center.
-      for (const [a,b] of gaps) if (yPref >= a && yPref <= b) return yPref;
-      let best = gaps[0] ? (gaps[0][0] + gaps[0][1]) / 2 : yPref;
-      let bestD = Infinity;
-      for (const [a,b] of gaps) {
-        const c = (a + b) / 2;
-        const d = Math.abs(c - yPref);
-        if (d < bestD) { bestD = d; best = c; }
-      }
-      return best;
-    }
-
-    // ---------- edge routing through safe waypoints ----------
-    function routeEdge(pid, cid) {
-      const P = pos.get(pid), C = pos.get(cid);
-      if (!P || !C) return '';
-
-      const x1 = P.x + nodeW, y1 = P.y + nodeH / 2;
-      const x2 = C.x,         y2 = C.y + nodeH / 2;
-
-      const colP = P.col, colC = C.col;
-
-      // Start at the source anchor
-      const pts = [{ x: x1, y: y1 }];
-
-      // prefer to keep y near previous column’s choice to avoid jitter
-      let lastY = y1;
-      const STICK = 0.7; // 0..1: higher = stickier to previous y
-
-      for (let k = colP + 1; k < colC; k++) {
-        const gaps = gapsForColumn(k);
-
-        // one y per column: choose at column center, then reuse for L/C/R
-        const xL = colLeft(k) + EPS;
-        const xC = colCenter(k);
-        const xR = colRight(k) - EPS;
-
-        const tC = (xC - x1) / (x2 - x1);
-        const yLinear = y1 + (y2 - y1) * tC;
-
-        // bias toward lastY to keep a consistent lane, then snap into a safe gap
-        const yPref = STICK * lastY + (1 - STICK) * yLinear;
-        const ySafe = pickYFromGaps(gaps, yPref);
-        lastY = ySafe;
-
-        // same y across the whole column eliminates in-column bumps
-        pts.push({ x: xL, y: ySafe }, { x: xC, y: ySafe }, { x: xR, y: ySafe });
-      }
-
-      // End at the target anchor
-      pts.push({ x: x2, y: y2 });
-
-      // Build piecewise cubics; keep control-point y equal to endpoints' y
-      // so each segment stays inside the horizontal strip defined by its endpoints.
-      let d = `M ${pts[0].x} ${pts[0].y}`;
-      for (let i = 0; i < pts.length - 1; i++) {
-        const a = pts[i], b = pts[i + 1];
-        const dx = Math.max(40, (b.x - a.x) * 0.5);
-        const c1x = a.x + dx, c1y = a.y;
-        const c2x = b.x - dx, c2y = b.y;
-        d += ` C ${c1x} ${c1y}, ${c2x} ${c2y}, ${b.x} ${b.y}`;
-      }
-      return d;
-    }
-
-    const routed = edges.map(e => ({ ...e, d: routeEdge(e.source, e.target) }));
-    const W = margin * 2 + (depths.length ? (depths.length - 1) * (nodeW + rankSep) + nodeW : nodeW);
-
-    return { pos, layers: byDepth, depth, routed, size: { W, H }, metrics: { nodeW, nodeH } };
+    return {
+      pos,                // Map(id -> { col,row,x,y })
+      depth,              // Map(id -> depth)
+      routed,             // edges with SVG path 'd'
+      size: { W, H },     // full canvas size
+      grid,               // grid info if the renderer wants it
+      metrics: { nodeW, nodeH, cellW, cellH, margin },
+      initial             // suggested initial viewport (centered on full graph)
+    };
   }
 
+  // Expose
   layoutDAG.SVG_NS = SVG_NS;
   global.layoutDAG = layoutDAG;
   global.enablePanZoom = enablePanZoom;
+
 })(window || globalThis);

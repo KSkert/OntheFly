@@ -16,3 +16,10 @@ class SessionConfig:
     save_dir: str = "./checkpoints"
     ckpt_keep: int = 10
     ckpt_every_steps: int = 200
+
+    # determinism control plane (non-invasive by default)
+    # - "user": never touch sampler order
+    # - "epoch_reseed": reproducible fresh shuffle per epoch
+    # - "fixed_order": one reproducible shuffle reused every epoch
+    data_order_policy: str = "user"      # "user" | "epoch_reseed" | "fixed_order"
+    enforce_sampler_state: bool = True   # if True and policy != "user", wrap samplers so we can resume mid-epoch

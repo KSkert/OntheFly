@@ -1,16 +1,34 @@
 onthefly/
 ├─ pyproject.toml
 ├─ README.md
+├─ MANIFEST.in
 ├─ src/
 │  └─ onthefly/
+│     ├─ mixins/
+│           ├─ checkpoint_mixin.py
+│           ├─ commands_mixin.py
+│           ├─ events_mixin.py
+│           ├─ feature_mixin.py
+│           ├─ run_management_mixin.py
+│           ├─ train_mixin.py
 │     ├─ __init__.py
-│     ├─ session.py
-│     ├─ control.py
 │     ├─ checkpoints.py
-│     ├─ merging.py
-│     ├─ autofork.py
+│     ├─ ckpt_utils.py
+│     ├─ config.py
+│     ├─ control.py
 │     ├─ data_explorer.py
-│     ├─ metrics.py
+│     ├─ device_utils.py
+│     ├─ factory.py
+│     ├─ feature_worker.py
+│     ├─ ids.py
+│     ├─ kmeans_utils.py ---prob won't need now that we don't do autofork
+│     ├─ merging.py
+│     ├─ metrics_utils.py
+│     ├─ runtime_metrics.py
+│     ├─ sampler_utils.py
+│     ├─ scale.py
+│     ├─ session.py
+│     ├─ snapshots.py
 │     └─ utils.py
 ├─ vscode-onthefly
 │  ├─ package.json
@@ -21,3 +39,16 @@ onthefly/
 │     ├─ webview/
 │        ├─ dashboard.html
 │        ├─ dashboard.js
+│        ├─ dag_layout.js
+│        ├─ dag_render.js
+│        ├─ health_monitor.js
+│        ├─ chart_bootstrap.js
+│        ├─ chart_creation.js
+│        ├─ chart_plugins.js
+│        ├─ chart_report.js
+│        ├─ chart_stream.js
+│        ├─ chart_utils.js
+│        ├─ ipc_controls.js
+│        ├─ log_buffer.js
+│        ├─ report_selection.js
+│        ├─ run_state.js

@@ -29,12 +29,3 @@ class EventsMixin:
         evt = {"type": "newRun", "run_id": run_id, "parents": parents}
         if meta: evt["meta"] = meta
         self._event(evt)
-
-    def _snapshot_autofork_config(self):
-        r = self._autofork_engine.rules
-        return {"rules": dict(r.__dict__), "sampling": dict(self._af_cfg), "runtime": dict(self._af_rt)}
-
-    def _ping_merge_gating(self, reason: str, extra: dict | None = None):
-        payload = {"type": "merge_gating", "reason": reason}
-        if extra: payload.update(extra)
-        (getattr(self, "_emit", self._event))(payload)

@@ -65,6 +65,7 @@
     "@types/node": "^22.0.0",
     "@types/semver": "^7.7.1",
     "@types/vscode": "^1.102.0",
+    "electron-rebuild": "^3.2.9",
     "typescript": "^5.9.2"
   },
   "dependencies": {
