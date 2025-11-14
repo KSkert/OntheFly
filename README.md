@@ -130,7 +130,7 @@ Keep full control with deterministic actions. Inspect evidence, export subsets, 
 
 ## License
 
-[Apache-2.0](LICENSE)
+This project is licensed under the MIT License – see the [LICENSE](LICENSE) file for details.
 
 ---
 
