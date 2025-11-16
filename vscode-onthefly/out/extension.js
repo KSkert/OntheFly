@@ -179,9 +179,17 @@ let modelNavSelectedRunId = null;
 let pythonConfigConfirmedThisSession = false;
 let scriptConfigConfirmedThisSession = false;
 let needDiskCleanOnNextBackend = true;
+let runActivityState = null;
+let pauseInFlight = false;
+let resumeInFlight = false;
 /* ============================ Activate / Deactivate ============================ */
 async function activate(context) {
     context.subscriptions.push(vscode.commands.registerCommand('onthefly.showDashboard', () => openPanel(context)));
+    context.subscriptions.push(vscode.window.registerWebviewPanelSerializer('ontheflyDashboard', {
+        async deserializeWebviewPanel(webviewPanel) {
+            await revivePanel(context, webviewPanel);
+        },
+    }));
     await (0, storage_1.initStorage)(context);
 }
 function deactivate() {
@@ -237,6 +245,9 @@ async function hardResetSession(context, opts) {
     modelNavSelectedRunId = null;
     pythonConfigConfirmedThisSession = false;
     scriptConfigConfirmedThisSession = false;
+    runActivityState = null;
+    pauseInFlight = false;
+    resumeInFlight = false;
     // 4) Reset storage
     try {
         (0, storage_1.closeStorage)();
@@ -253,6 +264,14 @@ async function hardResetSession(context, opts) {
     }
 }
 /* ============================ Panel & HTML ============================ */
+function getLocalResourceRoots(context) {
+    return [
+        vscode.Uri.file(context.extensionPath),
+        vscode.Uri.file(path.join(context.extensionPath, 'src', 'webview')),
+        vscode.Uri.file(path.join(context.extensionPath, 'media')),
+        vscode.Uri.file(path.join(context.extensionPath, 'node_modules')),
+    ];
+}
 async function openPanel(context) {
     try {
         await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: true });
@@ -264,20 +283,30 @@ async function openPanel(context) {
         panel.reveal(vscode.ViewColumn.Active);
         return;
     }
-    const nonce = getNonce();
-    const roots = [
-        vscode.Uri.file(context.extensionPath),
-        vscode.Uri.file(path.join(context.extensionPath, 'src', 'webview')),
-        vscode.Uri.file(path.join(context.extensionPath, 'media')),
-        vscode.Uri.file(path.join(context.extensionPath, 'node_modules')),
-    ];
-    let webviewVisible = false;
-    panel = vscode.window.createWebviewPanel('ontheflyDashboard', 'On the Fly Dash', vscode.ViewColumn.Active, {
+    const newPanel = vscode.window.createWebviewPanel('ontheflyDashboard', 'OnTheFly', vscode.ViewColumn.Active, {
         enableScripts: true,
         retainContextWhenHidden: true,
-        localResourceRoots: roots,
+        localResourceRoots: getLocalResourceRoots(context),
     });
-    webviewVisible = true;
+    configurePanel(context, newPanel);
+}
+async function revivePanel(context, webviewPanel) {
+    try {
+        await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: false });
+    }
+    catch (e) {
+        console.warn('[onthefly] backend not ready yet (revive):', e);
+    }
+    configurePanel(context, webviewPanel);
+}
+function configurePanel(context, webviewPanel) {
+    panel = webviewPanel;
+    panel.webview.options = {
+        enableScripts: true,
+        localResourceRoots: getLocalResourceRoots(context),
+    };
+    const nonce = getNonce();
+    let webviewVisible = panel.visible;
     panel.onDidChangeViewState(({ webviewPanel }) => {
         webviewVisible = webviewPanel.visible;
         if (webviewVisible) {
@@ -310,7 +339,8 @@ async function openPanel(context) {
         catch { }
         await (0, storage_1.initStorage)(context);
         needDiskCleanOnNextBackend = true;
-        panel = null;
+        if (panel === webviewPanel)
+            panel = null;
     });
     panel.webview.onDidReceiveMessage((m) => { onMessage(context, m); });
     panel.webview.html = getHtml(context, panel.webview, nonce);
@@ -625,7 +655,7 @@ function computeForkMergeCounters() {
 }
 async function switchToRun(context, runId) {
     try {
-        await sendReq('pause', {}, 30_000);
+        await requestBackendPause(30_000);
     }
     catch { }
     try {
@@ -804,9 +834,17 @@ async function onMessage(context, m) {
             break;
         }
         case 'pause': {
+            if (pauseInFlight) {
+                post({ type: 'log', text: '[pause] Request already in progress.' });
+                break;
+            }
+            if (runActivityState === 'paused') {
+                break;
+            }
+            pauseInFlight = true;
             try {
                 // 1) Ask the backend to pause (finish current step, flush state, etc.)
-                await sendReq('pause', {}, 30_000); // backend will do its own checkpointing if it wants
+                await requestBackendPause(30_000); // backend will do its own checkpointing if it wants
                 // 2) Figure out which run this pause applies to
                 const runId = (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
                     (currentRunId && currentRunId.trim()) ||
@@ -846,36 +884,52 @@ async function onMessage(context, m) {
             catch (e) {
                 postErr(e);
             }
+            finally {
+                pauseInFlight = false;
+            }
             break;
         }
         case 'resume': {
+            if (resumeInFlight) {
+                post({ type: 'log', text: '[resume] Request already in progress.' });
+                break;
+            }
+            const requested = String(m.runId || '').trim();
+            if (requested)
+                modelNavSelectedRunId = requested;
+            const target = requested ||
+                currentRunId ||
+                modelNavSelectedRunId ||
+                null;
+            const sameRunTarget = Boolean(proc && target && currentRunId && target === currentRunId);
+            if (sameRunTarget && runActivityState === 'running') {
+                post({ type: 'log', text: '[resume] Training is already running.' });
+                break;
+            }
+            resumeInFlight = true;
             try {
-                const requested = String(m.runId || '').trim();
-                if (requested)
-                    modelNavSelectedRunId = requested;
-                const target = requested ||
-                    currentRunId ||
-                    modelNavSelectedRunId ||
-                    null;
-                // If a process exists AND user wants a different run → clean switch
                 if (proc && target && currentRunId && target !== currentRunId) {
                     post({ type: 'log', text: `Switching active run: ${currentRunId} → ${target}` });
                     await switchToRun(context, target);
                     post({ type: 'resumed', payload: { run_id: target } });
-                    break;
+                    runActivityState = 'running';
                 }
-                // If the process exists and we are already on the correct run → send resume
-                if (proc) {
+                else if (proc) {
                     sendCtl({ cmd: 'resume' });
-                    break;
+                    runActivityState = 'running';
                 }
-                // No process → start a run (startRun handles interpreter/script validation + user confirmation)
-                post({ type: 'log', text: 'Starting training (via Resume)...' });
-                await startRun(context);
+                else {
+                    post({ type: 'log', text: 'Starting training (via Resume)...' });
+                    await startRun(context);
+                    runActivityState = 'running';
+                }
             }
             catch (e) {
                 postErr(e);
                 postStatus(false);
+            }
+            finally {
+                resumeInFlight = false;
             }
             break;
         }
@@ -902,7 +956,7 @@ async function onMessage(context, m) {
                 }
                 const target = await ensureProcOnRun(context, candidate);
                 try {
-                    await sendReq('pause', {}, 30_000);
+                    await requestBackendPause(30_000);
                 }
                 catch (pauseErr) {
                     console.warn('[onthefly] pause before test failed', pauseErr);
@@ -974,7 +1028,7 @@ async function onMessage(context, m) {
                     await switchToRun(context, target);
                 }
                 try {
-                    await sendReq('pause', {}, 30_000);
+                    await requestBackendPause(30_000);
                 }
                 catch { }
                 let ckptPath = (0, storage_1.latestCheckpointForRun)(target)?.path;
@@ -1031,7 +1085,7 @@ async function onMessage(context, m) {
                 }
                 else {
                     try {
-                        await sendReq('pause', {}, 30_000);
+                        await requestBackendPause(30_000);
                     }
                     catch { }
                 }
@@ -1041,7 +1095,7 @@ async function onMessage(context, m) {
                     if (!(0, storage_1.latestCheckpointForRun)(p)) {
                         await ensureProcOnRun(context, p);
                         try {
-                            await sendReq('pause', {}, 30_000);
+                            await requestBackendPause(30_000);
                         }
                         catch { }
                         try {
@@ -1064,7 +1118,7 @@ async function onMessage(context, m) {
                     modelNavSelectedRunId = child;
                     nativeRunsThisSession.add(child);
                     post({ type: 'modelNav.select', runId: child });
-                    // If backend provided a subset (optional), persist it like we do on fork.
+                    // If backend provided a subset, persist it like we do on fork.
                     if (Array.isArray(data?.subset_indices)) {
                         try {
                             (0, storage_1.setRunSubset)(child, data.subset_indices.map((n) => Number(n) | 0));
@@ -1174,7 +1228,7 @@ async function onMessage(context, m) {
                     // Running but on a different model → switch cleanly.
                     await switchToRun(context, runId);
                 }
-                await sendReq('pause', {}, 30_000);
+                await requestBackendPause(30_000);
                 const subset = (0, storage_1.getRunSubset)(String(runId));
                 const subset_on = 'train';
                 const data = await sendReq('generate_report', {
@@ -1556,6 +1610,7 @@ async function startRun(context) {
             sawStdout = true;
             postStatus(true);
             post({ type: 'log', text: 'Training process started.' });
+            runActivityState = 'running';
         }
     };
     let buffer = '';
@@ -1584,6 +1639,9 @@ async function startRun(context) {
         post({ type: 'trainingFinished' });
         postStatus(false);
         proc = null;
+        runActivityState = null;
+        pauseInFlight = false;
+        resumeInFlight = false;
         for (const [, p] of pending) {
             clearTimeout(p.timer);
             p.reject(new Error('python exited'));
@@ -1599,6 +1657,8 @@ function sendCtl(cmd) {
     try {
         proc.stdin.write(JSON.stringify(cmd) + '\n');
         const t = cmd.cmd;
+        if (t === 'resume')
+            runActivityState = 'running';
         if (t && optimisticEcho[t])
             post({ type: optimisticEcho[t], payload: cmd });
     }
@@ -1606,13 +1666,17 @@ function sendCtl(cmd) {
         postErr(e);
     }
 }
+async function requestBackendPause(timeoutMs = 30_000) {
+    await sendReq('pause', {}, timeoutMs);
+    runActivityState = 'paused';
+}
 async function runHealth(cmd, payload, eventType, timeoutMs = 60_000, forRunId) {
     const run_id = forRunId || modelNavSelectedRunId || currentRunId || null;
     try {
         // tell the webview to show a loading placeholder
         post({ type: eventType, run_id, pending: true });
         try {
-            await sendReq('pause', {}, 30_000);
+            await requestBackendPause(30_000);
         }
         catch { }
         const data = await sendReq(cmd, payload, timeoutMs);
@@ -1741,6 +1805,9 @@ function killProc() {
     }
     finally {
         proc = null; // release reference for GC
+        runActivityState = null;
+        pauseInFlight = false;
+        resumeInFlight = false;
     }
 }
 function normalizeParents(from) {
@@ -1785,6 +1852,19 @@ function handleLine(line) {
         }
         catch { }
         return;
+    }
+    if (obj?.type === 'paused') {
+        runActivityState = 'paused';
+        pauseInFlight = false;
+    }
+    else if (obj?.type === 'resumed') {
+        runActivityState = 'running';
+        resumeInFlight = false;
+    }
+    else if (obj?.type === 'trainingFinished') {
+        runActivityState = null;
+        pauseInFlight = false;
+        resumeInFlight = false;
     }
     if (obj?.type === 'log') {
         const run_id = obj.run_id || currentRunId || 'live';

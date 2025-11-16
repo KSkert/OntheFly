@@ -139,6 +139,7 @@ const RUN_EPOCH = new Map();
 
 let IS_RUNNING = false;
 let IS_PAUSED  = false;
+let TEST_PENDING = false;
 gateHealthButtons();
 function curRunKey() { return keyOf(currentPageRunId()); }
 
@@ -182,6 +183,12 @@ function gateHealthButtons() {
       b.style.pointerEvents = '';
     }
   });
+}
+
+function updateTestNowGate() {
+  if (!btnTestNow) return;
+  const shouldDisable = IS_RUNNING || TEST_PENDING;
+  btnTestNow.disabled = shouldDisable;
 }
 
 function notifyModelNavSelected(runId) {
@@ -342,8 +349,13 @@ function setRunning(running) {
   if (btnResume) btnResume.disabled = running;
   if (btnChoose) btnChoose.disabled = running;
   if (btnSetPy)  btnSetPy.disabled  = running;
+  if (btnAutoSave) btnAutoSave.disabled = running;
+  if (btnLoad) btnLoad.disabled = running;
+  if (btnRefreshRuns) btnRefreshRuns.disabled = running;
+  if (btnExportSubset) btnExportSubset.disabled = running;
 
   if (btnReport) btnReport.disabled = running;
+  updateTestNowGate();
   updateSelectRegionGate();
   updateSelectedExportGate();
   gateHealthButtons();
@@ -837,6 +849,11 @@ window.addEventListener('message', (e) => {
         IS_RUNNING = false;
         IS_PAUSED = false;
         setRunning(false);
+        TEST_PENDING = false;
+        if (btnTestNow) {
+          btnTestNow.removeAttribute('aria-busy');
+          updateTestNowGate();
+        }
         updateModelNavUI();
 
         window.ChartReportSelection?.cancelSelection?.();
@@ -872,12 +889,14 @@ window.addEventListener('message', (e) => {
     case 'testNow':
       if (btnTestNow && m?.status) {
         if (m.status === 'pending') {
-          btnTestNow.disabled = true;
+          TEST_PENDING = true;
+          updateTestNowGate();
           btnTestNow.setAttribute('aria-busy', 'true');
           notify(`Running test on ${m.run_id || 'current run'}…`);
         } else {
-          btnTestNow.disabled = false;
+          TEST_PENDING = false;
           btnTestNow.removeAttribute('aria-busy');
+          updateTestNowGate();
           if (m.status === 'completed') {
             const avg = Number(m?.data?.avg_loss);
             const lossText = Number.isFinite(avg) ? ` (avg loss ${avg.toFixed(4)})` : '';

@@ -234,6 +234,8 @@ type Ctl =
   | { cmd: 'fork'; payload?: any }
   | { cmd: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string; new_name?: string } };
 
+type RunActivityState = 'running' | 'paused' | null;
+
 const optimisticEcho: Record<string, string> = {
   pause: 'paused',
   resume: 'resumed',
@@ -254,6 +256,9 @@ let modelNavSelectedRunId: string | null = null;
 let pythonConfigConfirmedThisSession = false;
 let scriptConfigConfirmedThisSession = false;
 let needDiskCleanOnNextBackend = true;
+let runActivityState: RunActivityState = null;
+let pauseInFlight = false;
+let resumeInFlight = false;
 
 
 /* ============================ Types ============================ */
@@ -279,6 +284,13 @@ type StepRow = {
 export async function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.commands.registerCommand('onthefly.showDashboard', () => openPanel(context)),
+  );
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer('ontheflyDashboard', {
+      async deserializeWebviewPanel(webviewPanel: vscode.WebviewPanel) {
+        await revivePanel(context, webviewPanel);
+      },
+    }),
   );
   await initStorage(context);
 }
@@ -329,6 +341,9 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
   modelNavSelectedRunId = null;
   pythonConfigConfirmedThisSession = false;
   scriptConfigConfirmedThisSession = false;
+  runActivityState = null;
+  pauseInFlight = false;
+  resumeInFlight = false;
 
   // 4) Reset storage
   try { closeStorage(); } catch {}
@@ -348,6 +363,15 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
 
 /* ============================ Panel & HTML ============================ */
 
+function getLocalResourceRoots(context: vscode.ExtensionContext): vscode.Uri[] {
+  return [
+    vscode.Uri.file(context.extensionPath),
+    vscode.Uri.file(path.join(context.extensionPath, 'src', 'webview')),
+    vscode.Uri.file(path.join(context.extensionPath, 'media')),
+    vscode.Uri.file(path.join(context.extensionPath, 'node_modules')),
+  ];
+}
+
 async function openPanel(context: vscode.ExtensionContext) {
 
   try { await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: true }); } catch (e) {
@@ -356,28 +380,35 @@ async function openPanel(context: vscode.ExtensionContext) {
 
   if (panel) { panel.reveal(vscode.ViewColumn.Active); return; }
 
-  const nonce = getNonce();
-
-  const roots = [
-    vscode.Uri.file(context.extensionPath),
-    vscode.Uri.file(path.join(context.extensionPath, 'src', 'webview')),
-    vscode.Uri.file(path.join(context.extensionPath, 'media')),
-    vscode.Uri.file(path.join(context.extensionPath, 'node_modules')),
-  ];
-
-  let webviewVisible = false;
-  panel = vscode.window.createWebviewPanel(
+  const newPanel = vscode.window.createWebviewPanel(
     'ontheflyDashboard',
-    'On the Fly Dash',
+    'OnTheFly',
     vscode.ViewColumn.Active,
     {
       enableScripts: true,
       retainContextWhenHidden: true,
-      localResourceRoots: roots,
+      localResourceRoots: getLocalResourceRoots(context),
     }
   );
+  configurePanel(context, newPanel);
+}
 
-  webviewVisible = true;
+async function revivePanel(context: vscode.ExtensionContext, webviewPanel: vscode.WebviewPanel) {
+  try { await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: false }); } catch (e) {
+    console.warn('[onthefly] backend not ready yet (revive):', e);
+  }
+  configurePanel(context, webviewPanel);
+}
+
+function configurePanel(context: vscode.ExtensionContext, webviewPanel: vscode.WebviewPanel) {
+  panel = webviewPanel;
+  panel.webview.options = {
+    enableScripts: true,
+    localResourceRoots: getLocalResourceRoots(context),
+  };
+
+  const nonce = getNonce();
+  let webviewVisible = panel.visible;
 
   panel.onDidChangeViewState(({ webviewPanel }) => {
     webviewVisible = webviewPanel.visible;
@@ -400,7 +431,7 @@ async function openPanel(context: vscode.ExtensionContext) {
     try { closeStorage(); } catch {}
     await initStorage(context);
     needDiskCleanOnNextBackend = true;
-    panel = null;
+    if (panel === webviewPanel) panel = null;
   });
 
   panel.webview.onDidReceiveMessage((m: any) => { onMessage(context, m); });
@@ -750,7 +781,7 @@ function computeForkMergeCounters(): { forkMax: number; mergeMax: number } {
 
 
 async function switchToRun(context: vscode.ExtensionContext, runId: string) {
-  try { await sendReq('pause', {}, 30_000); } catch {}
+  try { await requestBackendPause(30_000); } catch {}
   try { await sendReq('save_ckpt', {}, 120_000); } catch {}
   try { await new Promise(res => setTimeout(res, 200)); } catch {}
 
@@ -930,9 +961,17 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     }
 
     case 'pause': {
+      if (pauseInFlight) {
+        post({ type: 'log', text: '[pause] Request already in progress.' });
+        break;
+      }
+      if (runActivityState === 'paused') {
+        break;
+      }
+      pauseInFlight = true;
       try {
         // 1) Ask the backend to pause (finish current step, flush state, etc.)
-        await sendReq('pause', {}, 30_000); // backend will do its own checkpointing if it wants
+        await requestBackendPause(30_000); // backend will do its own checkpointing if it wants
 
         // 2) Figure out which run this pause applies to
         const runId =
@@ -979,43 +1018,54 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         }
       } catch (e: any) {
         postErr(e);
+      } finally {
+        pauseInFlight = false;
       }
       break;
     }
 
 
     case 'resume': {
+      if (resumeInFlight) {
+        post({ type: 'log', text: '[resume] Request already in progress.' });
+        break;
+      }
+
+      const requested = String((m as any).runId || '').trim();
+      if (requested) modelNavSelectedRunId = requested;
+
+      const target =
+        requested ||
+        currentRunId ||
+        modelNavSelectedRunId ||
+        null;
+
+      const sameRunTarget = Boolean(proc && target && currentRunId && target === currentRunId);
+      if (sameRunTarget && runActivityState === 'running') {
+        post({ type: 'log', text: '[resume] Training is already running.' });
+        break;
+      }
+
+      resumeInFlight = true;
       try {
-        const requested = String((m as any).runId || '').trim();
-        if (requested) modelNavSelectedRunId = requested;
-
-        const target =
-          requested ||
-          currentRunId ||
-          modelNavSelectedRunId ||
-          null;
-
-        // If a process exists AND user wants a different run → clean switch
         if (proc && target && currentRunId && target !== currentRunId) {
           post({ type: 'log', text: `Switching active run: ${currentRunId} → ${target}` });
           await switchToRun(context, target);
           post({ type: 'resumed', payload: { run_id: target } });
-          break;
-        }
-
-        // If the process exists and we are already on the correct run → send resume
-        if (proc) {
+          runActivityState = 'running';
+        } else if (proc) {
           sendCtl({ cmd: 'resume' });
-          break;
+          runActivityState = 'running';
+        } else {
+          post({ type: 'log', text: 'Starting training (via Resume)...' });
+          await startRun(context);
+          runActivityState = 'running';
         }
-
-        // No process → start a run (startRun handles interpreter/script validation + user confirmation)
-        post({ type: 'log', text: 'Starting training (via Resume)...' });
-        await startRun(context);
-
       } catch (e: any) {
         postErr(e);
         postStatus(false);
+      } finally {
+        resumeInFlight = false;
       }
       break;
     }
@@ -1049,7 +1099,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         }
 
         const target = await ensureProcOnRun(context, candidate);
-        try { await sendReq('pause', {}, 30_000); }
+        try { await requestBackendPause(30_000); }
         catch (pauseErr) {
           console.warn('[onthefly] pause before test failed', pauseErr);
         }
@@ -1122,7 +1172,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           await switchToRun(context, target);
         }
 
-        try { await sendReq('pause', {}, 30_000); } catch {}
+        try { await requestBackendPause(30_000); } catch {}
         let ckptPath: string | undefined = latestCheckpointForRun(target)?.path;
         if (!ckptPath) {
           try { const ck = await sendReq('save_ckpt', {}, 120_000); ckptPath = ck?.path; } catch {}
@@ -1168,7 +1218,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           modelNavSelectedRunId = anchor;
           post({ type: 'modelNav.select', runId: anchor });
         } else {
-          try { await sendReq('pause', {}, 30_000); } catch {}
+          try { await requestBackendPause(30_000); } catch {}
         }
 
         // Preflight: all parents must have checkpoints.
@@ -1176,7 +1226,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         for (const p of parents) {
           if (!latestCheckpointForRun(p)) {
             await ensureProcOnRun(context, p);
-            try { await sendReq('pause', {}, 30_000); } catch {}
+            try { await requestBackendPause(30_000); } catch {}
             try {
               const ck = await sendReq('save_ckpt', {}, 120_000);
               // belt-and-suspenders: persist immediately in case the backend doesn't emit the JSON event
@@ -1203,7 +1253,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           nativeRunsThisSession.add(child);
           post({ type: 'modelNav.select', runId: child });
 
-          // If backend provided a subset (optional), persist it like we do on fork.
+          // If backend provided a subset, persist it like we do on fork.
           if (Array.isArray(data?.subset_indices)) {
             try {
               setRunSubset(child, data.subset_indices.map((n: any) => Number(n) | 0));
@@ -1297,7 +1347,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           await switchToRun(context, runId);
         }
 
-        await sendReq('pause', {}, 30_000);
+        await requestBackendPause(30_000);
 
         const subset = getRunSubset(String(runId));
         const subset_on: 'train' = 'train';
@@ -1697,6 +1747,7 @@ async function startRun(context: vscode.ExtensionContext) {
       sawStdout = true;
       postStatus(true);
       post({ type: 'log', text: 'Training process started.' });
+      runActivityState = 'running';
     }
   };
 
@@ -1728,6 +1779,9 @@ async function startRun(context: vscode.ExtensionContext) {
     post({ type: 'trainingFinished' });
     postStatus(false);
     proc = null;
+    runActivityState = null;
+    pauseInFlight = false;
+    resumeInFlight = false;
 
     for (const [, p] of pending) { clearTimeout(p.timer); p.reject(new Error('python exited')); }
     pending.clear();
@@ -1742,10 +1796,16 @@ function sendCtl(cmd: Ctl) {
   try {
     proc.stdin.write(JSON.stringify(cmd) + '\n');
     const t = (cmd as any).cmd;
+    if (t === 'resume') runActivityState = 'running';
     if (t && optimisticEcho[t]) post({ type: optimisticEcho[t], payload: cmd });
   } catch (e: any) {
     postErr(e);
   }
+}
+
+async function requestBackendPause(timeoutMs = 30_000): Promise<void> {
+  await sendReq('pause', {}, timeoutMs);
+  runActivityState = 'paused';
 }
 
 async function runHealth(
@@ -1761,7 +1821,7 @@ async function runHealth(
     // tell the webview to show a loading placeholder
     post({ type: eventType, run_id, pending: true });
 
-    try { await sendReq('pause', {}, 30_000); } catch {}
+    try { await requestBackendPause(30_000); } catch {}
 
     const data = await sendReq(cmd, payload, timeoutMs);
 
@@ -1856,6 +1916,9 @@ function killProc() {
     }
   } finally {
     proc = null;  // release reference for GC
+    runActivityState = null;
+    pauseInFlight = false;
+    resumeInFlight = false;
   }
 }
 
@@ -1895,6 +1958,18 @@ function handleLine(line: string) {
     post({ type: 'testStep', run_id, step, loss: Number.isFinite(loss) ? loss : null, ts: Date.now() });
     try { insertTestMetric(run_id, step, Number.isFinite(loss) ? loss : null); } catch {}
     return;
+  }
+
+  if (obj?.type === 'paused') {
+    runActivityState = 'paused';
+    pauseInFlight = false;
+  } else if (obj?.type === 'resumed') {
+    runActivityState = 'running';
+    resumeInFlight = false;
+  } else if (obj?.type === 'trainingFinished') {
+    runActivityState = null;
+    pauseInFlight = false;
+    resumeInFlight = false;
   }
 
   if (obj?.type === 'log') {

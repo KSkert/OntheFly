@@ -21,7 +21,7 @@
   ],
   "icon": "images/icon.png",
   "activationEvents": [
-    "onCommand:onthefly.showDashboard"
+    "onStartupFinished"
   ],
   "main": "./out/extension.js",
   "contributes": {
