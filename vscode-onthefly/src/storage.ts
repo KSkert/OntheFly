@@ -60,6 +60,7 @@ function ensureSchema(d: BetterSqlite3Types.Database) {
       + "CREATE TABLE IF NOT EXISTS metrics ("
       + "  run_id TEXT,"
       + "  step INTEGER,"
+      + "  epoch INTEGER,"
       + "  loss REAL,"
       + "  val_loss REAL,"
       + "  accuracy REAL,"
@@ -152,6 +153,7 @@ function ensureSchema(d: BetterSqlite3Types.Database) {
     const desired = [
       'run_id',
       'step',
+      'epoch',
       'loss',
       'val_loss',
       'accuracy',
@@ -171,6 +173,7 @@ function ensureSchema(d: BetterSqlite3Types.Database) {
       desired.every(k => colSet.has(k));
 
     if (!hasTable || hasForbidden || !matchesDesiredExactly) {
+      const hasEpoch = colSet.has('epoch');
       const hasValLoss = colSet.has('val_loss');
       const hasAccuracy = colSet.has('accuracy');
       const hasLr = colSet.has('lr');
@@ -191,6 +194,7 @@ function ensureSchema(d: BetterSqlite3Types.Database) {
           + 'CREATE TABLE IF NOT EXISTS metrics_new ('
           + '  run_id TEXT,'
           + '  step INTEGER,'
+          + '  epoch INTEGER,'
           + '  loss REAL,'
           + '  val_loss REAL,'
           + '  accuracy REAL,'
@@ -205,10 +209,11 @@ function ensureSchema(d: BetterSqlite3Types.Database) {
           + ');'
           + (hasTable
               ? ''
-                + 'INSERT INTO metrics_new(run_id, step, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts) '
+                + 'INSERT INTO metrics_new(run_id, step, epoch, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts) '
                 + 'SELECT '
                 + '  run_id, '
                 + '  step, '
+                + (hasEpoch ? '  epoch, ' : '  NULL AS epoch, ')
                 + '  loss, '
                 + (hasValLoss ? '  val_loss, ' : '  NULL AS val_loss, ')
                 + (hasAccuracy ? '  accuracy, ' : '  NULL AS accuracy, ')
@@ -509,6 +514,7 @@ export function insertCheckpoint(ckpt_id: string, run_id: string, step: number, 
 
 type MetricInsertRow = {
   step: number;
+  epoch?: number | null;
   loss: number | null;
   val_loss: number | null;
   accuracy?: number | null;
@@ -525,7 +531,7 @@ function insStmt() {
   if (_insStmt) return _insStmt;
   if (!db) throw new Error('Database not initialized. Call initStorage() first.');
   _insStmt = db.prepare(
-    'INSERT INTO metrics( run_id, step, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    'INSERT INTO metrics( run_id, step, epoch, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
   );
   return _insStmt;
 }
@@ -538,6 +544,7 @@ export function insertMetric(run_id: string, row: MetricInsertRow) {
   insStmt().run(
     run_id,
     row.step,
+    row.epoch ?? null,
     row.loss ?? null,
     row.val_loss ?? null,
     row.accuracy ?? null,
@@ -556,6 +563,7 @@ export function insertMetric(run_id: string, row: MetricInsertRow) {
 (insertMetric as any).batch = (rows: Array<{
   run_id: string;
   step: number;
+  epoch?: number | null;
   loss: number | null;
   val_loss: number | null;
   accuracy?: number | null;
@@ -579,6 +587,7 @@ export function insertMetric(run_id: string, row: MetricInsertRow) {
       st.run(
         r.run_id,
         r.step,
+        r.epoch ?? null,
         r.loss ?? null,
         r.val_loss ?? null,
         r.accuracy ?? null,
@@ -748,7 +757,7 @@ export function listRuns() {
 export function getRunRows(run_id: string) {
   if (!db) return [];
   return db.prepare(
-    'SELECT step, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util FROM metrics WHERE run_id=? ORDER BY step ASC'
+    'SELECT step, epoch, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util FROM metrics WHERE run_id=? ORDER BY step ASC'
   ).all(run_id);
 }
 

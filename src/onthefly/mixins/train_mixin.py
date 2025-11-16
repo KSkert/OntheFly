@@ -155,6 +155,8 @@ class TrainMixin:
         return {"val_loss": _to_scalar_loss(loss, device=self.device).detach()}
 
     def _run_validation(self) -> float:
+        if self.val_loader is None:
+            raise RuntimeError("val_loader is not configured; cannot run validation.")
         self.model.eval()
         losses = []
         with torch.no_grad():
@@ -258,6 +260,32 @@ class TrainMixin:
     def _maybe_handle_commands(self):
         serve_commands(self._bus, self._router, poll_sec=0.0)
 
+    def _validation_frequency(self) -> int:
+        freq = getattr(self, "_val_every_n_epochs", None)
+        try:
+            freq = int(freq) if freq is not None else 0
+        except Exception:
+            freq = 0
+        return max(0, freq)
+
+    def _validation_enabled(self) -> bool:
+        return self.val_loader is not None and self._validation_frequency() > 0
+
+    def _validation_disabled_reason(self) -> Optional[str]:
+        freq = self._validation_frequency()
+        if freq <= 0:
+            return "val_every_n_epochs <= 0"
+        if self.val_loader is None:
+            return "no val_loader provided"
+        return None
+
+    def _should_run_validation_epoch(self) -> bool:
+        if not self._validation_enabled():
+            return False
+        freq = self._validation_frequency()
+        epoch_idx = int(getattr(self, "epoch", 0) or 0)
+        return ((epoch_idx + 1) % freq) == 0
+
     # ---------------- public API ----------------
     def training_step(self, fn):
         self._training_step_fn = fn
@@ -313,6 +341,8 @@ class TrainMixin:
         target_step  = None if max_steps  is None else start_step  + max_steps
         target_epoch = None if max_epochs is None else start_epoch + max_epochs
 
+        self._last_emitted_epoch = None
+
         # --- 2) Session header & run identity (unchanged) ---
         self._event({"type":"session_started","project": self.cfg.project, "run_name": self.cfg.run_name})
 
@@ -323,6 +353,11 @@ class TrainMixin:
         self._maybe_handle_commands()
 
         self._emit_new_run(self.cfg.run_name, parents=[], meta={"display_name": self.cfg.run_name})
+        val_reason = self._validation_disabled_reason()
+        if val_reason:
+            freq = self._validation_frequency()
+            level = "warn" if (val_reason == "no val_loader provided" and freq > 0) else "info"
+            self._event({"type": "log", "level": level, "text": f"validation disabled ({val_reason})"})
         try:
             while self._running and (target_step is None or self.step < target_step) and (target_epoch is None or self.epoch < target_epoch):
                 self._maybe_handle_commands()
@@ -334,7 +369,6 @@ class TrainMixin:
                 self._sampler_set_epoch(self.epoch)
 
                 self._event({"type": "log", "level": "info", "text": f"epoch {self.epoch}"})
-                self._drain_feature_queue()
 
                 k = int(getattr(self, "_epoch_batch_idx", 0) or 0)
                 it = iter(self.train_loader)
@@ -383,6 +417,7 @@ class TrainMixin:
 
                     self.step += 1
                     self._epoch_batch_idx = int(getattr(self, "_epoch_batch_idx", 0) or 0) + 1
+                    current_epoch = int(getattr(self, "epoch", 0) or 0)
 
                     payload = {
                         "type":     "trainStep",
@@ -390,6 +425,19 @@ class TrainMixin:
                         "loss":     loss,
                         "val_loss": (float(self._last_val_loss) if self._last_val_loss is not None else None),
                     }
+
+                    # Only include epoch when it changes (edge-triggered)
+                    last_emitted = getattr(self, "_last_emitted_epoch", None)
+                    if last_emitted is None or current_epoch != last_emitted:
+                        payload["epoch"] = current_epoch
+                        self._last_emitted_epoch = current_epoch
+                        self._event({
+                            "type":  "log",
+                            "level": "info",
+                            "phase": "train",
+                            "text":  f"[epoch] now at epoch {current_epoch} (step {self.step})",
+                        })
+
                     payload.update(runtime_metrics)
                     self._emit(payload)
 
@@ -412,11 +460,14 @@ class TrainMixin:
                 if not self._running:
                     break
 
-                vloss = self._run_validation()
-                self._last_val_loss = float(vloss)
-                self._event({"type": "log", "level": "info", "text": f"epoch {self.epoch} val_loss = {vloss:.6f}"})
+                epoch_val_loss = None
+                if self._should_run_validation_epoch():
+                    vloss = self._run_validation()
+                    epoch_val_loss = float(vloss)
+                    self._last_val_loss = epoch_val_loss
+                    self._event({"type": "log", "level": "info", "text": f"epoch {self.epoch} val_loss = {vloss:.6f}"})
 
-                self._event({"type": "epoch_end", "epoch": self.epoch, "val_loss": vloss})
+                self._event({"type": "epoch_end", "epoch": self.epoch, "val_loss": epoch_val_loss})
 
                 self._epoch_batch_idx = 0
                 self.epoch += 1
@@ -441,10 +492,6 @@ class TrainMixin:
 
         finally:
             self._bus.stop()
-            try:
-                self._feature_worker.stop()
-            except Exception:
-                pass
             tracker = getattr(self, "_activation_tracker", None)
             if tracker is not None:
                 try:

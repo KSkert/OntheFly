@@ -261,6 +261,7 @@ let needDiskCleanOnNextBackend = true;
 type StepRow = {
   run_id: string;
   step: number;
+  epoch?: number | null;
   loss: number | null;
   val_loss: number | null;
   accuracy?: number | null;
@@ -1974,6 +1975,7 @@ function handleLine(line: string) {
     const row: StepRow = {
       run_id,
       step: Number(obj.step) || 0,
+      epoch: num(obj.epoch),
       loss: num(obj.loss),
       val_loss: num(obj.val_loss),
       accuracy: num(obj.accuracy),

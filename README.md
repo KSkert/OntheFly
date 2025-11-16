@@ -1,9 +1,11 @@
 # OnTheFly
 
-**OnTheFly** lets you *steer* PyTorch training runs live from VS Code — pause, inspect, fork, merge, and export without ever leaving your IDE or sending data to the cloud.
+**OnTheFly** lets you steer PyTorch training runs live from VS Code — pause, inspect, fork, merge, and export without ever leaving your IDE or sending data to the cloud.
 
 Today, most training is **fire-and-forget**:
 you start a long run, wait, and only discover failure cases or weak slices *after* it finishes. Fixing them means reruns, one-off notebooks, and manual data slicing.
+
+Many engineers quit training after seeing validation error increase and train error bottom, but double descent is a common theme in some setups. Being able to test, save a model, and continue training seamlessly is another big time saver.
 
 OnTheFly turns that into an interactive loop:
 
@@ -82,10 +84,13 @@ quickstart(
     test_loader=test,
     max_epochs=1,
     do_test_after=True,
+    val_every_n_epochs=1,  # opt-in validation cadence
 )
 ```
 
 Don't run this just yet — you'll start training from the dashboard controls instead.
+
+`quickstart` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely.
 
 ### Open the VS Code dashboard
 

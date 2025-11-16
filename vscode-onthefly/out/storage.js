@@ -115,6 +115,7 @@ function ensureSchema(d) {
         + "CREATE TABLE IF NOT EXISTS metrics ("
         + "  run_id TEXT,"
         + "  step INTEGER,"
+        + "  epoch INTEGER,"
         + "  loss REAL,"
         + "  val_loss REAL,"
         + "  accuracy REAL,"
@@ -193,6 +194,7 @@ function ensureSchema(d) {
         const desired = [
             'run_id',
             'step',
+            'epoch',
             'loss',
             'val_loss',
             'accuracy',
@@ -210,6 +212,7 @@ function ensureSchema(d) {
             cols.length === desired.length &&
             desired.every(k => colSet.has(k));
         if (!hasTable || hasForbidden || !matchesDesiredExactly) {
+            const hasEpoch = colSet.has('epoch');
             const hasValLoss = colSet.has('val_loss');
             const hasAccuracy = colSet.has('accuracy');
             const hasLr = colSet.has('lr');
@@ -228,6 +231,7 @@ function ensureSchema(d) {
                 + 'CREATE TABLE IF NOT EXISTS metrics_new ('
                 + '  run_id TEXT,'
                 + '  step INTEGER,'
+                + '  epoch INTEGER,'
                 + '  loss REAL,'
                 + '  val_loss REAL,'
                 + '  accuracy REAL,'
@@ -242,10 +246,11 @@ function ensureSchema(d) {
                 + ');'
                 + (hasTable
                     ? ''
-                        + 'INSERT INTO metrics_new(run_id, step, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts) '
+                        + 'INSERT INTO metrics_new(run_id, step, epoch, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts) '
                         + 'SELECT '
                         + '  run_id, '
                         + '  step, '
+                        + (hasEpoch ? '  epoch, ' : '  NULL AS epoch, ')
                         + '  loss, '
                         + (hasValLoss ? '  val_loss, ' : '  NULL AS val_loss, ')
                         + (hasAccuracy ? '  accuracy, ' : '  NULL AS accuracy, ')
@@ -527,7 +532,7 @@ function insStmt() {
         return _insStmt;
     if (!db)
         throw new Error('Database not initialized. Call initStorage() first.');
-    _insStmt = db.prepare('INSERT INTO metrics( run_id, step, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+    _insStmt = db.prepare('INSERT INTO metrics( run_id, step, epoch, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util, ts ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
     return _insStmt;
 }
 function insertMetric(run_id, row) {
@@ -535,7 +540,7 @@ function insertMetric(run_id, row) {
         console.error('[storage] insertMetric called before db initialized');
         return;
     }
-    insStmt().run(run_id, row.step, row.loss ?? null, row.val_loss ?? null, row.accuracy ?? null, row.lr ?? null, row.grad_norm ?? null, row.weight_norm ?? null, row.activation_zero_frac ?? null, row.throughput ?? null, row.mem_vram ?? null, row.gpu_util ?? null, Date.now());
+    insStmt().run(run_id, row.step, row.epoch ?? null, row.loss ?? null, row.val_loss ?? null, row.accuracy ?? null, row.lr ?? null, row.grad_norm ?? null, row.weight_norm ?? null, row.activation_zero_frac ?? null, row.throughput ?? null, row.mem_vram ?? null, row.gpu_util ?? null, Date.now());
 }
 // batch insert
 insertMetric.batch = (rows) => {
@@ -549,7 +554,7 @@ insertMetric.batch = (rows) => {
         const st = insStmt();
         const now = Date.now();
         for (const r of xs) {
-            st.run(r.run_id, r.step, r.loss ?? null, r.val_loss ?? null, r.accuracy ?? null, r.lr ?? null, r.grad_norm ?? null, r.weight_norm ?? null, r.activation_zero_frac ?? null, r.throughput ?? null, r.mem_vram ?? null, r.gpu_util ?? null, now);
+            st.run(r.run_id, r.step, r.epoch ?? null, r.loss ?? null, r.val_loss ?? null, r.accuracy ?? null, r.lr ?? null, r.grad_norm ?? null, r.weight_norm ?? null, r.activation_zero_frac ?? null, r.throughput ?? null, r.mem_vram ?? null, r.gpu_util ?? null, now);
         }
     });
     runMany(rows);
@@ -675,7 +680,7 @@ function listRuns() {
 function getRunRows(run_id) {
     if (!db)
         return [];
-    return db.prepare('SELECT step, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util FROM metrics WHERE run_id=? ORDER BY step ASC').all(run_id);
+    return db.prepare('SELECT step, epoch, loss, val_loss, accuracy, lr, grad_norm, weight_norm, activation_zero_frac, throughput, mem_vram, gpu_util FROM metrics WHERE run_id=? ORDER BY step ASC').all(run_id);
 }
 function getRunSummary(run_id) {
     if (!db)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 from typing import Dict, Any, Optional, List, Tuple
-from queue import Empty
 import warnings
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -8,49 +7,11 @@ from torch.utils.data import DataLoader, Subset
 from ..metrics_utils import _top2_margin
 from ..device_utils import _noop_ctx
 
+
 class FeatureMixin:
     """
-    Handles ingestion from the background FeatureWorker and builds feature
-    matrices for selection (loss/margin/embed).
+    Helpers for computing feature matrices used by manual selection flows.
     """
-    _pending_feature_feed: Optional[Dict[str, Any]]
-    _pending_feature_owner: Optional[str]
-    _pending_feature_step: Optional[int]
-    _pending_feature_token: Optional[str]
-
-    def _drain_feature_queue(self):
-        if self._paused:
-            self._clear_feature_queue()
-            return
-        while True:
-            if self._paused:
-                self._clear_feature_queue(); break
-            try:
-                pack = self._feature_queue.get_nowait()
-            except Empty:
-                break
-            if not isinstance(pack, dict):
-                continue
-            if pack.get("gen") != self._pause_gen or self._halt_evt.is_set():
-                continue
-            token = str(pack.get("token", ""))
-            owner = str(pack.get("owner_run_id") or self.cfg.run_name)
-            if token != self._expected_token_by_owner.get(owner):
-                continue  # stale
-            # latch for next observe_batch call
-            self._pending_feature_feed = {k: v for k, v in pack.items() if k in (
-                "sample_losses","sample_ids","sample_margins","sample_embed","batch_loss","grad_norm","nan_flag"
-            )}
-            self._pending_feature_owner = owner
-            self._pending_feature_step = int(pack.get("at_step", 0))
-            self._pending_feature_token = token
-
-    def _clear_feature_queue(self):
-        try:
-            while True:
-                self._feature_queue.get_nowait()
-        except Empty:
-            pass
 
     def _compute_margins_and_embeddings(
         self,

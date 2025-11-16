@@ -19,7 +19,6 @@ onthefly/
 │     ├─ data_explorer.py
 │     ├─ device_utils.py
 │     ├─ factory.py
-│     ├─ feature_worker.py
 │     ├─ ids.py
 │     ├─ kmeans_utils.py ---prob won't need now that we don't do autofork
 │     ├─ merging.py
@@ -28,7 +27,6 @@ onthefly/
 │     ├─ sampler_utils.py
 │     ├─ scale.py
 │     ├─ session.py
-│     ├─ snapshots.py
 │     └─ utils.py
 ├─ vscode-onthefly
 │  ├─ package.json

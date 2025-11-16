@@ -8,7 +8,7 @@
   let bootstrapped = false;
 
   function hideChartsWhenMissing() {
-    ['lossChart', 'valLossChart', 'lossDistChart'].forEach((id) => {
+    ['lossChart', 'accuracyChart', 'valLossChart', 'lossDistChart'].forEach((id) => {
       const el = document.getElementById(id);
       if (el && el.parentElement) el.parentElement.style.display = 'none';
     });
@@ -46,6 +46,11 @@
       canvasId: ids.valLossChart,
       label: 'VAL'
     });
+    const accuracyChart = ChartCreation.createLineChart({
+      name: 'accuracy',
+      canvasId: ids.accuracyChart,
+      label: 'Accuracy'
+    });
     const lossDistChart = ChartCreation.createHistogramChart({
       name: 'loss_dist',
       canvasId: ids.lossDistChart
@@ -54,13 +59,15 @@
     if (typeof wireExportButton === 'function') {
       wireExportButton(ids.exportLossBtn, () => lossChart, 'loss_chart');
       wireExportButton(ids.exportValLossBtn, () => val_lossChart, 'val_loss');
+      wireExportButton(ids.exportAccuracyBtn, () => accuracyChart, 'accuracy_chart');
       wireExportButton(ids.exportLossDistBtn, () => lossDistChart, 'loss_distribution');
     }
 
-    ChartStream.attachCharts({ lossChart, valLossChart: val_lossChart });
+    ChartStream.attachCharts({ lossChart, valLossChart: val_lossChart, accuracyChart });
 
     window.lossChart = lossChart;
     window.val_lossChart = val_lossChart;
+    window.accuracyChart = accuracyChart;
     window.lossDistChart = lossDistChart;
 
     try {

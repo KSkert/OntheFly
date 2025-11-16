@@ -1861,6 +1861,7 @@ function handleLine(line) {
         const row = {
             run_id,
             step: Number(obj.step) || 0,
+            epoch: num(obj.epoch),
             loss: num(obj.loss),
             val_loss: num(obj.val_loss),
             accuracy: num(obj.accuracy),

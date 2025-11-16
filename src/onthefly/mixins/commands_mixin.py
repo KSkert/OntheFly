@@ -179,29 +179,8 @@ class CommandsMixin:
             # self._halt_evt.set()
             self._pause_gen += 1
 
-            try:
-                if getattr(self, "_feature_worker", None):
-                    self._feature_worker.stop()
-                    self._feature_worker.join(timeout=2.0)
-            except Exception:
-                pass
-
             path = self._save_ring_checkpoint()
             self._pause_ckpt_path = path
-
-            self._clear_feature_queue()
-
-            # While paused: start a fresh worker and emit a snapshot once (ordering is deterministic)
-            try:
-                self._spawn_feature_worker()
-                token, ref = self._snapshots.push_from_model(owner=self.cfg.run_name, version=self.step, model=self.model)
-                self._expected_token_by_owner[self.cfg.run_name] = token
-                self._feature_worker.submit_snapshot(
-                    owner=self.cfg.run_name, version=self.step, token=token, snapshot=ref,
-                    ckpt_path=(self._ckpts[-1] if self._ckpts else None)
-                )
-            except Exception:
-                pass
 
             self._event({"type": "paused", "step": self.step})
             return {"status": "paused", "step": self.step, "ckpt": path}
@@ -209,16 +188,6 @@ class CommandsMixin:
         @self._router.on("resume")
         def _resume(_payload):
             self._paused = False
-
-            # Training window: no background features; make sure worker is gone.
-            try:
-                if getattr(self, "_feature_worker", None):
-                    self._feature_worker.stop()
-                    self._feature_worker.join(timeout=2.0)
-                    self._feature_worker = None
-            except Exception:
-                pass
-            self._clear_feature_queue()
 
             self._event({"type": "resumed", "step": self.step})
             return {"status": "resumed", "step": self.step}
@@ -332,13 +301,6 @@ class CommandsMixin:
             if not self._paused:
                 self._event({"type":"log","level":"warn","text":"Fork requires paused session."})
                 return {"new_run": None, "subset_indices": []}
-            # Ensure background worker is fully stopped
-            try:
-                if getattr(self, "_feature_worker", None):
-                    self._feature_worker.stop()
-                    self._feature_worker.join(timeout=2.0)
-            except Exception:
-                pass
             pd = dict(payload or {})
             mode = str(pd.get("mode", "manual")).lower()
             allow = bool(pd.get("allow_when_paused", (mode == "manual")))
@@ -404,6 +366,8 @@ class CommandsMixin:
                 cf = getattr(self.train_loader, 'collate_fn', None)
                 note = "train subset" if subset else "train split"
             else:
+                if self.val_loader is None:
+                    raise RuntimeError("val_loader is not configured; cannot generate validation reports.")
                 ds = self.val_loader.dataset
                 bs = getattr(self.val_loader, 'batch_size', 256)
                 cf = getattr(self.val_loader, 'collate_fn', None)
@@ -656,26 +620,15 @@ class CommandsMixin:
         # ----------------------------- spill/export helpers ---------------------
         @self._router.on("spill_all")
         def _spill_all(payload):
-            if not hasattr(self, "_snapshots"):
-                raise RuntimeError("snapshots manager not available on this session")
-
             d = str(payload.get("dir") or "").strip()
-            latest_only = bool(payload.get("latest_only", True))
-
             if not d:
                 d = getattr(self.cfg, "save_dir", None) or os.getcwd()
-
             os.makedirs(d, exist_ok=True)
-            recs = self._snapshots.spill_all(d, latest_only=latest_only)
-            return recs
+            return []
 
         @self._router.on("prepare_export")
         def _prepare_export(payload):
-            if not hasattr(self, "_snapshots"):
-                raise RuntimeError("snapshots manager not available on this session")
-
             d = str(payload.get("dir") or "").strip()
-            latest_only = bool(payload.get("latest_only", True))
             if not d:
                 d = getattr(self.cfg, "save_dir", None) or os.getcwd()
             os.makedirs(d, exist_ok=True)
@@ -686,19 +639,9 @@ class CommandsMixin:
             except Exception:
                 ckpt_path = None
 
-            try:
-                token, _ = self._snapshots.push_from_model(
-                    owner=self.cfg.run_name, version=self.step, model=self.model
-                )
-                self._expected_token_by_owner[self.cfg.run_name] = token
-            except Exception:
-                pass
-
-            recs = self._snapshots.spill_all(d, latest_only=latest_only)
-
             return {
                 "ckpt": {"path": ckpt_path, "run": self.cfg.run_name, "step": int(self.step)},
-                "snapshots": recs,
+                "snapshots": [],
             }
 
         # ============================= v2 HEALTH COMMANDS =======================
@@ -850,6 +793,8 @@ class CommandsMixin:
 
             self.model.eval()
             dev = self.device
+            if self.val_loader is None:
+                raise RuntimeError("val_loader is not configured; cannot run activations_health.")
             it = iter(self.val_loader)
             steps = 0
             try:
@@ -1115,6 +1060,8 @@ class CommandsMixin:
             bwd_times: List[float] = []
             n_samples = 0
 
+            if self.val_loader is None:
+                raise RuntimeError("val_loader is not configured; cannot run throughput_health.")
             it = iter(self.val_loader)
             steps = 0
             sync = torch.cuda.synchronize if torch.cuda.is_available() else (lambda: None)

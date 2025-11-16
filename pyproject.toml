@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "onthefly_ai"
-version = "0.0.5"
+version = "0.1.0"
 description = "Human-in-the-Loop ML Training Orchestrator."
 readme = "README.md"
 requires-python = ">=3.9"

@@ -244,8 +244,9 @@
     canvas { display: block; width: 100%; max-width: 100%; }
     .chartTitle { margin: 6px 2px 2px; font-weight: 700; font-size: 14px; letter-spacing: .2px; position: relative; z-index: 2; }
     /* Let the container define the height */
-    .chartWrap[data-chart="loss"]    { height: 340px; }
-    .chartWrap[data-chart="valloss"] { height: 340px; }
+    .chartWrap[data-chart="loss"]     { height: 340px; }
+    .chartWrap[data-chart="accuracy"] { height: 340px; }
+    .chartWrap[data-chart="valloss"]  { height: 340px; }
 
     /* Your histogram sits in the reportRow’s chartWrap */
     .reportRow .chartWrap { height: 260px; }
@@ -288,7 +289,32 @@
 
 
     /* === NEW: Metrics dropdown and dynamic stack === */
-    .chartsToolbar { display: flex; justify-content: flex-end; align-items: center; margin: 2px 0 6px; }
+    .chartsToolbar { display: flex; justify-content: space-between; align-items: center; margin: 2px 0 6px; gap: 8px; flex-wrap: wrap; }
+    .axisToggle {
+      display: inline-flex;
+      gap: 4px;
+      padding: 2px;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--panel-bg);
+    }
+    .axisToggle button {
+      border: none;
+      background: transparent;
+      color: var(--muted);
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 12px;
+      line-height: 1;
+      cursor: pointer;
+      transition: background-color .15s var(--ease), color .15s var(--ease);
+    }
+    .axisToggle button.active,
+    .axisToggle button[aria-pressed="true"] {
+      background: var(--btn-bg);
+      color: var(--btn-fg);
+      box-shadow: var(--btn-shadow-hover);
+    }
     #metricsSelect { min-width: 170px; }
     .chartsStack { display: flex; flex-direction: column; gap: 12px; }
     .chartsStack .chartWrap { flex: 0 0 auto; height: 280px; }
@@ -645,6 +671,10 @@
                   <option value="mem_vram">Memory</option>
                   <option value="gpu_util">GPU Util</option>
                 </select>
+                <div class="axisToggle" role="group" aria-label="Axis mode">
+                  <button id="axisModeStep" class="axisToggleBtn" type="button" data-axis-mode="step" aria-pressed="true">Steps</button>
+                  <button id="axisModeEpoch" class="axisToggleBtn" type="button" data-axis-mode="epoch" aria-pressed="false">Epochs</button>
+                </div>
               </div>
 
               <!-- Loss chart (always visible) -->
@@ -662,8 +692,23 @@
                 <canvas id="lossChart"></canvas>
               </div>
 
-              <!-- Validation chart -->
-              <div class="chartWrap" data-chart="valloss">
+              <!-- Accuracy chart (default secondary metric) -->
+              <div class="chartWrap" data-chart="accuracy">
+                <button class="chartCloseBtn" data-close-chart="accuracy" title="Close" aria-label="Close accuracy chart">✕</button>
+                <div class="chartTitle">Accuracy</div>
+                <button id="exportAccuracyBtn" class="exportBtn" title="Export PNG" aria-label="Export accuracy chart">
+                  <svg class="exportIcon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M12 3v10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M8 9l4 4 4-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M4 21h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M6 21v-2M18 21v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <canvas id="accuracyChart"></canvas>
+              </div>
+
+              <!-- Validation chart (hidden until toggled) -->
+              <div class="chartWrap" data-chart="valloss" style="display:none">
                 <button class="chartCloseBtn" data-close-chart="valloss" title="Close" aria-label="Close validation loss chart">✕</button>
                 <div class="chartTitle">Validation Loss</div>
                 <button id="exportValLossBtn" class="exportBtn" title="Export PNG" aria-label="Export Val chart">
@@ -808,12 +853,13 @@
         runSel:'runSel', btnOpenDag:'btnOpenDag', btnRefreshRuns:'btnRefreshRuns', btnResume:'btnResume', btnPause:'btnPause',
         btnPrevModel:'btnPrevModel', btnNextModel:'btnNextModel', btnGenerateReport:'btnGenerateReport', btnSelectRegion:'btnSelectRegion', modelLabel:'modelLabel',
         btnDistHealth:'btnDistHealth', btnActivationsHealth:'btnActivationsHealth', btnNumericsHealth:'btnNumericsHealth', btnDeterminismHealth:'btnDeterminismHealth', btnThroughputHealth:'btnThroughputHealth',
-        lossChart:'lossChart', valLossChart:'valLossChart', lossDistChart:'lossDistChart',
+        lossChart:'lossChart', valLossChart:'valLossChart', accuracyChart:'accuracyChart', lossDistChart:'lossDistChart',
         reportMeta:'reportMeta', reportNote:'reportNote',
         log:'log',
         dagOverlay:'dagOverlay', dagSvg:'dagSvg', dagStrategy:'dagStrategy', dagMergeBtn:'dagMergeBtn', dagClose:'dagClose',
-        exportLossBtn:'exportLossBtn', exportValLossBtn:'exportValLossBtn', exportLossDistBtn:'exportLossDistBtn',
-        metricsSelect:'metricsSelect', metricsStack:'metricsStack'
+        exportLossBtn:'exportLossBtn', exportValLossBtn:'exportValLossBtn', exportAccuracyBtn:'exportAccuracyBtn', exportLossDistBtn:'exportLossDistBtn',
+        metricsSelect:'metricsSelect', metricsStack:'metricsStack',
+        axisModeStep:'axisModeStep', axisModeEpoch:'axisModeEpoch'
       },
       cssVars: ['--bg','--fg','--muted','--panel-bg','--panel-elev','--border','--btn-bg','--btn-fg','--btn-shadow','--btn-shadow-hover','--chart-text','--chart-grid'],
       widgets: ['w-top','w-autofork','w-runs','w-charts','w-report','w-log']

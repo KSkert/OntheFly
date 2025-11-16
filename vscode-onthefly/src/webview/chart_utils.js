@@ -10,7 +10,7 @@
   let defaultCanvasesSized = false;
   function prepareCanvasSizes() {
     if (defaultCanvasesSized) return;
-    ['lossChart','valLossChart','lossDistChart'].forEach(id => {
+    ['lossChart','accuracyChart','valLossChart','lossDistChart'].forEach(id => {
       const c = byId(id);
       if (!c) return;
       c.style.width = '100%';

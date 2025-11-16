@@ -125,6 +125,11 @@ const dagStrategy= byId('dagStrategy');
 //exports
 const btnExportSubset = byId('btnExportSubset');
 const exportSubsetFmt = byId('exportSubsetFmt');
+const axisModeStepBtn = byId('axisModeStep');
+const axisModeEpochBtn = byId('axisModeEpoch');
+
+// axis helpers
+const RUN_EPOCH = new Map();
 
 /* ====================================================================
  * 3) Run State & Navigation
@@ -410,6 +415,35 @@ const STREAM_METRICS = [
 
 window.ChartStream?.trackMetrics?.(['loss', 'val_loss', ...STREAM_METRICS]);
 
+const AXIS_MODE_KEY = 'fs.axisMode.v1';
+const axisModeButtons = [axisModeStepBtn, axisModeEpochBtn].filter(Boolean);
+
+function setAxisMode(mode, persist = true) {
+  const normalized = mode === 'epoch' ? 'epoch' : 'step';
+  window.ChartStream?.setAxisMode?.(normalized);
+  axisModeButtons.forEach(btn => {
+    if (!btn) return;
+    const isActive = (btn.dataset.axisMode === normalized);
+    btn.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    btn.classList.toggle('active', isActive);
+  });
+  if (persist) {
+    try { localStorage.setItem(AXIS_MODE_KEY, normalized); } catch {}
+  }
+}
+
+const storedAxisMode = (() => {
+  try { return localStorage.getItem(AXIS_MODE_KEY); }
+  catch { return null; }
+})();
+setAxisMode(storedAxisMode === 'epoch' ? 'epoch' : 'step', false);
+axisModeButtons.forEach(btn => {
+  on(btn, 'click', () => {
+    const target = btn?.dataset.axisMode === 'epoch' ? 'epoch' : 'step';
+    setAxisMode(target);
+  });
+});
+
 const MetricHistory = (() => {
   const MAX_POINTS = 4096;
   let runKey = '';
@@ -540,6 +574,12 @@ function clearCharts() {
     label: 'VAL'
   });
 
+  const accuracyChart = ChartCreation.get('accuracy') || ChartCreation.createLineChart({
+    name: 'accuracy',
+    canvasId: ids.accuracyChart,
+    label: 'Accuracy'
+  });
+
   const hist = ChartCreation.get('loss_dist') || ChartCreation.createHistogramChart({
     name: 'loss_dist',
     canvasId: ids.lossDistChart
@@ -551,11 +591,12 @@ function clearCharts() {
     hist.update('none');
   }
 
-  ChartStream.attachCharts({ lossChart, valLossChart: valChart });
+  ChartStream.attachCharts({ lossChart, valLossChart: valChart, accuracyChart });
 
   // Back-compat globals for any older code still reading these
   window.lossChart = lossChart;
   window.val_lossChart = valChart;
+  window.accuracyChart = accuracyChart;
   window.lossDistChart = hist;
 }
 
@@ -952,7 +993,9 @@ window.addEventListener('message', (e) => {
       for (const r of rows) {
         const step = Number(r.step);
         if (!Number.isFinite(step)) continue;
+        const epoch = Number(r?.epoch);
         const rowObj = { step };
+        if (Number.isFinite(epoch)) rowObj.epoch = epoch;
         for (const metric of tracked) {
           const val = nf(r?.[metric]);
           rowObj[metric] = Number.isFinite(val) ? val : NaN;
@@ -977,21 +1020,45 @@ window.addEventListener('message', (e) => {
       // If we have neither (fresh start), accept any message and set it as live
       if (!liveRun && !pageRun) {
         storeSetLiveRun(msgRunId);
-        // Optimistically: if NAV_LIST isn't populated yet, this will self-correct
-        // when 'runs' arrives and calls gotoPageByIndex
+      }
+
+      // ---- Epoch handling: only act when a real epoch comes in ----
+      let msgEpoch = null;
+
+      // Only treat it as an epoch update if the field exists and is finite
+      if (Object.prototype.hasOwnProperty.call(m, 'epoch') &&
+          m.epoch !== null && m.epoch !== undefined) {
+        const n = Number(m.epoch);
+        if (Number.isFinite(n)) {
+          msgEpoch = n;
+
+          // This is still useful for other UI pieces (e.g. “Epoch: X” somewhere)
+          if (msgRunId) {
+            RUN_EPOCH.set(msgRunId, n);
+          }
+        }
       }
 
       MetricHistory.pushLive(msgRunId, m);
+
       const tracked = ['loss', 'val_loss', ...STREAM_METRICS];
       const metricPayload = {};
       for (const metric of tracked) {
         const val = nf(m?.[metric]);
         metricPayload[metric] = Number.isFinite(val) ? val : NaN;
       }
-      window.ChartStream?.pendPush?.(m.step, metricPayload);
+
+      // 🔴 IMPORTANT: for the chart, NO fallback.
+      // We only ever tag the exact steps that carried an epoch.
+      const effectiveEpoch = msgEpoch;
+      console.log('effective_epoch=====', effectiveEpoch);
+
+      window.ChartStream?.pendPush?.(m.step, metricPayload, effectiveEpoch);
       window.ChartStream?.scheduleChartsRedraw?.();
       break;
     }
+
+
     case 'paused': {
       const rk = keyOf(m.run_id || currentPageRunId());
       LAST_PAUSED_STEP.set(rk, Number(m.step) || 0);
@@ -1022,9 +1089,13 @@ window.addEventListener('message', (e) => {
       const cr = currentPageRunId();
       if (cr) notifyModelNavSelected(cr);
       break;
-    case 'log':
+    case 'log': {
+      const epochVal = Number(m?.epoch);
+      const rk = keyOf(m.run_id || currentPageRunId());
+      if (rk && Number.isFinite(epochVal)) RUN_EPOCH.set(rk, epochVal);
       log(m.text);
       break;
+    }
     case 'error':
       log(`[stderr] ${m.text}`);
       break;

@@ -2,14 +2,12 @@ from __future__ import annotations
 import os, json
 from typing import Optional
 from ..ckpt_utils import _parse_step
-from ..snapshots import SnapshotManager
 
 class CheckpointMixin:
     """
-    Manages ring-checkpoints, latest-ckpt queries, and snapshot publication.
+    Manages ring-checkpoints and latest-ckpt queries.
     """
     _ckpts: list
-    _snapshots: SnapshotManager
 
 
     def _save_ring_checkpoint(self, *, force: bool = False) -> Optional[str]:
@@ -50,27 +48,6 @@ class CheckpointMixin:
                     _os.remove(p)
                 except Exception:
                     pass
-
-        # publish snapshot for worker on cadence, only while paused (unchanged)
-        try:
-            every = int(self._feature_sampling_cfg.get("psl_every", 0) or 0)
-        except Exception:
-            every = 0
-        if self._paused and every and (self.step % every) == 0:
-            token, ref = self._snapshots.push_from_model(
-                owner=self.cfg.run_name, version=self.step, model=self.model
-            )
-            self._expected_token_by_owner[self.cfg.run_name] = token
-            try:
-                self._feature_worker.submit_snapshot(
-                    owner=self.cfg.run_name,
-                    version=self.step,
-                    token=token,
-                    snapshot=ref,
-                    ckpt_path=path,
-                )
-            except Exception:
-                pass
 
         return path
 

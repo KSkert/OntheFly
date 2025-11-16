@@ -22,7 +22,7 @@ from ..data_explorer import (
 
 
 class RunManagementMixin:
-    """Provides fork/merge helpers plus feature-worker orchestration for manual workflows."""
+    """Provides fork/merge helpers and feature construction for manual workflows."""
 
     # ---- simple run naming, deriving max values (e.g. max_fork=4 for next run being fork5) from session environemnt
     def _next_run_name(self, kind: str) -> str:
@@ -218,12 +218,6 @@ class RunManagementMixin:
         self.step = 0
 
         # clear volatile state
-        self._pending_feature_feed = None
-        self._pending_feature_owner = None
-        self._pending_feature_step = None
-        self._pending_feature_token = None
-        self._clear_feature_queue()
-        self._expected_token_by_owner.clear()
         self._last_val_loss = None
 
         self._emit_new_run(
@@ -232,45 +226,6 @@ class RunManagementMixin:
             {**(meta or {}), "display_name": display_name, "run_gen": self._run_gen},
         )
         return fs_id
-
-    def _spawn_feature_worker(self):
-        if getattr(self, "_feature_worker", None):
-            try:
-                self._feature_worker.stop()
-                self._feature_worker.join(timeout=0.1)
-            except Exception:
-                pass
-
-        if self._train_root_ds is None:
-            return
-
-        aux_dev = self.device
-        try:
-            if torch.cuda.is_available():
-                aux_dev = "cuda"
-            elif torch.backends.mps.is_available():  # type: ignore[attr-defined]
-                aux_dev = "mps"
-        except Exception:
-            aux_dev = self.device
-
-        gen = self._pause_gen
-        self._feature_worker = self._FeatureWorkerCtor(
-            model_ctor=self._model_factory,
-            loss_fn=self.raw_loss_fn,
-            train_dataset=self._train_root_ds,
-            collate_fn=getattr(self.train_loader, "collate_fn", None),
-            batch_size=getattr(self.train_loader, "batch_size", 256),
-            aux_device=aux_dev,
-            sampling_cfg=dict(self._feature_sampling_cfg),
-            embedding_hook=self._embedding_hook_fn,
-            on_feature_pack=lambda pack, gen=gen: (
-                None
-                if (self._paused or gen != self._pause_gen or self._feature_queue.full())
-                else self._feature_queue.put_nowait({**pack, "gen": gen})
-            ),
-            halt_fn=self._halt_evt.is_set,
-        )
-        self._feature_worker.start()
 
     # -------------------- Fork execution (feature-aware) --------------------
     def _do_fork(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -412,29 +367,6 @@ class RunManagementMixin:
             sub = Subset(self._train_root_ds, list(sel_indices))
             self.train_loader = DataLoader(sub, batch_size=bs, shuffle=shuffle, drop_last=drop_last, collate_fn=cf)
             self._active_subset_indices = list(sel_indices)
-
-        # We're still paused; start a fresh worker and emit a one-shot snapshot for the new run.
-        try:
-            self._clear_feature_queue()
-            if getattr(self, "_feature_worker", None):
-                self._feature_worker.stop()
-                self._feature_worker.join(timeout=2.0)
-            self._spawn_feature_worker()
-            token, ref = self._snapshots.push_from_model(
-                owner=self.cfg.run_name,
-                version=self.step,
-                model=self.model,
-            )
-            self._expected_token_by_owner[self.cfg.run_name] = token
-            self._feature_worker.submit_snapshot(
-                owner=self.cfg.run_name,
-                version=self.step,
-                token=token,
-                snapshot=ref,
-                ckpt_path=None,
-            )
-        except Exception:
-            pass
 
         return {"new_run": child_id, "subset_indices": sel_indices}
 

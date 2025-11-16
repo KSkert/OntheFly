@@ -3,7 +3,6 @@ from typing import Optional, Callable, Any, Dict, List
 import time, threading
 import torch
 from torch.utils.data import DataLoader
-from queue import Queue
 from functools import partial
 
 
@@ -13,8 +12,6 @@ from .device_utils import _noop_ctx
 from .utils import _seed_worker
 from .scale import _SafeScaler
 from .ids import _short_hash
-from .snapshots import SnapshotManager
-from .feature_worker import FeatureWorker
 from .control import ControlBus, CommandRouter
 from .mixins.events_mixin import EventsMixin
 from .mixins.checkpoint_mixin import CheckpointMixin
@@ -38,8 +35,8 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
         optimizer: torch.optim.Optimizer,
         loss_fn: Callable,
         train_loader: DataLoader,
-        val_loader: DataLoader,
-        test_loader: DataLoader,
+        val_loader: Optional[DataLoader],
+        test_loader: Optional[DataLoader],
         device: Optional[str] = None,
         scheduler: Optional[Any] = None,
         amp: bool = True,
@@ -51,6 +48,7 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
         data_order_policy: str = "user",    # "user" | "epoch_reseed" | "fixed_order"
         deterministic_pauses: bool = True,
         enforce_sampler_state: bool = True, # keep True; just means "wrap if policy != user"
+        val_every_n_epochs: Optional[int] = 1,
     ):
         self.cfg = SessionConfig(project, run_name, device, amp, grad_clip_norm, save_dir)
         self.model = model
@@ -59,13 +57,13 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.test_loader = test_loader
+        self._val_every_n_epochs = self._normalize_val_schedule(val_every_n_epochs)
         self._model_factory = _build_model_factory(self.model, model_factory)
         self._embedding_hook_fn = embedding_hook
 
         self.__init__identity_and_device(project, run_name)
         self.__init__loss_and_scaler(loss_fn)
         self.__init__runtime_state()
-        self.__init__feature_system()
         self.__init__control_plane()
         self.__init__train_context()
         self.__init__determinism(
@@ -89,7 +87,17 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
             i += 1; candidate = f"{base}#{i}"
         return candidate
     
-        # --- rebuild a DataLoader with a specific sampler (no other behavior changes) ---
+    @staticmethod
+    def _normalize_val_schedule(freq: Optional[int]) -> int:
+        if freq is None:
+            return 0
+        try:
+            value = int(freq)
+        except Exception:
+            return 0
+        return max(0, value)
+
+    # --- rebuild a DataLoader with a specific sampler (no other behavior changes) ---
     def _rebuild_loader_with_sampler(self, loader: DataLoader, sampler):
         if not isinstance(loader, DataLoader):
             return loader
@@ -152,21 +160,10 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
         self._event_seq = 0
         self._run_gen = 0
         self._ckpts: List[str] = []
-        self._expected_token_by_owner: Dict[str, str] = {}
         self._last_val_loss: Optional[float] = None
         self._halt_evt = threading.Event()
         self._pause_gen = 0
         self._pause_ckpt_path: Optional[str] = None
-
-    def __init__feature_system(self) -> None:
-        self._snapshots = SnapshotManager(keep_per_owner=3, default_spill_dir=self.cfg.save_dir)
-        self._snapshots.attach_session(self)
-        self._feature_queue = Queue(maxsize=4)
-        self._FeatureWorkerCtor = FeatureWorker
-        self._pending_feature_feed = None
-        self._pending_feature_owner = None
-        self._pending_feature_step = None
-        self._pending_feature_token = None
         self._feature_sampling_cfg: Dict[str, Any] = dict(
             psl_every=0,
             psl_budget=4000,
@@ -203,8 +200,6 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
         self._data_order_policy = (data_order_policy or "user").lower()
         self._enforce_sampler_state = bool(enforce_sampler_state)
         self._deterministic_pauses = bool(deterministic_pauses)
-
-        self._spawn_feature_worker()
 
         torch.manual_seed(seed)
         if torch.cuda.is_available():
@@ -385,12 +380,14 @@ class OnTheFlySession(EventsMixin, CheckpointMixin, FeatureMixin, RunManagementM
 def quickstart(*, project, run_name, model, optimizer, loss_fn,
                train_loader, val_loader, test_loader=None,
                max_epochs=None, max_steps=None, do_test_after=False,
+               val_every_n_epochs: Optional[int] = None,
                model_factory=None, **kwargs):
     s = OnTheFlySession(
         project=project, run_name=run_name,
         model=model, optimizer=optimizer, loss_fn=loss_fn,
         train_loader=train_loader, val_loader=val_loader, test_loader=test_loader,
         model_factory=model_factory,
+        val_every_n_epochs=val_every_n_epochs,
         **kwargs
     )
     s.serve(max_steps=max_steps, max_epochs=max_epochs, do_test_after=do_test_after)

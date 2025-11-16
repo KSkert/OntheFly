@@ -263,7 +263,6 @@
   if (!select || !stack) return;
 
   const METRIC_META = {
-    accuracy: { label: 'Accuracy' },
     lr: { label: 'Learning Rate', help: 'Optimizer learning rate (avg across parameter groups).' },
     grad_norm: { label: 'Gradient Norm', help: 'Global L2 norm of gradients after each backward pass.' },
     weight_norm: { label: 'Weight Norm', help: 'Global L2 norm of model weights.' },
@@ -385,7 +384,7 @@
     }
 
     // special cases: show built-in loss charts if hidden
-    if (metric === 'loss' || metric === 'valloss') {
+    if (metric === 'loss' || metric === 'valloss' || metric === 'accuracy') {
       const wrap = document.querySelector('.chartWrap[data-chart="'+metric+'"]');
       if (wrap) {
         wrap.style.display = '';

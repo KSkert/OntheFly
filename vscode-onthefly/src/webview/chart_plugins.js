@@ -87,7 +87,7 @@
       id: 'autoForkMarkers',
       afterDatasetsDraw(chart) {
         const canvasId = chart?.canvas?.id;
-        if (!canvasId || (canvasId !== 'lossChart' && canvasId !== 'valLossChart')) return;
+        if (!canvasId || (canvasId !== 'lossChart' && canvasId !== 'valLossChart' && canvasId !== 'accuracyChart')) return;
 
         const marks = typeof getMarkers === 'function' ? getMarkers() : null;
         if (!marks || !marks.length) return;
