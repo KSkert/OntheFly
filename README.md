@@ -16,7 +16,7 @@ OnTheFly turns that into an interactive loop:
 
 All of this runs **fully offline** in a local VS Code extension — no accounts, no tokens, no external services.
 
-![On-the-Fly overview](./docs/images/dashboard.png)
+![On-the-Fly overview](./docs/images/dashboard_img.png)
 
 > [!IMPORTANT]
 > **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues.
