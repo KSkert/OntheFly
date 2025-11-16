@@ -80,7 +80,6 @@
     const last = list.length ? list[list.length - 1] : null;
     if (!Number.isFinite(last) || epoch > last) {
       list.push(epoch);
-      console.log('[ChartStream] appendEpochIfNew → pushed', epoch, 'len=', list.length);
     }
   }
 

@@ -1067,10 +1067,8 @@ window.addEventListener('message', (e) => {
         metricPayload[metric] = Number.isFinite(val) ? val : NaN;
       }
 
-      // 🔴 IMPORTANT: for the chart, NO fallback.
       // We only ever tag the exact steps that carried an epoch.
       const effectiveEpoch = msgEpoch;
-      console.log('effective_epoch=====', effectiveEpoch);
 
       window.ChartStream?.pendPush?.(m.step, metricPayload, effectiveEpoch);
       window.ChartStream?.scheduleChartsRedraw?.();
