@@ -7,6 +7,8 @@ you start a long run, wait, and only discover failure cases or weak slices *afte
 
 Many engineers quit training after seeing validation error increase and train error bottom, but double descent is a common theme in some setups. Being able to test, save a model, and continue training seamlessly is another big time saver.
 
+![On-the-Fly overview](./docs/images/dashboard_img.png)
+
 OnTheFly turns that into an interactive loop:
 
 - watch per-sample loss and slices **while you train**
@@ -16,7 +18,8 @@ OnTheFly turns that into an interactive loop:
 
 All of this runs **fully offline** in a local VS Code extension — no accounts, no tokens, no external services.
 
-![On-the-Fly overview](./docs/images/dashboard_img.png)
+This shifts training from a fixed, single-pass run into an incremental process that can be revisited and extended as new data arrives. Any previous session can be resumed with its full optimizer state, enabling controlled continuation rather than full retrains. Real-time visibility into failure regions turns continuous improvement into a measurable, iterative workflow rather than a periodic batch job.
+
 
 > [!IMPORTANT]
 > **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues.
