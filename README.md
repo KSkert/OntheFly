@@ -22,8 +22,7 @@ This shifts training from a fixed, single-pass run into an incremental process t
 
 
 > [!IMPORTANT]
-> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues.
-
+> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. Right now, we're building up the backend to expose a run_with_trainer() method that will wrap a trainer (and any necessary fields the trainer doesn't expose in its API) like Lightning, Accelerate, Keras, etc.. No matter the trainer your'e using, OnTheFly's goal is the samto: to enable mid-training controls and guidance natively in VS Code. We also assume you would have run your script like this: 'python -u path/to/script.py'
 ---
 
 ## When should you use OnTheFly?
@@ -31,6 +30,7 @@ This shifts training from a fixed, single-pass run into an incremental process t
 OnTheFly is aimed at people who:
 
 - train **PyTorch models** (classification, regression, etc.) and want more visibility than TensorBoard/print logs
+- are not currently using another trainer, such as Lightning, in your setup. 
 - care about **bad slices / drift / outliers** and don't want to wait until the run is over to investigate
 - prefer a **local, offline** workflow inside VS Code rather than wiring up cloud dashboards
 
