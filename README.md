@@ -2,7 +2,7 @@
 
 **OnTheFly** lets you steer PyTorch training runs live from VS Code — pause, inspect, fork, merge, and export without ever leaving your IDE or sending data to the cloud.
 
-When you start a long run, you can now see and do more during training with OnTheFly. Detect subtle faults in your model before training goes haywire. 
+With OnTheFly, now you can make incremental, interactive progress on model development. When you start a long run, you can now see and do more during training with OnTheFly. Detect subtle faults in your model before training goes haywire. 
 
 Being able to test, save a model, and continue training seamlessly is another big time saver. Many engineers quit training after seeing validation error increase when the model fits the training data, but double descent is a common theme in some setups.
 

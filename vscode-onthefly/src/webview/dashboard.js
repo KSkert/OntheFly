@@ -134,6 +134,8 @@ const RUN_EPOCH = new Map();
 let IS_RUNNING = false;
 let IS_PAUSED  = false;
 let TEST_PENDING = false;
+let TRAINER_CONNECTED = false;
+
 gateHealthButtons();
 function curRunKey() { return keyOf(currentPageRunId()); }
 
@@ -178,6 +180,81 @@ function gateHealthButtons() {
     }
   });
 }
+
+function setBtnState(btn, enabled) {
+  if (!btn) return;
+  btn.disabled = !enabled;
+  if (enabled) {
+    btn.removeAttribute('aria-disabled');
+    btn.style.pointerEvents = '';
+    btn.style.opacity = '';
+  } else {
+    btn.setAttribute('aria-disabled', 'true');
+    btn.style.pointerEvents = 'none';
+    btn.style.opacity = '0.5';
+  }
+}
+
+function setOfflineOverlay(el, offline) {
+  if (!el) return;
+  if (offline) {
+    el.dataset.offline = 'true';
+    el.style.pointerEvents = 'none';
+    el.style.opacity = '0.5';
+    el.setAttribute('aria-disabled', 'true');
+  } else {
+    delete el.dataset.offline;
+    el.style.pointerEvents = '';
+    el.style.opacity = '';
+    el.removeAttribute('aria-disabled');
+  }
+}
+
+
+// When Trainer is disconnected, only allow "Export session".
+function enforceConnectionGate(connected) {
+  TRAINER_CONNECTED = !!connected;
+
+  const offlineGated = [
+    btnPause,
+    btnResume,
+    btnTestNow,
+    btnLoad,
+    btnExportSubset,
+    btnReport,
+    btnDistHealth,
+    btnActivationsHealth,
+    btnNumericsHealth,
+    btnDeterminismHealth,
+    btnThroughputHealth,
+    btnPrevModel,
+    btnNextModel,
+    btnOpenDag,
+    dagMergeBtn,
+    btnExportLoss,
+    btnExportLossDist,
+    btnExportValLoss,
+    runSel,
+  ];
+
+  if (!TRAINER_CONNECTED) {
+    // Put an offline overlay on everything interactive except Export Session.
+    offlineGated.forEach(el => setOfflineOverlay(el, true));
+
+    // Make sure Export Session stays usable when offline
+    if (btnAutoSave) setOfflineOverlay(btnAutoSave, false);
+    return;
+  }
+
+  // Trainer reconnected → remove offline overlay.
+  offlineGated.forEach(el => setOfflineOverlay(el, false));
+  if (btnAutoSave) setOfflineOverlay(btnAutoSave, false);
+
+  // DO NOT touch .disabled here; setRunning()/gateHealthButtons()
+  // have already run earlier in the status handler and own actual gating.
+}
+
+
 
 function updateTestNowGate() {
   if (!btnTestNow) return;
@@ -976,6 +1053,10 @@ window.addEventListener('message', (e) => {
       if (!connected)      statusStr = 'disconnected';
       else if (running)    statusStr = 'running';
       else if (paused)     statusStr = 'paused';
+
+      // enforce "only Export Session when disconnected" rule
+      enforceConnectionGate(connected);
+
       break;
     }
 
