@@ -219,8 +219,6 @@ function enforceConnectionGate(connected) {
     btnPause,
     btnResume,
     btnTestNow,
-    btnLoad,
-    btnExportSubset,
     btnReport,
     btnDistHealth,
     btnActivationsHealth,
