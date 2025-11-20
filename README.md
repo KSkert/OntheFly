@@ -7,7 +7,7 @@ you start a long run, wait, and only discover failure cases or weak slices *afte
 
 Many engineers quit training after seeing validation error increase and train error bottom, but double descent is a common theme in some setups. Being able to test, save a model, and continue training seamlessly is another big time saver.
 
-![On-the-Fly overview](./docs/images/dashboard_img.png)
+![On-the-Fly overview](./docs/images/onthefly_dashboard.png)
 
 OnTheFly turns that into an interactive loop:
 
