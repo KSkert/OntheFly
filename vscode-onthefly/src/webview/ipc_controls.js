@@ -23,18 +23,12 @@
       setRunningFor = () => {},
       setPausedFor = () => {},
       notify = () => {},
-      getPyPathValue = () => {
-        const el = byId(ids.pyPath);
-        return (el && el.value) || 'python';
-      },
       onOpenDag = () => {},
       onCloseDag = () => {},
       onRequestDagMerge = () => {},
     } = options;
 
     const els = {
-      btnChoose: byId(ids.btnChoose),
-      btnSetPy: byId(ids.btnSetPy),
       btnPause: byId(ids.btnPause),
       btnResume: byId(ids.btnResume),
       btnTestNow: byId(ids.btnTestNow),
@@ -54,15 +48,12 @@
 
     const reportState = createReportTracker();
 
-    // Environment + interpreter controls
-    on(els.btnChoose, 'click', () => send('chooseScript'));
-    on(els.btnSetPy, 'click', () => send('setPython', { path: getPyPathValue() }));
-
     // Training lifecycle controls
     on(els.btnPause, 'click', () => send('pause', { runId: currentPageRunId() }));
     on(els.btnTestNow, 'click', () => send('testNow', { runId: currentPageRunId() }));
     on(els.btnResume, 'click', () => {
       const rk = keyOf(currentPageRunId());
+      console.log('runkey, ', rk);
       setRunningFor(rk, true);
       setPausedFor(rk, false);
       send('resume', { runId: rk });
@@ -82,6 +73,7 @@
       send('generateReport', { runId, reqId });
       notify('Generating fresh report…');
     });
+    
 
     // Health monitors
     [

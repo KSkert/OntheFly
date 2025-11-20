@@ -78,13 +78,7 @@ function notify(text, level = 'info') {
  * ==================================================================== */
 
 /* -------- DOM refs -------- */
-//setup env
-const btnChoose = byId('btnChoose');
-const btnSetPy = byId('btnSetPy');
-const pyPath = byId('pyPath');
-const scriptName = byId('scriptName');
-
-//common basics
+const trainerStatus = byId('trainerStatus');
 const btnPause = byId('btnPause');
 const btnResume = byId('btnResume');
 const btnTestNow = byId('btnTestNow');
@@ -345,10 +339,14 @@ function fillRunSel(rows) {
 function setRunning(running) {
   IS_RUNNING = !!running;
 
+  if (trainerStatus) {
+    trainerStatus.textContent = running ? 'Trainer connected' : 'Waiting for Trainer…';
+    trainerStatus.classList.toggle('status-running', running);
+    trainerStatus.classList.toggle('status-idle', !running);
+  }
+
   if (btnPause)  btnPause.disabled  = !running;
   if (btnResume) btnResume.disabled = running;
-  if (btnChoose) btnChoose.disabled = running;
-  if (btnSetPy)  btnSetPy.disabled  = running;
   if (btnAutoSave) btnAutoSave.disabled = running;
   if (btnLoad) btnLoad.disabled = running;
   if (btnRefreshRuns) btnRefreshRuns.disabled = running;
@@ -805,7 +803,6 @@ const ControlsBridge = window.IPCControls?.init({
   setRunningFor,
   setPausedFor,
   notify,
-  getPyPathValue: () => (pyPath && pyPath.value) || 'python',
   onOpenDag: openDag,
   onCloseDag: closeDag,
   onRequestDagMerge: requestDagMerge,
@@ -867,9 +864,6 @@ window.addEventListener('message', (e) => {
       }
       break;
     }
-    case 'scriptChosen':
-      if (scriptName) scriptName.textContent = `Chosen Python Script: ${m.file}`;
-      break;
     case 'logs': {
       const rows = Array.isArray(m.rows) ? m.rows : [];
       //  only clear if the run changed

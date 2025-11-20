@@ -70,7 +70,6 @@
   },
   "dependencies": {
     "better-sqlite3": "^12.2.0",
-    "chart.js": "^3.9.1",
-    "semver": "^7.7.2"
+    "chart.js": "^3.9.1"
   }
 }

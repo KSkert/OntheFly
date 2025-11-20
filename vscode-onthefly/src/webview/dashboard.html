@@ -74,6 +74,21 @@
 
     /* ---------- Unified components ---------- */
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .workspaceStatus { margin-bottom: 12px; color: var(--muted); }
+    .workspaceStatus p { margin: 0 0 8px; }
+    .statusLine { display: flex; align-items: center; gap: 8px; }
+    .statusLabel { font-weight: 600; color: var(--fg); }
+    .statusBadge {
+      padding: 4px 10px;
+      border-radius: 999px;
+      font-size: 13px;
+      font-weight: 600;
+      background: var(--btn-bg-secondary);
+      color: var(--btn-fg-secondary);
+    }
+    .statusBadge.status-running { background: #16a34a; color: #fff; }
+    .statusBadge.status-idle { background: #9ca3af; color: #1f2937; }
+    .workspaceActions { justify-content: flex-start; }
 
     button {
       padding: 8px 10px; border: 1px solid transparent; border-radius: 6px;
@@ -583,14 +598,13 @@
         <div class="panel">
           <div class="widgetHeader"><div class="widgetTitle">Workspace</div></div>
 
-          <div class="row" style="margin-bottom:8px">
-            <button id="btnChoose">Choose Python Script</button>
-            <span id="scriptName" style="font-weight:700"></span>
+          <div class="workspaceStatus">
+            <p class="statusLine">
+              <span id="trainerStatus" class="statusBadge status-idle">Waiting for Trainer…</span>
+            </p>
           </div>
-          <div class="row">
-            <label>Python:</label>
-            <input id="pyPath" placeholder="python" />
-            <button id="btnSetPy">Save Python Path</button>
+
+          <div class="row workspaceActions">
             <button id="btnAutoSave">Export Session…</button>
             <button id="btnLoad">Load Session…</button>
           </div>
@@ -817,7 +831,7 @@
     window.OnTheFlyExports = {
       version: '1.0.0-rework',
       ids: {
-        btnChoose:'btnChoose', scriptName:'scriptName', pyPath:'pyPath', btnSetPy:'btnSetPy', btnAutoSave:'btnAutoSave', btnLoad:'btnLoad', btnTestNow: 'btnTestNow',
+        trainerStatus:'trainerStatus', btnAutoSave:'btnAutoSave', btnLoad:'btnLoad', btnTestNow:'btnTestNow',
         autoForkPanel:'autoForkPanel',
         afEnabled:'afEnabled',
         afLossPlateauPatience:'afLossPlateauPatience',

@@ -204,12 +204,27 @@
     };
   }
 
-  // In epoch mode, the x-axis is category indexed. For each tick, we:
-  // - find its label index
-  // - read stepEpochs[index]
-  // - if it's a number, show it; otherwise show nothing
-  function makeEpochTickFormatter(stepEpochs) {
+  // Return a Set of indices where the epoch "starts" (first index per epoch)
+  function findEpochBoundaries(stepEpochs) {
+    const boundaries = new Set();
+    if (!Array.isArray(stepEpochs) || !stepEpochs.length) return boundaries;
+
+    let last = null;
+    for (let i = 0; i < stepEpochs.length; i++) {
+      const ep = stepEpochs[i];
+      if (!Number.isFinite(ep)) continue;
+      if (!Number.isFinite(last) || ep !== last) {
+        boundaries.add(i);
+        last = ep;
+      }
+    }
+    return boundaries;
+  }
+
+  function makeEpochTickFormatter(stepEpochs, epochBoundaries) {
     if (!Array.isArray(stepEpochs) || !stepEpochs.length) return null;
+
+    const boundarySet = epochBoundaries || findEpochBoundaries(stepEpochs);
 
     return function epochTickFormatter(value, index, ticks) {
       const tick = ticks && ticks[index];
@@ -220,15 +235,17 @@
           ? tick.value
           : index;
 
-      const epoch = stepEpochs[labelIndex];
+      // Only label epoch *boundaries*
+      if (!boundarySet.has(labelIndex)) return '';
 
-      // No epoch recorded for this step? Show nothing.
+      const epoch = stepEpochs[labelIndex];
       if (!Number.isFinite(epoch)) return '';
 
-      // Backend only emits epoch when it changes, so we can just render it.
       return String(epoch);
     };
   }
+
+
 
   function applyMetric(metric, labelCache) {
     const chart = charts[metric];
@@ -267,23 +284,24 @@
 
       if (axisMode === AXIS_EPOCH) {
         const stepEpochs = cache.stepEpochs.slice();
-        const formatter = makeEpochTickFormatter(stepEpochs);
+
+        const epochBoundaries = findEpochBoundaries(stepEpochs);
+        const formatter = makeEpochTickFormatter(stepEpochs, epochBoundaries);
         ticks.callback = formatter || undefined;
 
-        // Epoch mode: show every step tick so we can decide which ones to draw
+        // Epoch mode: we still show all ticks, but only draw gridlines
+        // at the FIRST step of each epoch.
         ticks.autoSkip = false;
         if (Object.prototype.hasOwnProperty.call(ticks, 'maxTicksLimit')) {
           delete ticks.maxTicksLimit;
         }
 
         grid.display = true;
-        // Use a scriptable color that only draws at epoch boundaries
         const visibleColor = grid.__origColor || '#e5e7eb';
         grid.color = function (ctx) {
           const tick = ctx.tick;
           const idx = (tick && typeof tick.value === 'number') ? tick.value : ctx.index;
-          const ep = stepEpochs[idx];
-          return Number.isFinite(ep) ? visibleColor : 'transparent';
+          return epochBoundaries.has(idx) ? visibleColor : 'transparent';
         };
 
       } else {

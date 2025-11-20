@@ -82,20 +82,70 @@
     return currentPageRunId();
   }
 
+  // function rebuildNavListFromRows(rows) {
+  //   const items = (rows || [])
+  //     .map(r => {
+  //       const id = runIdOf(r);
+  //       const created = r?.created_at ?? r?.createdAt ?? r?.created ?? r?.timestamp ?? r?.ts ?? 0;
+  //       return id ? { id: String(id), created_at: Number(created) || 0 } : null;
+  //     })
+  //     .filter(Boolean);
+
+  //   items.sort((a, b) => b.created_at - a.created_at);
+  //   NAV_LIST = items.map(x => x.id);
+  //   PAGE_INDEX = clampPage(PAGE_INDEX);
+  //   return NAV_LIST;
+  // }
+
   function rebuildNavListFromRows(rows) {
-    const items = (rows || [])
-      .map(r => {
-        const id = runIdOf(r);
-        const created = r?.created_at ?? r?.createdAt ?? r?.created ?? r?.timestamp ?? r?.ts ?? 0;
-        return id ? { id: String(id), created_at: Number(created) || 0 } : null;
-      })
-      .filter(Boolean);
+    const isArr = Array.isArray(rows);
+    const arr = isArr ? rows : [];
+    const withIds = arr.filter(r => !!runIdOf(r));
+
+    if (!isArr) {
+      console.log('[RunState] rebuildNavListFromRows: rows is not an array:', typeof rows, rows);
+    } else if (arr.length === 0) {
+      console.log('[RunState] rebuildNavListFromRows: rows[] is EMPTY – keeping NAV_LIST as-is (len=%d)', NAV_LIST.length);
+      PAGE_INDEX = clampPage(PAGE_INDEX);
+      return NAV_LIST;
+    } else if (withIds.length === 0) {
+      console.log('[RunState] rebuildNavListFromRows: no run ids in rows. first row keys:',
+        typeof arr[0] === 'object' ? Object.keys(arr[0]) : typeof arr[0], 'example row:', arr[0]);
+    } else {
+      console.log('[RunState] rebuildNavListFromRows: %d/%d rows have ids. example id=%o row=%o',
+        withIds.length, arr.length, runIdOf(withIds[0]), withIds[0]);
+    }
+
+    // Build items from whatever we got (only rows that yield an id)
+    let items = withIds.map(r => {
+      const id = runIdOf(r);
+      const created = r?.created_at ?? r?.createdAt ?? r?.created ?? r?.timestamp ?? r?.ts ?? 0;
+      return { id: String(id), created_at: Number(created) || 0 };
+    });
+
+    // Fallback: if no items but we have an index, rebuild from runsIndex
+    if (items.length === 0 && runsIndex.size) {
+      console.log('[RunState] rebuildNavListFromRows: falling back to runsIndex (size=%d)', runsIndex.size);
+      items = Array.from(runsIndex.entries()).map(([id, r]) => ({
+        id: String(id),
+        created_at: Number(r?.created_at ?? r?.createdAt ?? r?.created ?? r?.timestamp ?? r?.ts ?? 0) || 0
+      }));
+    }
+
+    if (items.length === 0) {
+      // Still nothing: keep current NAV_LIST, don’t blow away selection
+      console.log('[RunState] rebuildNavListFromRows: no items after processing – keeping NAV_LIST (len=%d)', NAV_LIST.length);
+      PAGE_INDEX = clampPage(PAGE_INDEX);
+      return NAV_LIST;
+    }
 
     items.sort((a, b) => b.created_at - a.created_at);
     NAV_LIST = items.map(x => x.id);
     PAGE_INDEX = clampPage(PAGE_INDEX);
     return NAV_LIST;
   }
+
+
 
   function updateModelNav() {
     const idx = clampPage(PAGE_INDEX);

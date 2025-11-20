@@ -1,9 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import * as net from 'net';
 import * as crypto from 'crypto';
 import * as semver from 'semver';
+
 import {
   initStorage,
   insertRun,
@@ -32,119 +33,6 @@ import {
 import * as os from 'os';
 
 
-// ───────────────────────── Ensure onthefly-ai in a private venv ─────────────────────────
-
-async function ensureOntheflyInPrivateVenv(
-  context: vscode.ExtensionContext,
-  opts?: { askBeforeInstall?: boolean }
-): Promise<{ python: string; sitePackages: string }> {
-  const ask = opts?.askBeforeInstall ?? true;
-
-  const storageDir = context.globalStorageUri.fsPath;
-  fs.mkdirSync(storageDir, { recursive: true });
-  const venvDir = path.join(storageDir, 'pyenv');
-
-  // Pick a launcher to create the venv if it doesn't exist yet. Prefers newer versions.
-  function pickLauncher(): string {
-    const candidates = ['python3.12', 'python3.11', 'python3.10', 'python3.9', 'python3', 'python'];
-    const cp = require('child_process');
-    for (const c of candidates) {
-      try { cp.execFileSync(c, ['--version'], { stdio: 'ignore' }); return c; } catch {}
-    }
-    return 'python';
-  }
-
-
-  const pyBin = process.platform === 'win32'
-    ? path.join(venvDir, 'Scripts', 'python.exe')
-    : path.join(venvDir, 'bin', 'python');
-
-  
-  if (!fs.existsSync(pyBin)) {
-    // Create venv
-    require('child_process').execFileSync(pickLauncher(), ['-m', 'venv', venvDir], { stdio: 'inherit' });
-  }
-
-  try {
-    const v = require('child_process')
-      .execFileSync(pyBin, ['-c', 'import sys; print(".".join(map(str, sys.version_info[:3])))'], { encoding: 'utf8' })
-      .trim();
-    const [maj, min] = v
-      .split('.')
-      .map((s: string) => parseInt(s, 10)) as [number, number];
-    if (maj < 3 || (maj === 3 && min < 9)) {
-      throw new Error(`Python ${v} found in extension venv; need >= 3.9. Please install Python 3.9+ and try again.`);
-    }
-  } catch (e:any) {
-    vscode.window.showErrorMessage(e?.message || String(e));
-    throw e; // abort ensureOntheflyInPrivateVenv
-  }
-
-  // Try to upgrade pip quietly
-  try {
-    require('child_process').execFileSync(pyBin, ['-m', 'pip', 'install', '--upgrade', 'pip'], { stdio: 'ignore' });
-  } catch {}
-
-  // Read configured minimum version
-  const cfg = vscode.workspace.getConfiguration('onthefly');
-  const minVersion = String(cfg.get('minPythonPackage') || '0.0.3.post1');
-
-  // Discover installed version (if any)
-  let installed: string | null = null;
-  try {
-    installed = require('child_process')
-      .execFileSync(
-        pyBin,
-        ['-c',
-        'import sys\n' +
-        'try:\n' +
-        '  import importlib.metadata as m\n' +
-        'except Exception:\n' +
-        '  import importlib_metadata as m\n' +
-        'print(m.version("onthefly-ai"))'
-        ],
-        { encoding: 'utf8' }
-      ).trim();
-  } catch {
-    // not installed
-  }
-
-  const needInstall = !installed;
-  // for future upgrades, 0.0.3.post2 will not be possible because 
-  // semver.coerce('0.0.3.post2') === '0.0.3', so post1 vs post 2 won't be distinguished
-  const needUpgrade = installed ? semver.lt(semver.coerce(installed)!, semver.coerce(minVersion)!) : false; 
-
-  if (needInstall) {
-    if (!ask || (await vscode.window.showInformationMessage(
-      `Install onthefly-ai ${minVersion}+ for this extension?`, 'Install', 'Cancel')) === 'Install') {
-      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Installing onthefly-ai' }, async () => {
-        require('child_process').execFileSync(pyBin, ['-m', 'pip', 'install', `onthefly-ai>=${minVersion}`], { stdio: 'inherit' });
-      });
-    } else {
-      throw new Error('onthefly-ai is required but was not installed.');
-    }
-  } else if (needUpgrade) {
-    if (!ask || (await vscode.window.showInformationMessage(
-      `Upgrade onthefly-ai to at least ${minVersion}? (found ${installed})`, 'Upgrade', 'Skip')) === 'Upgrade') {
-      await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Upgrading onthefly-ai' }, async () => {
-        require('child_process').execFileSync(pyBin, ['-m', 'pip', 'install', `onthefly-ai>=${minVersion}`, '-U'], { stdio: 'inherit' });
-      });
-    }
-  }
-
-  // Return interpreter + site-packages (if I ever need to import/inspect)
-  let site: string = '';
-  try {
-    site = require('child_process').execFileSync(
-      pyBin, ['-c', 'import sysconfig, json; print(sysconfig.get_paths()["purelib"])'],
-      { encoding: 'utf8' }
-    ).trim();
-  } catch {}
-
-  return { python: pyBin, sitePackages: site };
-}
-
-
 // Stash latest config (webview can set it before or after starting the run)
 /* ============================ RPC state ============================ */
 
@@ -155,13 +43,18 @@ type Pending = {
 };
 const pending = new Map<string, Pending>();
 
+const DASHBOARD_PORT = Number(process.env.ONTHEFLY_DASHBOARD_PORT || '47621');
+let trainerSocket: net.Socket | null = null;
+let trainerBuffer = '';
+let trainerServer: net.Server | null = null;
+
 function sendReq(cmd: string, payload: any = {}, timeoutMs = 15000): Promise<any> {
-  if (!proc || !proc.stdin.writable) {
-    return Promise.reject(new Error('No python process running. Press play first.'));
+  if (!trainerSocket || trainerSocket.destroyed) {
+    return Promise.reject(new Error('No Trainer connected. Run your script with OnTheFlyTrainer first.'));
   }
   const id = crypto.randomUUID();
   const line = JSON.stringify({ id, cmd, payload }) + '\n';
-  proc.stdin.write(line, 'utf8');
+  trainerSocket.write(line, 'utf8');
 
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -175,25 +68,123 @@ function sendReq(cmd: string, payload: any = {}, timeoutMs = 15000): Promise<any
 function isRunImportedForThisSession(runId: string): boolean {
   // Imported == NOT created/touched by the current live Python session.
   // If there is no live session yet, treat EVERYTHING as imported.
-  if (!proc || !proc.stdin || !proc.stdin.writable) return true;
+  if (!trainerSocket || trainerSocket.destroyed) return true;
   return !nativeRunsThisSession.has(runId);
+}
+
+/* ============================ Trainer socket ============================ */
+
+function ensureTrainerServer() {
+  if (trainerServer) return;
+  trainerServer = net.createServer((socket) => {
+    if (trainerSocket && !trainerSocket.destroyed) {
+      socket.destroy();
+      vscode.window.showWarningMessage('Another Trainer tried to connect while one is active. Close the existing run first.');
+      return;
+    }
+    trainerSocket = socket;
+    trainerBuffer = '';
+    socket.setEncoding('utf8');
+    socket.on('data', (chunk: string) => handleTrainerData(chunk));
+    socket.on('error', (err: any) => {
+      post({ type: 'error', text: `[trainer] ${err?.message || err}` });
+    });
+    socket.on('close', () => {
+      post({ type: 'log', text: 'Trainer disconnected.' });
+      disconnectTrainer(false);
+    });
+    postStatus(true);
+    post({ type: 'log', text: 'Trainer connected. Streaming events live.' });
+
+    // if user had a run selected, seed + attach immediately
+    const target =
+      (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
+      (currentRunId && currentRunId.trim()) ||
+      null;
+    if (target) {
+      seedTrainerForRun(target).catch(e => {
+        console.warn('[onthefly] attach_context failed on connect:', e);
+      });
+    }
+  });
+
+  trainerServer.on('error', (err: any) => {
+    const msg = `OnTheFly dashboard could not listen on port ${DASHBOARD_PORT}: ${err?.message || err}`;
+    vscode.window.showErrorMessage(msg);
+    post({ type: 'error', text: msg });
+  });
+
+  trainerServer.listen(DASHBOARD_PORT, '127.0.0.1', () => {
+    post({
+      type: 'log',
+      text: `Waiting for Trainer connections on localhost:${DASHBOARD_PORT}. Run your script to attach.`,
+    });
+  });
+}
+
+function trainerActive(): boolean {
+  return Boolean(trainerSocket && !trainerSocket.destroyed);
+}
+
+function requireTrainerConnection(): boolean {
+  if (!trainerActive()) {
+    vscode.window.showErrorMessage('No Trainer connection. Run your training script with an OnTheFlyTrainer to stream data.');
+    postStatus(false);
+    return false;
+  }
+  return true;
+}
+
+function shutdownTrainerServer() {
+  if (trainerServer) {
+    try { trainerServer.close(); } catch {}
+    trainerServer = null;
+  }
+  disconnectTrainer(false);
+}
+
+function disconnectTrainer(notify = true) {
+  if (trainerSocket) {
+    try { trainerSocket.destroy(); } catch {}
+    trainerSocket = null;
+  }
+  trainerBuffer = '';
+  runActivityState = null;
+  pauseInFlight = false;
+  resumeInFlight = false;
+
+  for (const [, p] of pending) {
+    clearTimeout(p.timer);
+    p.reject(new Error('Trainer disconnected'));
+  }
+  pending.clear();
+
+  if (notify) {
+    post({ type: 'log', text: 'Trainer connection closed.' });
+  }
+  postStatus(false);
+}
+
+function handleTrainerData(chunk: string) {
+  trainerBuffer += chunk;
+  let idx: number;
+  while ((idx = trainerBuffer.indexOf('\n')) >= 0) {
+    const line = trainerBuffer.slice(0, idx);
+    trainerBuffer = trainerBuffer.slice(idx + 1);
+    if (line.trim()) {
+      handleLine(line);
+    }
+  }
 }
 
 
 /* ============================ Persisted keys ============================ */
-
-const enum Keys {
-  PythonPath = 'onthefly.pythonPath',
-  ScriptPath = 'onthefly.scriptPath',
-}
 
 /* ============================ Webview -> Ext messages ============================ */
 
 type CompareView = 'train' | 'test' | 'info'; //not using but hypothetically, ifwe wanted to display test/train logs separate, or do cross-session compare
 
 type WebMsg =
-  | { command: 'chooseScript' }
-  | { command: 'setPython'; path: string }
   | { command: 'pause' }
   | { command: 'resume' }
   | { command: 'testNow'; runId?: string }
@@ -246,19 +237,15 @@ const optimisticEcho: Record<string, string> = {
 /* ============================ Globals ============================ */
 
 let panel: vscode.WebviewPanel | null = null;
-let proc: ChildProcessWithoutNullStreams | null = null;
-const CHILD_KILL_TIMEOUT_MS = 1500;
 let currentRunId: string | null = null;
 const seenRuns = new Set<string>();
 let currentSessionId: string | null = null;   // sticky session id for log stamping
 const nativeRunsThisSession = new Set<string>(); // runs touched by THIS python session
 let modelNavSelectedRunId: string | null = null;
-let pythonConfigConfirmedThisSession = false;
-let scriptConfigConfirmedThisSession = false;
-let needDiskCleanOnNextBackend = true;
 let runActivityState: RunActivityState = null;
 let pauseInFlight = false;
 let resumeInFlight = false;
+let needDiskCleanOnNextTrainer = true;
 
 
 /* ============================ Types ============================ */
@@ -277,6 +264,7 @@ type StepRow = {
   throughput?: number | null;
   mem_vram?: number | null;
   gpu_util?: number | null;
+  ts?: number | null;
 };
 
 /* ============================ Activate / Deactivate ============================ */
@@ -296,14 +284,14 @@ export async function activate(context: vscode.ExtensionContext) {
 }
 
 export function deactivate() {
-  try { killProc(); } catch {}
+  shutdownTrainerServer();
   try { closeStorage(); } catch {}
 }
 
 async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromUser?: boolean }) {
 
   // 0) If a backend is alive, ask it to clean its save_dir now (best effort).
-  if (proc && proc.stdin?.writable) {
+  if (trainerSocket && !trainerSocket.destroyed) {
     try {
       const res = await sendReq('clean_disk', { scope: 'all' }, 60000);
       post({
@@ -321,17 +309,8 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
       });
     }
   }
-  // 1) Kill Python
-  try { killProc(); } catch {}
-
-  // 2) Reject outstanding RPCs
-  try {
-    for (const [, p] of pending) {
-      clearTimeout(p.timer);
-      p.reject(new Error('Reset requested'));
-    }
-    pending.clear();
-  } catch {}
+  // 1) Disconnect trainer (does not stop user's script; it will reconnect if still running)
+  disconnectTrainer(true);
 
   // 3) Clear in-memory extension state
   currentRunId = null;
@@ -339,8 +318,6 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
   currentSessionId = null;
   nativeRunsThisSession.clear();
   modelNavSelectedRunId = null;
-  pythonConfigConfirmedThisSession = false;
-  scriptConfigConfirmedThisSession = false;
   runActivityState = null;
   pauseInFlight = false;
   resumeInFlight = false;
@@ -348,7 +325,8 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
   // 4) Reset storage
   try { closeStorage(); } catch {}
   await initStorage(context);
-  needDiskCleanOnNextBackend = true;
+  
+  needDiskCleanOnNextTrainer = true;
 
   // 5) Tell webview, if it exists
   post({ type: 'resetOk' });
@@ -373,11 +351,6 @@ function getLocalResourceRoots(context: vscode.ExtensionContext): vscode.Uri[] {
 }
 
 async function openPanel(context: vscode.ExtensionContext) {
-
-  try { await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: true }); } catch (e) {
-    console.warn('[onthefly] backend not ready yet:', e);
-  }
-
   if (panel) { panel.reveal(vscode.ViewColumn.Active); return; }
 
   const newPanel = vscode.window.createWebviewPanel(
@@ -394,13 +367,11 @@ async function openPanel(context: vscode.ExtensionContext) {
 }
 
 async function revivePanel(context: vscode.ExtensionContext, webviewPanel: vscode.WebviewPanel) {
-  try { await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: false }); } catch (e) {
-    console.warn('[onthefly] backend not ready yet (revive):', e);
-  }
   configurePanel(context, webviewPanel);
 }
 
 function configurePanel(context: vscode.ExtensionContext, webviewPanel: vscode.WebviewPanel) {
+  ensureTrainerServer();
   panel = webviewPanel;
   panel.webview.options = {
     enableScripts: true,
@@ -415,22 +386,17 @@ function configurePanel(context: vscode.ExtensionContext, webviewPanel: vscode.W
     if (webviewVisible) {
       // when user returns, cheaply re-sync UI (no heavy streams)
       try { post({ type: 'runs', rows: listRuns() }); } catch {}
-      postStatus(!!proc);
+      postStatus(Boolean(trainerSocket && !trainerSocket.destroyed));
     }
   });
 
   panel.onDidDispose(async () => {
     // Close = explicit end of session → kill everything & reset
-    try { killProc(); } catch {}
-    try {
-      for (const [,p] of pending) { clearTimeout(p.timer); p.reject(new Error('Panel disposed')); }
-      pending.clear();
-    } catch {}
+    shutdownTrainerServer();
 
     // fresh ephemeral storage
     try { closeStorage(); } catch {}
     await initStorage(context);
-    needDiskCleanOnNextBackend = true;
     if (panel === webviewPanel) panel = null;
   });
 
@@ -631,57 +597,6 @@ function postCurrentSession() {
   if (currentSessionId) post({ type: 'fs.session.current', id: currentSessionId });
 }
 
-function havePython(context: vscode.ExtensionContext): boolean {
-  const p = (context.workspaceState.get(Keys.PythonPath) as string | undefined)?.trim();
-  if (!p) return false;
-  try { require('child_process').execFileSync(p, ['--version'], { stdio: 'ignore' }); return true; }
-  catch { return false; }
-}
-
-function haveScript(context: vscode.ExtensionContext): boolean {
-  const s = (context.workspaceState.get(Keys.ScriptPath) as string | undefined)?.trim();
-  return !!s && fs.existsSync(s);
-}
-
-async function ensureTrainingConfigConfirmed(context: vscode.ExtensionContext): Promise<boolean> {
-  const ws = context.workspaceState;
-  const python = (ws.get(Keys.PythonPath) as string | undefined)?.trim();
-  const script = (ws.get(Keys.ScriptPath) as string | undefined)?.trim();
-
-  if (!python) {
-    vscode.window.showErrorMessage('Set a Python interpreter first.');
-    return false;
-  }
-  if (!script) {
-    vscode.window.showErrorMessage('Choose a Python training script first.');
-    return false;
-  }
-
-  // If both were set explicitly in this session, we’re done.
-  if (pythonConfigConfirmedThisSession && scriptConfigConfirmedThisSession) {
-    return true;
-  }
-
-  // Otherwise, they came from a previous session → ask once.
-  const choice = await vscode.window.showWarningMessage(
-    `Use saved Python interpreter:\n${python}\nand training script:\n${script}?`,
-    {
-      modal: true,
-      detail: 'These were remembered from a previous session. If they look wrong, cancel and set them again from the dashboard.',
-    },
-    'Use',
-  );
-
-  if (choice === 'Use') {
-    pythonConfigConfirmedThisSession = true;
-    scriptConfigConfirmedThisSession = true;
-    return true;
-  }
-
-  return false;
-}
-
-
 const TEST_NOW_TIMEOUT_MS = 10 * 60 * 1000;
 const LAST_EXPORT_DIR_KEY = 'onthefly.lastExportDir';
 
@@ -780,51 +695,12 @@ function computeForkMergeCounters(): { forkMax: number; mergeMax: number } {
 }
 
 
-async function switchToRun(context: vscode.ExtensionContext, runId: string) {
-  try { await requestBackendPause(30_000); } catch {}
-  try { await sendReq('save_ckpt', {}, 120_000); } catch {}
-  try { await new Promise(res => setTimeout(res, 200)); } catch {}
-
-  try { killProc(); } catch {}
-
-  modelNavSelectedRunId = runId;
-  currentRunId = runId;
-  await startRun(context);
-}
-
-
-
 /* ============================ Message handling ============================ */
 
 async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
   const ws = context.workspaceState;
 
   switch (m.command) {
-    case 'chooseScript': {
-      const picked = await vscode.window.showOpenDialog({
-        canSelectMany: false,
-        filters: { Python: ['py'] },
-        title: 'Choose a Python training script',
-      });
-      
-      if (!picked || !picked[0]) return;
-      const p = picked[0].fsPath;
-      await ws.update(Keys.ScriptPath, p);
-      scriptConfigConfirmedThisSession = true;  // <-- NEW
-      vscode.window.showInformationMessage(`Training script selected: ${path.basename(p)}`);
-      post({ type: 'scriptChosen', file: p });
-      break;
-    }
-
-    case 'setPython': {
-      const chosen = m.path || 'python';
-      await ws.update(Keys.PythonPath, chosen);
-      pythonConfigConfirmedThisSession = true;  // <-- NEW
-      post({ type: 'log', text: `Python set to: ${chosen}` });
-      vscode.window.showInformationMessage(`Python interpreter set to: ${chosen}`);
-      break;
-    }
-
     case 'exportChart': {
       try {
         const defName = ensurePng(m.filename || 'chart.png');
@@ -971,7 +847,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       pauseInFlight = true;
       try {
         // 1) Ask the backend to pause (finish current step, flush state, etc.)
-        await requestBackendPause(30_000); // backend will do its own checkpointing if it wants
+        const pauseInfo = await requestBackendPause(30_000); // backend will do its own checkpointing if it wants
 
         // 2) Figure out which run this pause applies to
         const runId =
@@ -983,6 +859,16 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           post({ type: 'warn', text: '[pause] No runId available to attach checkpoint to.' });
           break;
         }
+
+        const pausedStep = Number(pauseInfo?.step);
+
+        const payload: any = { cmd: 'pause', run_id: runId };
+        if (Number.isFinite(pausedStep)) payload.step = pausedStep;
+
+        post({
+          type: 'paused',
+          payload,
+        });
 
         // 3) Explicitly save a checkpoint and persist it in storage
         try {
@@ -1023,45 +909,21 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       }
       break;
     }
-
-
     case 'resume': {
-      if (resumeInFlight) {
-        post({ type: 'log', text: '[resume] Request already in progress.' });
-        break;
-      }
+      if (resumeInFlight) { post({ type: 'log', text: '[resume] Request already in progress.' }); break; }
 
       const requested = String((m as any).runId || '').trim();
       if (requested) modelNavSelectedRunId = requested;
+      const target = requested || modelNavSelectedRunId || currentRunId || null;
 
-      const target =
-        requested ||
-        currentRunId ||
-        modelNavSelectedRunId ||
-        null;
-
-      const sameRunTarget = Boolean(proc && target && currentRunId && target === currentRunId);
-      if (sameRunTarget && runActivityState === 'running') {
-        post({ type: 'log', text: '[resume] Training is already running.' });
-        break;
-      }
+      if (!target) { post({ type: 'error', text: '[resume] No run selected.' }); break; }
 
       resumeInFlight = true;
       try {
-        if (proc && target && currentRunId && target !== currentRunId) {
-          post({ type: 'log', text: `Switching active run: ${currentRunId} → ${target}` });
-          await switchToRun(context, target);
-          post({ type: 'resumed', payload: { run_id: target } });
-          runActivityState = 'running';
-        } else if (proc) {
-          sendCtl({ cmd: 'resume' });
-          runActivityState = 'running';
-        } else {
-          post({ type: 'log', text: 'Starting training (via Resume)...' });
-          await startRun(context);
-          runActivityState = 'running';
-        }
-      } catch (e: any) {
+        await ensureTrainerOnRun(target);   // <<< switch-and-seed
+        sendCtl({ cmd: 'resume' });
+        runActivityState = 'running';
+      } catch (e:any) {
         postErr(e);
         postStatus(false);
       } finally {
@@ -1098,7 +960,8 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           break;
         }
 
-        const target = await ensureProcOnRun(context, candidate);
+        const target = candidate;
+        await ensureTrainerOnRun(target);
         try { await requestBackendPause(30_000); }
         catch (pauseErr) {
           console.warn('[onthefly] pause before test failed', pauseErr);
@@ -1163,14 +1026,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
         if (!target) { postErr('No run selected to fork from.'); break; }
 
-        // Ensure backend on target…
-        if (!proc || !proc.stdin?.writable) {
-          await ensureMaintenanceBackend(context, target);
-          modelNavSelectedRunId = target;
-          post({ type: 'modelNav.select', runId: target });
-        } else if (currentRunId && currentRunId !== target) {
-          await switchToRun(context, target);
-        }
+        await ensureTrainerOnRun(target);
 
         try { await requestBackendPause(30_000); } catch {}
         let ckptPath: string | undefined = latestCheckpointForRun(target)?.path;
@@ -1207,36 +1063,24 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       try {
         const payload = m.payload;
 
-        // Ensure we have a backend anchored to something sensible for merge ops.
-        if (!proc || !proc.stdin?.writable) {
-          const anchor = pickAnchorRunForAction(payload);
-          if (!anchor) {
-            postErr('No runs available to anchor the merge. Select a run or include parents[].');
-            break;
-          }
-          await ensureMaintenanceBackend(context, anchor);
-          modelNavSelectedRunId = anchor;
-          post({ type: 'modelNav.select', runId: anchor });
-        } else {
-          try { await requestBackendPause(30_000); } catch {}
+        const anchor = pickAnchorRunForAction(payload);
+        if (!anchor) {
+          postErr('No runs available to anchor the merge. Select a run or include parents[].');
+          break;
         }
+        await ensureTrainerOnRun(anchor);
+        try { await requestBackendPause(30_000); } catch {}
 
         // Preflight: all parents must have checkpoints.
         const parents: string[] = Array.isArray(payload.parents) ? payload.parents : [];
-        for (const p of parents) {
-          if (!latestCheckpointForRun(p)) {
-            await ensureProcOnRun(context, p);
-            try { await requestBackendPause(30_000); } catch {}
-            try {
-              const ck = await sendReq('save_ckpt', {}, 120_000);
-              // belt-and-suspenders: persist immediately in case the backend doesn't emit the JSON event
-              if (ck?.path) insertCheckpoint(`${p}:${ck.step}:${Date.now()}`, p, Number(ck.step) || 0, String(ck.path));
-            } catch {}
-          }
-        }
-
-        // now run the existing preflight
         const missing = parents.filter(p => !latestCheckpointForRun(p));
+        if (missing.length) {
+          post({
+            type: 'error',
+            text: `[merge] Missing checkpoints for parent runs: ${missing.join(', ')}. Pause runs in your script to create checkpoints first.`,
+          });
+          break;
+        }
 
         // Perform the merge.
         const data = await sendReq('merge', payload, 120000);
@@ -1275,7 +1119,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'dist_health': {
       try {
         const rid = (m as any).runId as string | undefined;
-        const target = await ensureProcOnRun(context, rid);
+        const target = await requireActiveRun(rid);
+        if (!target) break;
+        await ensureTrainerOnRun(target);
         modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('dist_health', { require_all_ranks: false, sample_weights: 0 }, 'distHealth', 30_000, target);
@@ -1286,7 +1132,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'throughput_health': {
       try {
         const rid = (m as any).runId as string | undefined;
-        const target = await ensureProcOnRun(context, rid);
+        const target = await requireActiveRun(rid);
+        if (!target) break;
+        await ensureTrainerOnRun(target);
         modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('throughput_health', { budget_steps: 2, micro_backward: false }, 'throughputHealth', 45_000, target);
@@ -1297,7 +1145,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'activations_health': {
       try {
         const rid = (m as any).runId as string | undefined;
-        const target = await ensureProcOnRun(context, rid);
+        const target = await requireActiveRun(rid);
+        if (!target) break;
+        await ensureTrainerOnRun(target);
         modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('activations_health', { budget_steps: 2, topk: 12, eps: 1e-3 }, 'activationsHealth', 60_000, target);
@@ -1308,7 +1158,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'numerics_health': {
       try {
         const rid = (m as any).runId as string | undefined;
-        const target = await ensureProcOnRun(context, rid);
+        const target = await requireActiveRun(rid);
+        if (!target) break;
+        await ensureTrainerOnRun(target);
         modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('numerics_health', { sample_layers: 25 }, 'numericsHealth', 30_000, target);
@@ -1319,7 +1171,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'determinism_health': {
       try {
         const rid = (m as any).runId as string | undefined;
-        const target = await ensureProcOnRun(context, rid);
+        const target = await requireActiveRun(rid);
+        if (!target) break;
+        await ensureTrainerOnRun(target);
         modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('determinism_health', {}, 'determinismHealth', 20_000, target);
@@ -1336,24 +1190,19 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           runId = anchor;
         }
         runId = String(runId).trim();
-
-        // If nothing is running yet, spin up a maintenance backend on the target.
-        if (!proc || !proc.stdin?.writable) {
-          await ensureMaintenanceBackend(context, runId);
-          modelNavSelectedRunId = runId;
-          post({ type: 'modelNav.select', runId });
-        } else if (currentRunId && currentRunId !== runId) {
-          // Running but on a different model → switch cleanly.
-          await switchToRun(context, runId);
-        }
-
+        await ensureTrainerOnRun(runId);
+        const target = await requireActiveRun(runId);
+        if (!target) break;
+        runId = target;
+        modelNavSelectedRunId = runId;
+        post({ type: 'modelNav.select', runId });
         await requestBackendPause(30_000);
 
-        const subset = getRunSubset(String(runId));
+        const subset = getRunSubset(String(target));
         const subset_on: 'train' = 'train';
 
         const data = await sendReq('generate_report', {
-          owner_run_id: runId,
+          owner_run_id: target,
           subset_indices: subset.length ? subset : undefined,
           subset_on,
           reqId: (m as any).reqId
@@ -1448,10 +1297,10 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
         let spillRoot: string | null = null;
 
-        if (proc && proc.stdin.writable) {
+        if (trainerActive()) {
           spillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'onthefly-spill-'));
 
-          // 1) try the new multi-owner prepare_export API (forces snapshots/ckpts for *all* runs)
+          // 1) try the multi-owner prepare_export API (forces snapshots/ckpts for all runs)
           let prep: any = null;
           try {
             // latest_only keeps the bundle trim
@@ -1490,32 +1339,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
             console.warn('[export] failed to insert ring checkpoint into DB:', e);
           }
 
-          // 4) paranoia: ensure every owner has at least *one* checkpoint row pre-bundle.
-          //    if any run is missing, scan the save_dir heuristically and backfill.
-          try {
-            const scriptPath = (context.workspaceState.get(Keys.ScriptPath) as string) || '';
-            const saveDirGuess = scriptPath ? path.dirname(scriptPath) : process.cwd();
-            const files = fs.existsSync(saveDirGuess) ? fs.readdirSync(saveDirGuess) : [];
-
-            for (const runId of owners) {
-              const have = latestCheckpointForRun(runId);
-              if (have) continue;
-
-              const patt = new RegExp(`__${runId}__step(\\d+)\\.pt$`);
-              const candidates = files
-                .filter(f => patt.test(f))
-                .map(f => ({ f, step: Number((f.match(patt) || [])[1] || 0) }))
-                .sort((a, b) => a.step - b.step);
-
-              if (candidates.length) {
-                const last = candidates[candidates.length - 1];
-                const abs = path.join(saveDirGuess, last.f);
-                insertCheckpoint(`${runId}:${last.step}:scan`, runId, last.step, abs);
-              }
-            }
-          } catch (e) {
-            console.warn('[export] backfill scan failed (non-fatal):', e);
-          }
         } else {
           // not running → just bundle whatever DB already references
           post({ type: 'log', text: '[export] Python not running; bundling existing DB checkpoints only.' });
@@ -1653,148 +1476,44 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
 /* ============================ Python process (training) ============================ */
 
-async function startRun(context: vscode.ExtensionContext) {
-  if (proc) { vscode.window.showWarningMessage('A run is already active.'); return; }
-  
-  // Ensure onthefly-ai is available in our private venv (required)
-  try {
-    await ensureOntheflyInPrivateVenv(context, { askBeforeInstall: true });
-  } catch (e: any) {
-    vscode.window.showErrorMessage(`Backend not available: ${e?.message || e}`);
-    postStatus(false);
+async function startRun() {
+  ensureTrainerServer();
+  if (trainerSocket && !trainerSocket.destroyed) {
+    postStatus(true);
     return;
   }
 
-  // confirm we’re allowed to use the stored interpreter + script
-  if (!(await ensureTrainingConfigConfirmed(context))) {
-    postStatus(false);
-    return;
-  }
-
-  // Still keep the runtime sanity checks (path exists, python runs).
-  if (!havePython(context)) { vscode.window.showErrorMessage('Set a Python interpreter first.'); postStatus(false); return; }
-  if (!haveScript(context)) { vscode.window.showErrorMessage('Choose a Python training script first.'); postStatus(false); return; }
-
-  const ws = context.workspaceState;
-  const python = (ws.get(Keys.PythonPath) as string | undefined)?.trim();
-  const script = (ws.get(Keys.ScriptPath) as string | undefined)?.trim();
-
-  if (!python) { vscode.window.showErrorMessage('Set a Python interpreter first.'); return; }
-  if (!script) { vscode.window.showErrorMessage('Choose a Python training script first.'); return; }
-  if (!fs.existsSync(script)) {
-    vscode.window.showErrorMessage(`Training script not found: ${script}`);
-    post({ type: 'error', text: `Script not found: ${script}` });
-    return;
-  }
-
-  const { forkMax, mergeMax } = computeForkMergeCounters();
-
-  const args = ['-u', script];
-  post({ type: 'log', text: `Spawning: ${python} ${args.join(' ')}` });
-
-  const resumeRunId =
-    (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
-    (currentRunId && currentRunId.trim()) ||
-    null;
-
-  const imported = resumeRunId ? isRunImportedForThisSession(resumeRunId) : false;
-  const resume   = resumeRunId ? latestCheckpointForRun(resumeRunId) : null;
-
-  if (resumeRunId && !resume) {
-    post({ type: 'warn', text: `[resume] No checkpoint found for run ${resumeRunId}; starting fresh.` });
-  }
-
-  const envBlock = {
-    ...process.env,
-    ...(resumeRunId ? { ONTHEFLY_RESUME_RUN_ID: resumeRunId } : {}),
-    ...(resume && resume.path ? {
-      ONTHEFLY_INIT_CKPT: resume.path,
-      ONTHEFLY_INIT_STEP: String(resume.step ?? 0),
-    } : {}),
-    ONTHEFLY_FORK_COUNTER_INIT: String(forkMax || 0),
-    ONTHEFLY_MERGE_COUNTER_INIT: String(mergeMax || 0),
-  };
-
-  try {
-    proc = spawn(python, args, {
-      cwd: path.dirname(script),
-      env: envBlock,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      //  make it a group leader so we can kill the entire tree on POSIX
-      detached: process.platform !== 'win32',
-    });
-  } catch (e: any) {
-    const msg = `Error starting training: ${e?.message || e}`;
-    vscode.window.showErrorMessage(msg);
-    post({ type: 'error', text: msg });
-    return;
-  }
-
-  proc.on('error', (err: any) => {
-    const msg = `Error starting training: ${String(err?.message || err)}`;
-    vscode.window.showErrorMessage(msg);
-    post({ type: 'error', text: msg });
-    postStatus(false);
-    proc = null;
-  });
-
-  proc.stdout.setEncoding('utf8');
-  proc.stderr.setEncoding('utf8');
-
-  let sawStdout = false;
-  const markRunningOnce = () => {
-    if (!sawStdout) {
-      sawStdout = true;
-      postStatus(true);
-      post({ type: 'log', text: 'Training process started.' });
-      runActivityState = 'running';
-    }
-  };
-
-  let buffer = '';
-
-  proc.stdout.on('data', (chunk: string) => {
-    markRunningOnce();
-    buffer += chunk;
-    let idx: number;
-    while ((idx = buffer.indexOf('\n')) >= 0) {
-      const line = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 1);
-      if (line.trim()) {
-        handleLine(line);
+  await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Waiting for OnTheFly Trainer connection…' },
+    async () => {
+      try {
+        await waitForTrainerConnection(60000);
+        postStatus(true);
+      } catch (e) {
+        throw new Error('No Trainer connected. Run your training script in a terminal and instantiate OnTheFlyTrainer.');
       }
     }
-  });
+  );
+}
 
-  proc.stderr.on('data', (chunk: string) => {
-    const t = String(chunk);
-    post({ type: 'error', text: t });
-    markRunningOnce();
-  });
-
-  proc.on('close', (code) => {
-    if (code === 0) post({ type: 'log', text: `Process exited cleanly.` });
-    else post({ type: 'error', text: `Process exited with code ${code}` });
-
-    post({ type: 'trainingFinished' });
-    postStatus(false);
-    proc = null;
-    runActivityState = null;
-    pauseInFlight = false;
-    resumeInFlight = false;
-
-    for (const [, p] of pending) { clearTimeout(p.timer); p.reject(new Error('python exited')); }
-    pending.clear();
-  });
+async function waitForTrainerConnection(timeoutMs = 0): Promise<void> {
+  const start = Date.now();
+  while (true) {
+    if (trainerSocket && !trainerSocket.destroyed) return;
+    if (timeoutMs && Date.now() - start > timeoutMs) {
+      throw new Error('Timed out waiting for Trainer connection.');
+    }
+    await new Promise((res) => setTimeout(res, 250));
+  }
 }
 
 function sendCtl(cmd: Ctl) {
-  if (!proc || !proc.stdin.writable) {
-    post({ type: 'error', text: 'No active run. Press Play first.' });
+  if (!trainerSocket || trainerSocket.destroyed) {
+    post({ type: 'error', text: 'No Trainer connected. Run your script first.' });
     return;
   }
   try {
-    proc.stdin.write(JSON.stringify(cmd) + '\n');
+    trainerSocket.write(JSON.stringify(cmd) + '\n');
     const t = (cmd as any).cmd;
     if (t === 'resume') runActivityState = 'running';
     if (t && optimisticEcho[t]) post({ type: optimisticEcho[t], payload: cmd });
@@ -1803,9 +1522,10 @@ function sendCtl(cmd: Ctl) {
   }
 }
 
-async function requestBackendPause(timeoutMs = 30_000): Promise<void> {
-  await sendReq('pause', {}, timeoutMs);
+async function requestBackendPause(timeoutMs = 30_000): Promise<any> {
+  const data = await sendReq('pause', {}, timeoutMs);
   runActivityState = 'paused';
+  return data;
 }
 
 async function runHealth(
@@ -1835,25 +1555,6 @@ async function runHealth(
 }
 
 
-async function ensureProcOnRun(context: vscode.ExtensionContext, requestedRunId?: string): Promise<string> {
-  const target = String(requestedRunId || modelNavSelectedRunId || currentRunId || '').trim();
-  if (!target) throw new Error('No run selected. Open Model Nav and pick a run first.');
-
-  // Already on target?
-  if (proc && currentRunId === target) return target;
-
-  // Switch if a different run is active
-  if (proc && currentRunId && currentRunId !== target) {
-    await switchToRun(context, target);
-    return target;
-  }
-
-  // No proc → start on the target (same behavior as Resume/Report)
-  modelNavSelectedRunId = target;
-  await startRun(context);
-  return target;
-}
-
 function pickAnchorRunForAction(hint?: { parents?: string[]; runId?: string } | any): string | null {
   const fromRunId =
     typeof hint?.runId === 'string' && hint.runId.trim() ? String(hint.runId).trim() : null;
@@ -1874,54 +1575,12 @@ function pickAnchorRunForAction(hint?: { parents?: string[]; runId?: string } | 
   return null;
 }
 
-async function ensureMaintenanceBackend(context: vscode.ExtensionContext, anchor: string) {
-  // Start/attach to backend on the chosen run, then pause to avoid races.
-  await ensureProcOnRun(context, anchor);
+async function requireActiveRun(requestedRunId?: string): Promise<string | null> {
+  const target = String(requestedRunId || modelNavSelectedRunId || currentRunId || '').trim();
+  if (!target) return null;
+  await ensureTrainerOnRun(target);
+  return target;
 }
-
-
-function killProc() {
-  const p = proc;                // snapshot + narrow (TS knows p !== null after guard)
-  if (!p) return;
-
-  try {
-    // Detach listeners and destroy streams to break retention chains
-    try { p.stdout?.removeAllListeners?.(); } catch {}
-    try { p.stderr?.removeAllListeners?.(); } catch {}
-    try { p.removeAllListeners?.(); } catch {}
-    try { p.stdin?.destroy?.(); } catch {}
-    try { p.stdout?.destroy?.(); } catch {}
-    try { p.stderr?.destroy?.(); } catch {}
-
-    const pid: number | undefined = typeof p.pid === 'number' ? p.pid : undefined;
-
-    if (process.platform === 'win32') {
-      // Kill entire tree on Windows
-      try { spawn('taskkill', ['/pid', String(p.pid), '/f', '/t']); } catch {}
-    } else {
-      // POSIX: if we spawned with detached:true, child is a process-group leader.
-      // Kill the whole group first, then the process as a fallback.
-      if (pid && pid > 0) {
-        try { process.kill(-pid, 'SIGTERM'); } catch {}   // group kill
-        try { process.kill(pid, 'SIGTERM'); } catch {}    // parent as fallback
-        setTimeout(() => {
-          try { process.kill(-pid, 'SIGKILL'); } catch {}
-          try { process.kill(pid, 'SIGKILL'); } catch {}
-        }, CHILD_KILL_TIMEOUT_MS);
-      } else {
-        // No pid? Fall back to per-process signals
-        try { p.kill('SIGTERM'); } catch {}
-        setTimeout(() => { try { p.kill('SIGKILL'); } catch {}; }, CHILD_KILL_TIMEOUT_MS);
-      }
-    }
-  } finally {
-    proc = null;  // release reference for GC
-    runActivityState = null;
-    pauseInFlight = false;
-    resumeInFlight = false;
-  }
-}
-
 
 function normalizeParents(from: any): string[] {
   const raw = (from && (from.parents ?? from.parent)) ?? [];
@@ -1929,6 +1588,7 @@ function normalizeParents(from: any): string[] {
   if (raw == null || raw === '') return [];
   return [String(raw)];
 }
+
 
 /* ============================ Line handler ============================ */
 
@@ -2061,13 +1721,50 @@ function handleLine(line: string) {
       throughput: num(obj.throughput),
       mem_vram: num(obj.mem_vram),
       gpu_util: num(obj.gpu_util),
+      ts: Number(obj.ts) || Date.now(),
     };
 
-    post({ type: 'trainStep', ...row, ts: Date.now() });
-
-    try { insertMetric(run_id, row); }
-    catch (e) { console.warn('[onthefly] sqlite persist error for step:', e); }
+    const lastVal = (obj.val_loss == null ? 'None' : String(obj.val_loss));
+    post({ type: 'trainStep', ...row });
+    const logLine = `step ${row.step}: train_loss = ${row.loss ?? 'None'}, val_loss = ${lastVal}`;
+    post({ type: 'log', level: 'info', phase: 'train', text: logLine });
+    try {
+      insertMetric(run_id, row);
+    } catch (e) {
+      console.warn('[onthefly] metric persist error:', e);
+    }
     return;
+  }
+
+  if (obj?.type === 'trainStepLite') {
+    const run_id = obj.run_id || currentRunId || 'live';
+    const row: StepRow = {
+      run_id,
+      step: Number(obj.step) || 0,
+      epoch: Number(obj.epoch) || 0,
+      loss: Number(obj.loss),
+      val_loss: Number(obj.val_loss),
+      lr: Number(obj.lr),
+      grad_norm: Number(obj.grad_norm),
+      weight_norm: Number(obj.weight_norm),
+      activation_zero_frac: Number(obj.activation_zero_frac),
+      throughput: Number(obj.throughput),
+      mem_vram: Number(obj.mem_vram),
+      gpu_util: Number(obj.gpu_util),
+      ts: Number(obj.ts) || Date.now(),
+    };
+    post({ type: 'trainStep', ...row });
+    try { insertMetric(run_id, row); } catch {}
+    return;
+  }
+
+  if (obj?.type === 'fork_created') {
+    nativeRunsThisSession.add(String(obj.run_id));
+  }
+
+  if (obj?.type === 'log' && obj.text && /model\s+session_id/i.test(obj.text)) {
+    const m = String(obj.text).match(/session_id\s*=\s*([^\s]+)/i);
+    if (m && m[1]) { currentSessionId = m[1]; postCurrentSession(); }
   }
 
   // ==== canonical run creation ====
@@ -2166,13 +1863,11 @@ function handleLine(line: string) {
           postCurrentSession();
         }
 
-        // Backend has finished booting and announced the session.
-        // Safe to call clean_disk once for this logical backend.
-        if (needDiskCleanOnNextBackend && proc && proc.stdin?.writable) {
-          needDiskCleanOnNextBackend = false;
+        if (needDiskCleanOnNextTrainer && trainerActive()) {
+          needDiskCleanOnNextTrainer = false;
           (async () => {
             try {
-              const res = await sendReq('clean_disk', { scope: 'all' }, 60000);
+              const res = await sendReq('clean_disk', { scope: 'all' }, 60_000);
               post({
                 type: 'log',
                 level: res?.ok ? 'info' : 'warn',
@@ -2189,7 +1884,7 @@ function handleLine(line: string) {
             }
           })();
         }
-
+        
         break;
       }
 
@@ -2212,7 +1907,67 @@ function handleLine(line: string) {
   }
 }
 
+
 //helpers
+
+function latestResumeHints(runId: string | null) {
+  if (!runId) return null;
+  const ck = latestCheckpointForRun(runId);
+  return ck ? { init_ckpt: ck.path, init_step: Number(ck.step) || 0 } : null;
+}
+
+async function seedTrainerForRun(targetRunId: string): Promise<void> {
+  const { forkMax, mergeMax } = computeForkMergeCounters();
+  const hints = latestResumeHints(targetRunId) || {};
+
+  // Use attach_context only when we really need to bind/attach:
+  if (!currentRunId || currentRunId !== targetRunId) {
+    await sendReq('attach_context', {
+      run_id: targetRunId,
+      ...hints,
+      fork_counter_init: forkMax || 0,
+      merge_counter_init: mergeMax || 0,
+    }, 30_000);
+  } else {
+    // Already on this run – just send counter seeds if you care:
+    await sendReq('set_counter_seeds', {
+      fork_counter_init: forkMax || 0,
+      merge_counter_init: mergeMax || 0,
+    }, 30_000);
+  }
+}
+
+
+/** Try to attach the connected Trainer to a specific run, creating resume wiring. */
+async function ensureTrainerOnRun(targetRunId: string): Promise<void> {
+  if (!targetRunId) throw new Error('No target run.');
+  await startRun();                    // wait for socket
+  if (!requireTrainerConnection()) return;
+
+  const alreadyOn = currentRunId && currentRunId === targetRunId;
+
+  // If Trainer is already on this run, do nothing.
+  // No attach_context, no _bind_to_run, no ckpt reload.
+  if (alreadyOn) {
+    return;
+  }
+
+  // We are switching runs -> use switch_run + init hints.
+  const hints = latestResumeHints(targetRunId) || {};
+  const { forkMax, mergeMax } = computeForkMergeCounters();
+
+  await sendReq('switch_run', {
+    run_id: targetRunId,
+    ...hints,
+    fork_counter_init: forkMax || 0,
+    merge_counter_init: mergeMax || 0,
+  }, 30_000);
+
+  currentRunId = targetRunId;
+  modelNavSelectedRunId = targetRunId;
+  post({ type: 'modelNav.select', runId: targetRunId });
+}
+
 
 async function getSelectedRegionIndices(runId: string, minLoss: number, maxLoss: number): Promise<number[]> {
   const data = await sendReq('get_selected_region_indices', {
