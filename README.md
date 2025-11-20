@@ -22,14 +22,14 @@ This shifts training from a fixed, single-pass run into an incremental process t
 
 
 > [!IMPORTANT]
-> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. OnTheFly now mirrors Lightning/Accelerate by exposing an `onthefly.Trainer`. Run your script exactly as you normally would (`python train.py`, a notebook cell, etc.); if the script instantiates a `Trainer`, the VS Code dashboard will attach automatically (it listens on `localhost:47621`) whenever a dashboard tab is open.
+> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. Currently, using another trainer at the same time (such as Lightning AI) is not possible, but OnTheFly's endgoal is to support wrapping around other trainers to support a univeral training dashboard.
 ---
 
 ## When should you use OnTheFly?
 
 OnTheFly is aimed at people who:
 
-- train **PyTorch models** (classification, regression, etc.) and want more visibility than TensorBoard/print logs
+- train **PyTorch models** (classification, regression, etc.) and want more actionability than TensorBoard/print logs
 - are not currently using another trainer, such as Lightning, in your setup. 
 - care about **bad slices / drift / outliers** and don't want to wait until the run is over to investigate
 - prefer a **local, offline** workflow inside VS Code rather than wiring up cloud dashboards
@@ -51,10 +51,13 @@ pip install onthefly-ai
 * OS: Linux, macOS, or Windows
 * Visual Studio Code
 
-> **Sessions & storage**
->
-> Every session is **ephemeral** in storage: when a new session begins, the previous session’s storage is cleaned up.
-> Exporting a session is equivalent to saving a session.
+### Open the VS Code dashboard
+
+1. Open VS Code → Command Palette (`Ctrl/Cmd + Shift + P`).
+2. Select the **“OnTheFly: Show Dashboard”** command.
+3. Run your training script in a terminal (or notebook) so it instantiates `Trainer.fit(...)`.
+4. The dashboard status badge turns green once a Trainer connects; metrics/controls stream automatically while the tab is open. An idle Trainer does not mean the dashboard lost connection, it just means your model is not currently training.
+
 
 ### Quickstart
 
@@ -81,7 +84,7 @@ trainer = Trainer(
     run_name="baseline",
     max_epochs=1,
     do_test_after=True,
-    val_every_n_epochs=1,  # opt into validation cadence
+    val_every_n_epochs=1,
 )
 
 trainer.fit(
@@ -94,18 +97,20 @@ trainer.fit(
 )
 ```
 
-Prefer the old single-call helper? `onthefly.quickstart(...)` still exists, but the `Trainer` keeps a persistent connection to the dashboard and mirrors PyTorch Lightning's ergonomics.
+ -Run your script exactly as you normally would (`python train.py` or `python -m training`); if the script instantiates a `Trainer`, the VS Code dashboard will attach automatically (it listens on `localhost:47621`) whenever a dashboard tab is open.
+ - Once you run your script, you will see this in your terminal: [onthefly] dashboard connected on tcp://127.0.0.1:47621. This means that even if your dashboard wasn't open yet, you can still open the dashboard from the Command Palette (Cmd+Shift+P) and you will see the live training.
+ -Instantiating this Trainer will wrap around your training, just like tools like Lightning and Accelerate do. Now you can perform actions on your model from the dashboard.
 
 `Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely.
 
-### Open the VS Code dashboard
 
-1. Open VS Code → Command Palette (`Ctrl/Cmd + Shift + P`).
-2. Select the **“OnTheFly: Show Dashboard”** command.
-3. Run your training script in a terminal (or notebook) so it instantiates `Trainer.fit(...)`.
-4. The dashboard status badge turns green once a Trainer connects; metrics/controls stream automatically while the tab is open.
+> **Sessions & storage**
+>
+> Every session is **ephemeral** in storage: when a new session begins, the previous session’s storage is cleaned up.
+> Exporting a session is equivalent to saving a session.
 
 ---
+
 
 ## Features
 
