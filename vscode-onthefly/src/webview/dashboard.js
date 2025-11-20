@@ -976,8 +976,6 @@ window.addEventListener('message', (e) => {
       if (!connected)      statusStr = 'disconnected';
       else if (running)    statusStr = 'running';
       else if (paused)     statusStr = 'paused';
-
-      log(`Status: ${statusStr}${m.run_id ? ` (run ${rk})` : ''}`);
       break;
     }
 
@@ -1038,39 +1036,48 @@ window.addEventListener('message', (e) => {
       break;
     }
     case 'trainStep': {
-      // Primary: does this message belong to the run we're tracking?
-      const msgRunId = keyOf(m.run_id);
-      const liveRun = keyOf(storeGetLiveRun());
-      
+      // Normalise run id from the backend
+      let msgRunId = keyOf(m.run_id);
+      const pageRun = keyOf(currentPageRunId());
+      let liveRun = keyOf(storeGetLiveRun());
+
+      // If trainer sends no run_id or a generic one (e.g. "live"),
+      // treat the step as belonging to the currently selected run.
+      if ((!msgRunId || msgRunId === 'live') && pageRun) {
+        msgRunId = pageRun;
+      }
+
+      // If we *still* don't know which run this belongs to, drop it.
+      if (!msgRunId) break;
+
+      // First step after reload: adopt whichever run we see as the live run.
+      if (!liveRun) {
+        storeSetLiveRun(msgRunId);
+        liveRun = msgRunId;
+      }
+
       // If we have a live run set, only accept messages from it
       if (liveRun && msgRunId !== liveRun) break;
-      
-      // If we don't have a live run but DO have a current page, only show that
-      const pageRun = keyOf(currentPageRunId());
-      if (!liveRun && pageRun && msgRunId !== pageRun) break;
-      
-      // If we have neither (fresh start), accept any message and set it as live
-      if (!liveRun && !pageRun) {
-        storeSetLiveRun(msgRunId);
-      }
 
       // ---- Epoch handling: only act when a real epoch comes in ----
       let msgEpoch = null;
 
-      // Only treat it as an epoch update if the field exists and is finite
-      if (Object.prototype.hasOwnProperty.call(m, 'epoch') &&
-          m.epoch !== null && m.epoch !== undefined) {
+      if (
+        Object.prototype.hasOwnProperty.call(m, 'epoch') &&
+        m.epoch !== null &&
+        m.epoch !== undefined
+      ) {
         const n = Number(m.epoch);
         if (Number.isFinite(n)) {
           msgEpoch = n;
 
-          // This is still useful for other UI pieces (e.g. “Epoch: X” somewhere)
           if (msgRunId) {
             RUN_EPOCH.set(msgRunId, n);
           }
         }
       }
 
+      // Stream into metric history using the normalised run id
       MetricHistory.pushLive(msgRunId, m);
 
       const tracked = ['loss', 'val_loss', ...STREAM_METRICS];
@@ -1080,7 +1087,6 @@ window.addEventListener('message', (e) => {
         metricPayload[metric] = Number.isFinite(val) ? val : NaN;
       }
 
-      // We only ever tag the exact steps that carried an epoch.
       const effectiveEpoch = msgEpoch;
 
       window.ChartStream?.pendPush?.(m.step, metricPayload, effectiveEpoch);

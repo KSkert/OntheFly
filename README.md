@@ -2,10 +2,9 @@
 
 **OnTheFly** lets you steer PyTorch training runs live from VS Code — pause, inspect, fork, merge, and export without ever leaving your IDE or sending data to the cloud.
 
-Today, most training is **fire-and-forget**:
-you start a long run, wait, and only discover failure cases or weak slices *after* it finishes. Fixing them means reruns, one-off notebooks, and manual data slicing.
+When you start a long run, you can now see and do more during training with OnTheFly. Detect subtle faults in your model before training goes haywire. 
 
-Many engineers quit training after seeing validation error increase and train error bottom, but double descent is a common theme in some setups. Being able to test, save a model, and continue training seamlessly is another big time saver.
+Being able to test, save a model, and continue training seamlessly is another big time saver. Many engineers quit training after seeing validation error increase when the model fits the training data, but double descent is a common theme in some setups.
 
 ![On-the-Fly overview](./docs/images/onthefly_dashboard.png)
 
@@ -100,6 +99,7 @@ trainer.fit(
  -Run your script exactly as you normally would (`python train.py` or `python -m training`); if the script instantiates a `Trainer`, the VS Code dashboard will attach automatically (it listens on `localhost:47621`) whenever a dashboard tab is open.
  - Once you run your script, you will see this in your terminal: [onthefly] dashboard connected on tcp://127.0.0.1:47621. This means that even if your dashboard wasn't open yet, you can still open the dashboard from the Command Palette (Cmd+Shift+P) and you will see the live training.
  -Instantiating this Trainer will wrap around your training, just like tools like Lightning and Accelerate do. Now you can perform actions on your model from the dashboard.
+ -To exit the Trainer, use Ctrl+C from the terminal to close the dashboard connection.
 
 `Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely.
 

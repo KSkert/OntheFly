@@ -80,28 +80,45 @@ function ensureTrainerServer() {
             vscode.window.showWarningMessage('Another Trainer tried to connect while one is active. Close the existing run first.');
             return;
         }
-        trainerSocket = socket;
-        trainerBuffer = '';
-        socket.setEncoding('utf8');
-        socket.on('data', (chunk) => handleTrainerData(chunk));
-        socket.on('error', (err) => {
-            post({ type: 'error', text: `[trainer] ${err?.message || err}` });
-        });
-        socket.on('close', () => {
-            post({ type: 'log', text: 'Trainer disconnected.' });
-            disconnectTrainer(false);
-        });
-        postStatus(true);
-        post({ type: 'log', text: 'Trainer connected. Streaming events live.' });
-        // if user had a run selected, seed + attach immediately
-        const target = (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
-            (currentRunId && currentRunId.trim()) ||
-            null;
-        if (target) {
-            seedTrainerForRun(target).catch(e => {
-                console.warn('[onthefly] attach_context failed on connect:', e);
+        // Handle new trainer connection in an async block so we can await the reset
+        (async () => {
+            // If we've ever had a trainer before, a new one means "new session" → hard reset.
+            if (hasTrainerConnectedOnce && lastExtensionContext) {
+                try {
+                    await hardResetSession(lastExtensionContext, { fromUser: false });
+                }
+                catch (e) {
+                    console.warn('[onthefly] automatic session reset on new trainer failed:', e);
+                }
+            }
+            hasTrainerConnectedOnce = true;
+            // Now wire up the newly connected Trainer
+            trainerSocket = socket;
+            trainerBuffer = '';
+            socket.setEncoding('utf8');
+            socket.on('data', (chunk) => handleTrainerData(chunk));
+            socket.on('error', (err) => {
+                post({ type: 'error', text: `[trainer] ${err?.message || err}` });
             });
-        }
+            socket.on('close', () => {
+                post({ type: 'log', text: 'Trainer disconnected.' });
+                // NOTE: this does NOT reset DB/session/dashboard anymore; it just tears down the socket.
+                disconnectTrainer(false);
+            });
+            postStatus(true);
+            post({ type: 'log', text: 'Trainer connected. Streaming events live.' });
+            // if user had a run selected, seed + attach immediately
+            const target = (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
+                (currentRunId && currentRunId.trim()) ||
+                null;
+            if (target) {
+                seedTrainerForRun(target).catch((e) => {
+                    console.warn('[onthefly] attach_context failed on connect:', e);
+                });
+            }
+        })().catch((err) => {
+            console.warn('[onthefly] trainer connection handler failed:', err);
+        });
     });
     trainerServer.on('error', (err) => {
         const msg = `OnTheFly dashboard could not listen on port ${DASHBOARD_PORT}: ${err?.message || err}`;
@@ -186,8 +203,11 @@ let runActivityState = null;
 let pauseInFlight = false;
 let resumeInFlight = false;
 let needDiskCleanOnNextTrainer = true;
+let lastExtensionContext = null;
+let hasTrainerConnectedOnce = false;
 /* ============================ Activate / Deactivate ============================ */
 async function activate(context) {
+    lastExtensionContext = context;
     context.subscriptions.push(vscode.commands.registerCommand('onthefly.showDashboard', () => openPanel(context)));
     context.subscriptions.push(vscode.window.registerWebviewPanelSerializer('ontheflyDashboard', {
         async deserializeWebviewPanel(webviewPanel) {
@@ -480,6 +500,7 @@ function postStatus(connected) {
         connected,
         running, // "is actively training"
         paused, // "trainer attached but paused"
+        run_id: currentRunId || null,
     });
 }
 function setRunActivity(state) {
@@ -1574,6 +1595,11 @@ function handleLine(line) {
     if (obj && obj.type === 'trainStep') {
         const run_id = obj.run_id || currentRunId || 'live';
         const num = (value) => (Number.isFinite(value) ? Number(value) : null);
+        //keep extension-side notion of "current run" in sync with the stream
+        currentRunId = run_id;
+        if (!modelNavSelectedRunId) {
+            modelNavSelectedRunId = run_id;
+        }
         const row = {
             run_id,
             step: Number(obj.step) || 0,
@@ -1594,7 +1620,7 @@ function handleLine(line) {
         post({ type: 'trainStep', ...row });
         const logLine = `step ${row.step}: train_loss = ${row.loss ?? 'None'}, val_loss = ${lastVal}`;
         if (runActivityState !== 'running') {
-            setRunActivity('running');
+            setRunActivity('running'); // this will now call postStatus(true) with run_id
         }
         post({ type: 'log', level: 'info', phase: 'train', text: logLine });
         try {
@@ -1630,7 +1656,6 @@ function handleLine(line) {
         if (!seenRuns.has(id)) {
             seenRuns.add(id);
             currentRunId = id;
-            // modelNavSelectedRunId = id;   // keep selection in sync with what the UI shows
             // If storage only supports single parent, store the first (primary)
             const primaryParent = (parents && parents[0]) ?? null;
             const existingRuns = (0, storage_1.listRuns)();
