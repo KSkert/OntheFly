@@ -952,16 +952,35 @@ window.addEventListener('message', (e) => {
     }
     case 'status': {
       const rk = keyOf(m.run_id || curRunKey());
-      setRunningFor(rk, !!m.running);
-      if (m.running) {
-        storeSetLiveRun(rk);                    // always switch to the run that is actually running
-        if (isFollowActive()) selectRunByRunId(rk); // snap view immediately if following
-      } else if (!m.running && storeGetLiveRun() === rk) {
-        storeSetLiveRun(null);                  // clear stale live when it stops
+
+      // New fields from the extension:
+      const connected = 'connected' in m ? !!m.connected : !!m.running;
+      const running   = !!m.running;
+      const paused    = !!m.paused;
+
+      // Per-run "is actively training" flag
+      setRunningFor(rk, running);
+
+      // Live-run anchor: any time the trainer is connected, we treat this run as "live"
+      if (connected) {
+        if (storeGetLiveRun() !== rk) {
+          storeSetLiveRun(rk);
+          if (isFollowActive()) selectRunByRunId(rk);
+        }
+      } else if (storeGetLiveRun() === rk) {
+        // Trainer disconnected → clear stale live
+        storeSetLiveRun(null);
       }
-      log(`Status: ${m.running ? 'running' : 'idle'}${m.run_id ? ` (run ${rk})` : ''}`);
+
+      let statusStr = 'idle';
+      if (!connected)      statusStr = 'disconnected';
+      else if (running)    statusStr = 'running';
+      else if (paused)     statusStr = 'paused';
+
+      log(`Status: ${statusStr}${m.run_id ? ` (run ${rk})` : ''}`);
       break;
     }
+
     case 'runs': {
       const rows = Array.isArray(m.rows) ? m.rows : [];
 

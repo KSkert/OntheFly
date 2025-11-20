@@ -149,7 +149,7 @@ function disconnectTrainer(notify = true) {
     trainerSocket = null;
   }
   trainerBuffer = '';
-  runActivityState = null;
+  setRunActivity(null);
   pauseInFlight = false;
   resumeInFlight = false;
 
@@ -285,7 +285,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 export function deactivate() {
   shutdownTrainerServer();
-  try { closeStorage(); } catch {}
+  try { closeStorage({ retainFile: true }); } catch {}
 }
 
 async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromUser?: boolean }) {
@@ -323,7 +323,7 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
   resumeInFlight = false;
 
   // 4) Reset storage
-  try { closeStorage(); } catch {}
+  try { closeStorage({ retainFile: false }); } catch {}
   await initStorage(context);
   
   needDiskCleanOnNextTrainer = true;
@@ -386,18 +386,15 @@ function configurePanel(context: vscode.ExtensionContext, webviewPanel: vscode.W
     if (webviewVisible) {
       // when user returns, cheaply re-sync UI (no heavy streams)
       try { post({ type: 'runs', rows: listRuns() }); } catch {}
-      postStatus(Boolean(trainerSocket && !trainerSocket.destroyed));
+      postStatus(trainerActive());
     }
   });
 
-  panel.onDidDispose(async () => {
-    // Close = explicit end of session → kill everything & reset
-    shutdownTrainerServer();
-
-    // fresh ephemeral storage
-    try { closeStorage(); } catch {}
-    await initStorage(context);
-    if (panel === webviewPanel) panel = null;
+  panel.onDidDispose(() => {
+    // Just drop the reference; let deactivate() handle shutdown.
+    if (panel === webviewPanel) {
+      panel = null;
+    }
   });
 
   panel.webview.onDidReceiveMessage((m: any) => { onMessage(context, m); });
@@ -591,7 +588,24 @@ function post(msg: any) {
   try { panel?.webview.postMessage(msg); } catch (e) { console.log('[EXT->WEB] post threw:', e); }
 }
 function postErr(e: any) { post({ type: 'error', text: String(e?.message || e) }); }
-function postStatus(running: boolean) { post({ type: 'status', running}); }
+
+function postStatus(connected: boolean) {
+  const activity = runActivityState;
+  const running = connected && activity === 'running';
+  const paused  = connected && activity === 'paused';
+
+  post({
+    type: 'status',
+    connected,
+    running,   // "is actively training"
+    paused,    // "trainer attached but paused"
+  });
+}
+
+function setRunActivity(state: RunActivityState) {
+  runActivityState = state;
+  postStatus(trainerActive());
+}
 
 function postCurrentSession() {
   if (currentSessionId) post({ type: 'fs.session.current', id: currentSessionId });
@@ -922,7 +936,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       try {
         await ensureTrainerOnRun(target);   // <<< switch-and-seed
         sendCtl({ cmd: 'resume' });
-        runActivityState = 'running';
+        setRunActivity('running');
       } catch (e:any) {
         postErr(e);
         postStatus(false);
@@ -1515,7 +1529,7 @@ function sendCtl(cmd: Ctl) {
   try {
     trainerSocket.write(JSON.stringify(cmd) + '\n');
     const t = (cmd as any).cmd;
-    if (t === 'resume') runActivityState = 'running';
+    if (t === 'resume') setRunActivity('running');
     if (t && optimisticEcho[t]) post({ type: optimisticEcho[t], payload: cmd });
   } catch (e: any) {
     postErr(e);
@@ -1524,7 +1538,7 @@ function sendCtl(cmd: Ctl) {
 
 async function requestBackendPause(timeoutMs = 30_000): Promise<any> {
   const data = await sendReq('pause', {}, timeoutMs);
-  runActivityState = 'paused';
+  setRunActivity('paused');
   return data;
 }
 
@@ -1621,13 +1635,13 @@ function handleLine(line: string) {
   }
 
   if (obj?.type === 'paused') {
-    runActivityState = 'paused';
+    setRunActivity('paused');
     pauseInFlight = false;
   } else if (obj?.type === 'resumed') {
-    runActivityState = 'running';
+    setRunActivity('running');
     resumeInFlight = false;
   } else if (obj?.type === 'trainingFinished') {
-    runActivityState = null;
+    setRunActivity(null);
     pauseInFlight = false;
     resumeInFlight = false;
   }
@@ -1727,6 +1741,9 @@ function handleLine(line: string) {
     const lastVal = (obj.val_loss == null ? 'None' : String(obj.val_loss));
     post({ type: 'trainStep', ...row });
     const logLine = `step ${row.step}: train_loss = ${row.loss ?? 'None'}, val_loss = ${lastVal}`;
+    if (runActivityState !== 'running') {
+      setRunActivity('running');
+    }
     post({ type: 'log', level: 'info', phase: 'train', text: logLine });
     try {
       insertMetric(run_id, row);
@@ -1734,32 +1751,6 @@ function handleLine(line: string) {
       console.warn('[onthefly] metric persist error:', e);
     }
     return;
-  }
-
-  if (obj?.type === 'trainStepLite') {
-    const run_id = obj.run_id || currentRunId || 'live';
-    const row: StepRow = {
-      run_id,
-      step: Number(obj.step) || 0,
-      epoch: Number(obj.epoch) || 0,
-      loss: Number(obj.loss),
-      val_loss: Number(obj.val_loss),
-      lr: Number(obj.lr),
-      grad_norm: Number(obj.grad_norm),
-      weight_norm: Number(obj.weight_norm),
-      activation_zero_frac: Number(obj.activation_zero_frac),
-      throughput: Number(obj.throughput),
-      mem_vram: Number(obj.mem_vram),
-      gpu_util: Number(obj.gpu_util),
-      ts: Number(obj.ts) || Date.now(),
-    };
-    post({ type: 'trainStep', ...row });
-    try { insertMetric(run_id, row); } catch {}
-    return;
-  }
-
-  if (obj?.type === 'fork_created') {
-    nativeRunsThisSession.add(String(obj.run_id));
   }
 
   if (obj?.type === 'log' && obj.text && /model\s+session_id/i.test(obj.text)) {

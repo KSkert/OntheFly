@@ -300,17 +300,16 @@ function _copyDbToSingleFile(targetPath: string) {
   } catch {}
 }
 
-export function initStorage(_context: vscode.ExtensionContext): Promise<void> {
-  if (db) return Promise.resolve();     // already open
-  if (initPromise) return initPromise;  // single-flight
+export function initStorage(context: vscode.ExtensionContext): Promise<void> {
+  if (db) return Promise.resolve();
+  if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    // Always use a fresh temp folder per session
-    if (!dbFolder) {
-      dbFolder = path.join(os.tmpdir(), 'onthefly-session-' + crypto.randomUUID());
-    }
+    // Use a stable per-extension directory, not a random tmp dir
+    const root = context.globalStorageUri.fsPath;
+    fs.mkdirSync(root, { recursive: true });
 
-    fs.mkdirSync(dbFolder, { recursive: true });
+    dbFolder = root;
     dbPath = path.join(dbFolder, 'runs.sqlite');
 
     db = new BetterSqlite3(dbPath);
@@ -324,14 +323,15 @@ export function initStorage(_context: vscode.ExtensionContext): Promise<void> {
 }
 
 
+
 export function getDbPath() { return dbPath || ''; }
 
-export function closeStorage() {
+export function closeStorage(opts?: { retainFile?: boolean }) {
   try { db?.close?.(); } catch {}
   db = null;
   _insStmt = null;
 
-  if (dbFolder) {
+  if (!opts?.retainFile && dbFolder) {
     try { fs.rmSync(dbFolder, { recursive: true, force: true }); } catch {}
   }
 
@@ -340,10 +340,12 @@ export function closeStorage() {
 }
 
 
-function loadSessionFrom(sourcePath: string, _context: vscode.ExtensionContext) {
-  // Ensure we have a temp folder / dbPath even if initStorage() wasn’t called
+
+function loadSessionFrom(sourcePath: string, context: vscode.ExtensionContext) {
   if (!dbFolder) {
-    dbFolder = path.join(os.tmpdir(), 'onthefly-session-' + crypto.randomUUID());
+    const root = context.globalStorageUri.fsPath;
+    fs.mkdirSync(root, { recursive: true });
+    dbFolder = root;
   }
   if (!dbPath) {
     dbPath = path.join(dbFolder, 'runs.sqlite');
@@ -359,6 +361,7 @@ function loadSessionFrom(sourcePath: string, _context: vscode.ExtensionContext) 
   ensureSchema(db);
   _insStmt = null;
 }
+
 
 
 export function checkpointNow() {

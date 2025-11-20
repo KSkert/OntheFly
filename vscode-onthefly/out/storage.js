@@ -66,8 +66,6 @@ exports.getLogsBySession = getLogsBySession;
 exports.latestCheckpointForRun = latestCheckpointForRun;
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
-const os = __importStar(require("os"));
-const crypto = __importStar(require("crypto"));
 const BetterSqlite3 = require('better-sqlite3');
 let db = null;
 let dbFolder;
@@ -333,17 +331,16 @@ function _copyDbToSingleFile(targetPath) {
     }
     catch { }
 }
-function initStorage(_context) {
+function initStorage(context) {
     if (db)
-        return Promise.resolve(); // already open
+        return Promise.resolve();
     if (initPromise)
-        return initPromise; // single-flight
+        return initPromise;
     initPromise = (async () => {
-        // Always use a fresh temp folder per session
-        if (!dbFolder) {
-            dbFolder = path.join(os.tmpdir(), 'onthefly-session-' + crypto.randomUUID());
-        }
-        fs.mkdirSync(dbFolder, { recursive: true });
+        // Use a stable per-extension directory, not a random tmp dir
+        const root = context.globalStorageUri.fsPath;
+        fs.mkdirSync(root, { recursive: true });
+        dbFolder = root;
         dbPath = path.join(dbFolder, 'runs.sqlite');
         db = new BetterSqlite3(dbPath);
         applyPragmas(db);
@@ -353,14 +350,14 @@ function initStorage(_context) {
     return initPromise;
 }
 function getDbPath() { return dbPath || ''; }
-function closeStorage() {
+function closeStorage(opts) {
     try {
         db?.close?.();
     }
     catch { }
     db = null;
     _insStmt = null;
-    if (dbFolder) {
+    if (!opts?.retainFile && dbFolder) {
         try {
             fs.rmSync(dbFolder, { recursive: true, force: true });
         }
@@ -369,10 +366,11 @@ function closeStorage() {
     dbFolder = undefined;
     dbPath = undefined;
 }
-function loadSessionFrom(sourcePath, _context) {
-    // Ensure we have a temp folder / dbPath even if initStorage() wasn’t called
+function loadSessionFrom(sourcePath, context) {
     if (!dbFolder) {
-        dbFolder = path.join(os.tmpdir(), 'onthefly-session-' + crypto.randomUUID());
+        const root = context.globalStorageUri.fsPath;
+        fs.mkdirSync(root, { recursive: true });
+        dbFolder = root;
     }
     if (!dbPath) {
         dbPath = path.join(dbFolder, 'runs.sqlite');

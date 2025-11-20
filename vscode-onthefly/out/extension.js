@@ -145,7 +145,7 @@ function disconnectTrainer(notify = true) {
         trainerSocket = null;
     }
     trainerBuffer = '';
-    runActivityState = null;
+    setRunActivity(null);
     pauseInFlight = false;
     resumeInFlight = false;
     for (const [, p] of pending) {
@@ -199,7 +199,7 @@ async function activate(context) {
 function deactivate() {
     shutdownTrainerServer();
     try {
-        (0, storage_1.closeStorage)();
+        (0, storage_1.closeStorage)({ retainFile: true });
     }
     catch { }
 }
@@ -237,7 +237,7 @@ async function hardResetSession(context, opts) {
     resumeInFlight = false;
     // 4) Reset storage
     try {
-        (0, storage_1.closeStorage)();
+        (0, storage_1.closeStorage)({ retainFile: false });
     }
     catch { }
     await (0, storage_1.initStorage)(context);
@@ -291,20 +291,14 @@ function configurePanel(context, webviewPanel) {
                 post({ type: 'runs', rows: (0, storage_1.listRuns)() });
             }
             catch { }
-            postStatus(Boolean(trainerSocket && !trainerSocket.destroyed));
+            postStatus(trainerActive());
         }
     });
-    panel.onDidDispose(async () => {
-        // Close = explicit end of session → kill everything & reset
-        shutdownTrainerServer();
-        // fresh ephemeral storage
-        try {
-            (0, storage_1.closeStorage)();
-        }
-        catch { }
-        await (0, storage_1.initStorage)(context);
-        if (panel === webviewPanel)
+    panel.onDidDispose(() => {
+        // Just drop the reference; let deactivate() handle shutdown.
+        if (panel === webviewPanel) {
             panel = null;
+        }
     });
     panel.webview.onDidReceiveMessage((m) => { onMessage(context, m); });
     panel.webview.html = getHtml(context, panel.webview, nonce);
@@ -477,7 +471,21 @@ function post(msg) {
     }
 }
 function postErr(e) { post({ type: 'error', text: String(e?.message || e) }); }
-function postStatus(running) { post({ type: 'status', running }); }
+function postStatus(connected) {
+    const activity = runActivityState;
+    const running = connected && activity === 'running';
+    const paused = connected && activity === 'paused';
+    post({
+        type: 'status',
+        connected,
+        running, // "is actively training"
+        paused, // "trainer attached but paused"
+    });
+}
+function setRunActivity(state) {
+    runActivityState = state;
+    postStatus(trainerActive());
+}
 function postCurrentSession() {
     if (currentSessionId)
         post({ type: 'fs.session.current', id: currentSessionId });
@@ -790,7 +798,7 @@ async function onMessage(context, m) {
             try {
                 await ensureTrainerOnRun(target); // <<< switch-and-seed
                 sendCtl({ cmd: 'resume' });
-                runActivityState = 'running';
+                setRunActivity('running');
             }
             catch (e) {
                 postErr(e);
@@ -1380,7 +1388,7 @@ function sendCtl(cmd) {
         trainerSocket.write(JSON.stringify(cmd) + '\n');
         const t = cmd.cmd;
         if (t === 'resume')
-            runActivityState = 'running';
+            setRunActivity('running');
         if (t && optimisticEcho[t])
             post({ type: optimisticEcho[t], payload: cmd });
     }
@@ -1390,7 +1398,7 @@ function sendCtl(cmd) {
 }
 async function requestBackendPause(timeoutMs = 30_000) {
     const data = await sendReq('pause', {}, timeoutMs);
-    runActivityState = 'paused';
+    setRunActivity('paused');
     return data;
 }
 async function runHealth(cmd, payload, eventType, timeoutMs = 60_000, forRunId) {
@@ -1482,15 +1490,15 @@ function handleLine(line) {
         return;
     }
     if (obj?.type === 'paused') {
-        runActivityState = 'paused';
+        setRunActivity('paused');
         pauseInFlight = false;
     }
     else if (obj?.type === 'resumed') {
-        runActivityState = 'running';
+        setRunActivity('running');
         resumeInFlight = false;
     }
     else if (obj?.type === 'trainingFinished') {
-        runActivityState = null;
+        setRunActivity(null);
         pauseInFlight = false;
         resumeInFlight = false;
     }
@@ -1585,6 +1593,9 @@ function handleLine(line) {
         const lastVal = (obj.val_loss == null ? 'None' : String(obj.val_loss));
         post({ type: 'trainStep', ...row });
         const logLine = `step ${row.step}: train_loss = ${row.loss ?? 'None'}, val_loss = ${lastVal}`;
+        if (runActivityState !== 'running') {
+            setRunActivity('running');
+        }
         post({ type: 'log', level: 'info', phase: 'train', text: logLine });
         try {
             (0, storage_1.insertMetric)(run_id, row);
@@ -1593,33 +1604,6 @@ function handleLine(line) {
             console.warn('[onthefly] metric persist error:', e);
         }
         return;
-    }
-    if (obj?.type === 'trainStepLite') {
-        const run_id = obj.run_id || currentRunId || 'live';
-        const row = {
-            run_id,
-            step: Number(obj.step) || 0,
-            epoch: Number(obj.epoch) || 0,
-            loss: Number(obj.loss),
-            val_loss: Number(obj.val_loss),
-            lr: Number(obj.lr),
-            grad_norm: Number(obj.grad_norm),
-            weight_norm: Number(obj.weight_norm),
-            activation_zero_frac: Number(obj.activation_zero_frac),
-            throughput: Number(obj.throughput),
-            mem_vram: Number(obj.mem_vram),
-            gpu_util: Number(obj.gpu_util),
-            ts: Number(obj.ts) || Date.now(),
-        };
-        post({ type: 'trainStep', ...row });
-        try {
-            (0, storage_1.insertMetric)(run_id, row);
-        }
-        catch { }
-        return;
-    }
-    if (obj?.type === 'fork_created') {
-        nativeRunsThisSession.add(String(obj.run_id));
     }
     if (obj?.type === 'log' && obj.text && /model\s+session_id/i.test(obj.text)) {
         const m = String(obj.text).match(/session_id\s*=\s*([^\s]+)/i);
