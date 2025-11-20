@@ -1,2 +1,4 @@
 from .session import quickstart
-__all__ = ["quickstart"]
+from .trainer import Trainer
+
+__all__ = ["quickstart", "Trainer"]

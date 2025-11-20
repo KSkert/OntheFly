@@ -165,9 +165,42 @@ def _jsonable_list(x):
 class CommandsMixin:
     """
     Registers command handlers on the router. Handlers delegate to mixin methods
-    (pause/resume/export/ckpt/etc.) and expose new v2 *health* commands.
+    (pause/resume/export/ckpt/etc.).
     """
     _router: CommandRouter
+
+    def _bind_to_run(self, run_id: str, *, ensure_dirs: bool = True) -> str:
+        """
+        Idempotently rebind this Trainer/Session to a run id without starting or resuming.
+        Ensures the run directory exists and updates cfg.run_name in-place.
+        Leaves the session paused; callers decide when to resume.
+        """
+        rid = str(run_id or "").strip()
+        if not rid:
+            raise RuntimeError("bind_to_run: empty run_id")
+
+        cfg = getattr(self, "cfg", None)
+        if cfg is None:
+            raise RuntimeError("bind_to_run: missing self.cfg")
+
+        save_dir = getattr(cfg, "save_dir", None) or os.getcwd()
+        if ensure_dirs:
+            os.makedirs(os.path.join(save_dir, rid), exist_ok=True)
+
+        prev = getattr(cfg, "run_name", None)
+        cfg.run_name = rid
+
+        # Clear any run-scoped caches/selections that shouldn't cross runs
+        with contextlib.suppress(Exception):
+            self._active_subset_indices = None
+            self._rebind_train_loader_to_subset(None)
+
+        # Optional trace
+        with contextlib.suppress(Exception):
+            self._event({"type": "log", "level": "debug",
+                         "text": f"_bind_to_run: {prev!r} -> {rid!r} (save_dir={save_dir})"})
+
+        return rid
 
     # ------------------------------- Core runtime -------------------------------
     def _register_command_handlers(self):  # noqa: C901 (long but grouped by sections)
@@ -1145,3 +1178,133 @@ class CommandsMixin:
                 lines += ["Notes:"] + [f"  • {n}" for n in out["notes"]]
             out["text"] = "\n".join(lines)
             return out
+        
+        # ---------------------------- capability / version ----------------------------
+        @self._router.on("server_info")
+        def _server_info(_payload):
+            try:
+                # Prefer the package version if exported; fall back to 0.0.0
+                from .. import __version__ as _pkg_version   # type: ignore
+                ver = str(_pkg_version)
+            except Exception:
+                ver = "0.0.0"
+            caps = [
+                "attach_context",
+                "switch_run",
+                "set_counter_seeds",
+                "save_ckpt",
+                "load_ckpt",
+                "pause",
+                "resume",
+                "test_now",
+                "fork",
+                "merge",
+                "generate_report",
+            ]
+            dev = getattr(self, "device", "cpu")
+            return {"version": ver, "capabilities": caps, "device": str(dev)}
+
+        # ------------------------------- context wiring -------------------------------
+        @self._router.on("set_counter_seeds")
+        def _set_counter_seeds(payload):
+            """Optional RPC: seed fork/merge counters for continuity."""
+            self._fork_counter_seed  = int(payload.get("fork_counter_init", 0) or 0)
+            self._merge_counter_seed = int(payload.get("merge_counter_init", 0) or 0)
+            # Keep a generation counter in case the UI sends seeds multiple times
+            self._counter_seed_gen = int(getattr(self, "_counter_seed_gen", 0)) + 1
+            self._event({"type": "log", "level": "info",
+                        "text": f"Counter seeds set (fork={self._fork_counter_seed}, merge={self._merge_counter_seed})"})
+            return {
+                "ok": True,
+                "fork_counter_seed": self._fork_counter_seed,
+                "merge_counter_seed": self._merge_counter_seed,
+                "seed_gen": self._counter_seed_gen,
+            }
+
+        def _maybe_load_init_ckpt(_payload):
+            """Load an initial checkpoint if provided, staying paused."""
+            ck = _payload.get("init_ckpt") or _payload.get("ckpt") or None
+            st = _payload.get("init_step", None)
+            if ck and os.path.exists(ck):
+                step = self._load_checkpoint_into_state(ck)
+                # Trust the loader, but allow the caller to override if they insist
+                if st is not None:
+                    try: self.step = int(st)
+                    except Exception: pass
+                self._event({"type": "checkpoint_loaded", "path": ck, "step": int(self.step)})
+                return {"loaded": True, "path": ck, "step": int(self.step)}
+            return {"loaded": False, "path": None, "step": int(self.step)}
+
+        @self._router.on("attach_context")
+        def _attach_context(payload):
+            """
+            Bind this Trainer to a run and (optionally) preload a checkpoint + counter seeds.
+            Idempotent and NON-RESUMING: leaves the session paused until an explicit 'resume'.
+            """
+            rid = str(payload.get("run_id") or payload.get("runId") or self.cfg.run_name or "").strip()
+            if not rid:
+                raise RuntimeError("attach_context requires run_id")
+
+            # Pause first so any state changes are safe
+            self._paused = True
+
+            # Rebind to run (idempotent)
+            self._bind_to_run(rid)
+
+            # Optional seeds
+            self._fork_counter_seed  = int(payload.get("fork_counter_init", 0) or getattr(self, "_fork_counter_seed", 0))
+            self._merge_counter_seed = int(payload.get("merge_counter_init", 0) or getattr(self, "_merge_counter_seed", 0))
+
+            # Optional initial checkpoint
+            ck_info = _maybe_load_init_ckpt(payload)
+
+            # Leave paused; report status
+            self._event({"type": "log", "level": "info",
+                        "text": f"Attached to run '{self.cfg.run_name}' (paused). ckpt_loaded={ck_info['loaded']}"})
+            return {
+                "ok": True,
+                "run_id": self.cfg.run_name,
+                "paused": True,
+                "ckpt_loaded": ck_info["loaded"],
+                "ckpt_path": ck_info["path"],
+                "step": int(self.step),
+                "fork_counter_seed": int(getattr(self, "_fork_counter_seed", 0)),
+                "merge_counter_seed": int(getattr(self, "_merge_counter_seed", 0)),
+            }
+
+        @self._router.on("switch_run")
+        def _switch_run(payload):
+            """
+            Pause, switch binding to a different run, optionally load a checkpoint,
+            apply seeds; remain paused.
+            """
+            rid = str(payload.get("run_id") or payload.get("runId") or "").strip()
+            if not rid:
+                raise RuntimeError("switch_run requires run_id")
+
+            # Pause current work
+            self._paused = True
+
+            # Rebind
+            self._bind_to_run(rid)
+
+            # Seeds (if provided)
+            if "fork_counter_init" in payload or "merge_counter_init" in payload:
+                self._fork_counter_seed  = int(payload.get("fork_counter_init", getattr(self, "_fork_counter_seed", 0)) or 0)
+                self._merge_counter_seed = int(payload.get("merge_counter_init", getattr(self, "_merge_counter_seed", 0)) or 0)
+
+            # Load checkpoint if specified
+            ck_info = _maybe_load_init_ckpt(payload)
+
+            self._event({"type": "log", "level": "info",
+                        "text": f"Switched to run '{self.cfg.run_name}' (paused). ckpt_loaded={ck_info['loaded']}"})
+            return {
+                "ok": True,
+                "run_id": self.cfg.run_name,
+                "paused": True,
+                "ckpt_loaded": ck_info["loaded"],
+                "ckpt_path": ck_info["path"],
+                "step": int(self.step),
+                "fork_counter_seed": int(getattr(self, "_fork_counter_seed", 0)),
+                "merge_counter_seed": int(getattr(self, "_merge_counter_seed", 0)),
+            }

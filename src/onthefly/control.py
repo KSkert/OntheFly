@@ -17,6 +17,61 @@ JsonDict = Dict[str, Any]
 Handler = Callable[[JsonDict], Any]  # receives payload, returns reply data (dict/primitive)
 
 
+# ---------------------- Channel abstraction ----------------------
+
+class _BaseChannel:
+    def read_line(self, timeout: float = 0.0) -> Optional[str]:
+        return None
+
+    def write_text(self, data: str) -> None:
+        raise NotImplementedError
+
+    def flush(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+
+class _StdIOChannel(_BaseChannel):
+    def read_line(self, timeout: float = 0.0) -> Optional[str]:
+        try:
+            rlist, _, _ = select.select([sys.stdin], [], [], timeout)
+        except Exception:
+            return None
+        if not rlist:
+            return None
+        return sys.stdin.readline()
+
+    def write_text(self, data: str) -> None:
+        sys.stdout.write(data)
+        sys.stdout.flush()
+
+    def flush(self) -> None:
+        try:
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+_channel: _BaseChannel = _StdIOChannel()
+
+
+def set_channel(channel: _BaseChannel, *, close_old: bool = True) -> None:
+    global _channel
+    prev = _channel
+    _channel = channel
+    if close_old and prev is not channel:
+        try:
+            prev.close()
+        except Exception:
+            pass
+
+
+def _get_channel() -> _BaseChannel:
+    return _channel
+
+
 # ---------------------- JSON helpers ----------------------
 
 def _safe_default(o):
@@ -100,12 +155,8 @@ class ControlBus:
 
     def _reader(self) -> None:
         while not self._stop.is_set():
-            # Non-blocking poll of stdin for commands from the UI.
-            rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
-            if not rlist:
-                continue
-
-            line = sys.stdin.readline()
+            # Non-blocking poll for commands from the UI.
+            line = _get_channel().read_line(timeout=0.1)
             if not line:
                 time.sleep(0.05)
                 continue
@@ -232,8 +283,9 @@ class _AsyncStdoutWriter:
             if not batch:
                 return
             try:
-                sys.stdout.write("".join(batch))
-                sys.stdout.flush()
+                ch = _get_channel()
+                ch.write_text("".join(batch))
+                ch.flush()
             except Exception as e:
                 # stderr is not parsed by the extension as JSON, so it’s safe to log here
                 try:
@@ -289,6 +341,16 @@ class _AsyncStdoutWriter:
 _writer = _AsyncStdoutWriter()
 atexit.register(lambda: _writer.stop())
 
+
+def _close_channel():
+    try:
+        _get_channel().close()
+    except Exception:
+        pass
+
+
+atexit.register(_close_channel)
+
 def _ensure_writer_started():
     _writer.start()
 
@@ -304,8 +366,9 @@ def send_event(obj: dict) -> None:
     if isinstance(obj, dict) and obj.get("type") == "trainStep":
         try:
             s = json.dumps(_sanitize(obj), default=_safe_default, allow_nan=False) + "\n"
-            sys.stdout.write(s)
-            sys.stdout.flush()
+            ch = _get_channel()
+            ch.write_text(s)
+            ch.flush()
             return
         except Exception:
             # Fall back to async writer if direct I/O or serialization failed

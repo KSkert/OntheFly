@@ -22,7 +22,7 @@ This shifts training from a fixed, single-pass run into an incremental process t
 
 
 > [!IMPORTANT]
-> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. Right now, we're building up the backend to expose a run_with_trainer() method that will wrap a trainer (and any necessary fields the trainer doesn't expose in its API) like Lightning, Accelerate, Keras, etc.. No matter the trainer your'e using, OnTheFly's goal is the samto: to enable mid-training controls and guidance natively in VS Code. We also assume you would have run your script like this: 'python -u path/to/script.py'
+> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. OnTheFly now mirrors Lightning/Accelerate by exposing an `onthefly.Trainer`. Run your script exactly as you normally would (`python train.py`, a notebook cell, etc.); if the script instantiates a `Trainer`, the VS Code dashboard will attach automatically (it listens on `localhost:47621`) whenever a dashboard tab is open.
 ---
 
 ## When should you use OnTheFly?
@@ -61,10 +61,10 @@ pip install onthefly-ai
 ```python
 import torch, torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
-from onthefly import quickstart
+from onthefly import Trainer
 
 # toy dataset
-X = torch.randn(4096, 28*28)
+X = torch.randn(4096, 28 * 28)
 y = (X[:, :50].sum(dim=1) > 0).long()
 ds = TensorDataset(X, y)
 train = DataLoader(ds, batch_size=128, shuffle=True)
@@ -72,35 +72,38 @@ val = DataLoader(ds, batch_size=256)
 test = DataLoader(ds, batch_size=256)
 
 # tiny model
-model = nn.Sequential(nn.Linear(28*28, 64), nn.ReLU(), nn.Linear(64, 2))
+model = nn.Sequential(nn.Linear(28 * 28, 64), nn.ReLU(), nn.Linear(64, 2))
 opt = torch.optim.Adam(model.parameters(), lr=1e-3)
 loss = nn.CrossEntropyLoss()
 
-quickstart(
+trainer = Trainer(
     project="mnist-demo",
     run_name="baseline",
+    max_epochs=1,
+    do_test_after=True,
+    val_every_n_epochs=1,  # opt into validation cadence
+)
+
+trainer.fit(
     model=model,
     optimizer=opt,
     loss_fn=loss,
     train_loader=train,
     val_loader=val,
     test_loader=test,
-    max_epochs=1,
-    do_test_after=True,
-    val_every_n_epochs=1,  # opt-in validation cadence
 )
 ```
 
-Don't run this just yet — you'll start training from the dashboard controls instead.
+Prefer the old single-call helper? `onthefly.quickstart(...)` still exists, but the `Trainer` keeps a persistent connection to the dashboard and mirrors PyTorch Lightning's ergonomics.
 
-`quickstart` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely.
+`Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely.
 
 ### Open the VS Code dashboard
 
 1. Open VS Code → Command Palette (`Ctrl/Cmd + Shift + P`).
 2. Select the **“OnTheFly: Show Dashboard”** command.
-3. Select your Python interpreter and training script.
-4. Press **▶ Run** to start/monitor training, inspect clusters, and compare experts.
+3. Run your training script in a terminal (or notebook) so it instantiates `Trainer.fit(...)`.
+4. The dashboard status badge turns green once a Trainer connects; metrics/controls stream automatically while the tab is open.
 
 ---
 
