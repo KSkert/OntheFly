@@ -1,13 +1,151 @@
 from __future__ import annotations
 
+import contextlib
 import math
+import re
 import sys
 import threading
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 import torch
 
 from .metrics_utils import _grad_norm
+
+_METRIC_ALIAS_MAP: Dict[str, Tuple[str, ...]] = {
+    "accuracy": (
+        "accuracy",
+        "acc",
+        "train_accuracy",
+        "train_acc",
+        "top1",
+        "top-1",
+        "top_1",
+    ),
+    "grad_norm": (
+        "grad_norm",
+        "gradient_norm",
+        "gradnorm",
+    ),
+    "lr": (
+        "lr",
+        "learning_rate",
+        "eta",
+    ),
+    "weight_norm": (
+        "weight_norm",
+    ),
+    "activation_zero_frac": (
+        "activation_zero_frac",
+        "activation_zero_fraction",
+        "zero_fraction",
+        "zero_frac",
+    ),
+    "throughput": (
+        "throughput",
+        "samples_per_sec",
+        "samples_per_second",
+        "items_per_second",
+        "tokens_per_sec",
+        "tokens_per_second",
+    ),
+}
+
+
+def _metric_tokens(name: str) -> Tuple[str, ...]:
+    parts = re.split(r"[.\s:/\\_-]+", name.lower())
+    return tuple(part for part in parts if part)
+
+
+def canonicalize_metrics(*sources: Mapping[str, Any] | None) -> Dict[str, Any]:
+    """
+    Merge arbitrary metric dictionaries and expose canonical keys used by the dashboard.
+
+    External integrations (Lightning, Accelerate, etc.) often surface metrics with
+    framework-specific names. This helper collapses a list of such dictionaries into
+    the subset OnTheFly understands (accuracy, grad_norm, lr, ...), applying simple
+    alias heuristics so callers do not need to duplicate that logic.
+    """
+    merged: Dict[str, Any] = {}
+    for source in sources:
+        if not isinstance(source, Mapping):
+            continue
+        for key, value in source.items():
+            if value is None:
+                continue
+            merged[str(key)] = value
+
+    resolved: Dict[str, Any] = {}
+    for canonical, aliases in _METRIC_ALIAS_MAP.items():
+        for alias in aliases:
+            alias_lower = alias.lower()
+            for key, value in merged.items():
+                key_lower = key.lower()
+                if key_lower == alias_lower:
+                    resolved[canonical] = value
+                    break
+                tokens = _metric_tokens(key_lower)
+                alias_tokens = _metric_tokens(alias_lower)
+                if alias_tokens and all(token in tokens for token in alias_tokens):
+                    resolved[canonical] = value
+                    break
+            if canonical in resolved:
+                break
+    return resolved
+
+
+def _extract_inputs_targets(batch: Any) -> Tuple[Any, Any]:
+    if isinstance(batch, (list, tuple)):
+        if len(batch) >= 2:
+            return batch[0], batch[1]
+        return None, None
+    if isinstance(batch, dict):
+        input_keys = ("input", "inputs", "x", "features", "data")
+        target_keys = ("target", "targets", "label", "labels", "y")
+        x = next((batch.get(k) for k in input_keys if k in batch), None)
+        y = next((batch.get(k) for k in target_keys if k in batch), None)
+        return x, y
+    return None, None
+
+
+def _move_like(obj: Any, device: torch.device) -> Any:
+    if torch.is_tensor(obj):
+        return obj.to(device=device, non_blocking=True)
+    if isinstance(obj, dict):
+        return {k: _move_like(v, device) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_move_like(v, device) for v in obj]
+    if isinstance(obj, tuple):
+        return tuple(_move_like(v, device) for v in obj)
+    return obj
+
+
+def _model_device(model: torch.nn.Module) -> Optional[torch.device]:
+    if model is None:
+        return None
+    for collection in (model.parameters(), model.buffers()):
+        with contextlib.suppress(StopIteration):
+            tensor = next(collection)
+            return tensor.device
+    return torch.device("cpu")
+
+
+def _compute_accuracy_from_model(model: Optional[torch.nn.Module], batch: Any) -> Optional[float]:
+    if model is None or batch is None:
+        return None
+    inputs, targets = _extract_inputs_targets(batch)
+    if inputs is None or targets is None:
+        return None
+    device = _model_device(model)
+    if device is None:
+        return None
+    try:
+        x = _move_like(inputs, device)
+        y = _move_like(targets, device)
+        with torch.no_grad():
+            logits = model(x)
+    except Exception:
+        return None
+    return batch_accuracy(logits, y)
 
 
 def metric_float(val: Any) -> Optional[float]:
@@ -240,6 +378,8 @@ def runtime_snapshot(
     snapshot: Dict[str, Optional[float]] = {}
 
     accuracy = metric_float(metrics.get("accuracy"))
+    if accuracy is None:
+        accuracy = _compute_accuracy_from_model(model, batch)
     snapshot["accuracy"] = accuracy
 
     grad_norm = metric_float(metrics.get("grad_norm"))

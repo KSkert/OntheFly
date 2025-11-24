@@ -16,6 +16,7 @@ from ..control import PauseGate, set_channel
 from ..dashboard_channel import SocketChannel
 from ..device_utils import _resolve_device
 from ..metrics_utils import _to_scalar_loss
+from ..runtime_metrics import canonicalize_metrics
 from ..session.external import OnTheFlyExternalSession
 from .base import FrameworkDelegate
 
@@ -464,7 +465,7 @@ class LightningFrameworkDelegate(FrameworkDelegate):
                     step_duration = max(time.perf_counter() - self._step_start, 1e-9)
                 self._step_start = None
 
-                metrics: Dict[str, Any] = {}
+                metrics = self._outer._collect_stream_metrics(trainer, outputs)
                 self._outer.session.record_train_step(
                     loss=loss_val,
                     batch=batch,
@@ -810,6 +811,20 @@ class LightningFrameworkDelegate(FrameworkDelegate):
     def _refresh_runtime_handles(self, trainer) -> None:
         self.optimizer = self._first_optimizer(trainer)
         self.scheduler = self._first_scheduler(trainer)
+
+    def _collect_stream_metrics(self, trainer, outputs) -> Dict[str, Any]:
+        """
+        Normalize whatever metrics Lightning exposed this step so record_train_step
+        can stream canonical keys (accuracy, lr, ...).
+        """
+        sources = []
+        if isinstance(outputs, dict):
+            sources.append(outputs)
+        for attr in ("callback_metrics", "logged_metrics", "progress_bar_metrics"):
+            payload = getattr(trainer, attr, None)
+            if payload:
+                sources.append(payload)
+        return canonicalize_metrics(*sources)
 
     @staticmethod
     def _first_optimizer(trainer) -> Any:
