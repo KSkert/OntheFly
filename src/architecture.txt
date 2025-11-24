@@ -1,0 +1,131 @@
+Architecture Overview
+=====================
+
+OnTheFly is organized around **sessions**—long-lived controllers that keep track of
+training state, handle dashboard commands, and coordinate checkpoints, telemetry,
+and forks/merges. The project is intentionally layered so the core control plane,
+framework adapters, and support utilities evolve independently.
+
+Layered Layout
+--------------
+- **Control + Command Layer** (`onthefly/control.py`, `socket_channel.py`) drives
+  the command bus, pause/resume logic, and telemetry channel shared by every session.
+- **Session Layer** (`onthefly/session/…`) hosts the long-lived objects that own
+  training state and compose mixins for cross-cutting concerns.
+- **Execution Delegates** (`trainer.py`, `wrappers/lightning.py`) expose a user API
+  and translate framework-specific hooks into session commands.
+- **Telemetry, Data, and Checkpoint Utilities** (`onthefly/runtime_metrics.py`,
+  `data_explorer.py`, etc.) provide pluggable helpers consumed by the layers above.
+
+Sessions (`src/onthefly/session`)
+---------------------------------
+- `base.py` defines `OnTheFlySessionBase`, the shared foundation that stitches
+  together event emission, deterministic dataloaders, checkpoint IO, command bus
+  wiring, and run lifecycle management. It is intentionally framework-neutral and
+  composes most functionality through mixins.
+- `native.py` builds `OnTheFlySession`, the PyTorch-first implementation. It mixes
+  in `TrainMixin`, reset helpers, AMP/optimizer wiring, and validation/test helpers
+  that operate directly on user models.
+- `external.py` implements `OnTheFlyExternalSession`, a façade for third-party
+  trainers (Lightning, Accelerate, etc.). It reuses the base control plane but
+  delegates batch execution to a `FrameworkDelegate` so external runtimes can drive
+  the loop while still benefiting from dashboards, forks, and checkpoints.
+- `__init__.py` provides ergonomic exports (`OnTheFlySession`,
+  `OnTheFlyExternalSession`, `OnTheFlySessionBase`) for callers who just need an
+  implementation without digging through modules.
+
+Mixins (`src/onthefly/mixins`)
+------------------------------
+Mixins isolate orthogonal capabilities so sessions can opt into only what they need:
+
+- **CheckpointMixin** – streaming checkpoint save/load, rotation policies, and
+  artifact registration with the dashboard.
+- **CommandMixin** – routing logic for pause/resume/fork/merge/reset, plus
+  translation between dashboard payloads and internal handlers.
+- **DeterminismMixin** – reproducible dataloader seeds, deterministic sampler setup,
+  and replay helpers when resuming from checkpoints.
+- **RunManagementMixin** – fork, branch, and merge orchestration, including SWA and
+  Fisher merges implemented in `merging.py`/`ckpt_utils.py`.
+- **LossInspectionMixin** – per-sample loss aggregation, embeddings, and exports
+  powering the data explorer workflows.
+
+Control Plane (`src/onthefly/control.py` and friends)
+----------------------------------------------------
+- `OnTheFlyTrainerDelegate` supplies the interface the native trainer uses to
+  report progress, respond to pause signals, and emit lifecycle events.
+- `ConsoleGate`, `CommandBus`, and `SocketChannel` coordinate user commands from
+  VS Code, ensuring that sessions can process requests while training continues.
+- The control plane exposes a small API (`emit`, `pause`, `resume`, `request_test`)
+  so mixins and sessions do not need to know anything about transport details.
+
+Delegates, Wrappers, and Public APIs
+------------------------------------
+- `trainer.py` offers a Lightning-inspired API. `Trainer.fit(...)` spins up a
+  native session, wires the `OnTheFlyTrainerDelegate`, streams metrics to the
+  dashboard, and invokes training/test loops via the session methods.
+- `wrappers/lightning.py` installs an `attach_lightning` helper. It creates an
+  `OnTheFlyExternalSession`, attaches a `FrameworkDelegate` that proxies
+  Lightning’s hooks, and pauses after auto-tests so the dashboard can request
+  forks, merges, or artifact inspection before resuming.
+- Future wrappers follow the same template: implement a delegate that translates
+  framework callbacks into session methods while leaving control/telemetry intact.
+
+Telemetry, Data, and Utility Modules
+------------------------------------
+- `runtime_metrics.py`, `metrics_utils.py`, `device_utils.py` maintain device
+  placement, AMP/scaler coordination, and normalized metrics for display.
+- `data_explorer.py` plus the loss mixin produce embeddings, selections, and
+  exports consumed by fork workflows.
+- `sampler_utils.py`, `ckpt_utils.py`, and `merging.py` provide shared building
+  blocks for deterministic sampling, checkpoint surgery, and model merging.
+
+Flow of a Training Run
+----------------------
+1. **Bootstrap** – User code creates either `Trainer` (native) or calls
+   `attach_lightning` (external). Both paths create a `SessionConfig`, bind a
+   `SocketChannel`, and construct the appropriate session implementation.
+2. **Main Loop** – The session owns the primary loop (`train_epoch`,
+   `_run_test`, etc.), emitting events such as `trainStep`, `epochEnd`, and
+   `testMetrics` through the control layer while honoring pause requests.
+3. **Command Handling** – Incoming dashboard commands travel through the bus to
+   the relevant mixin handler (fork, merge, reset, sample inspection). Commands
+   can interrupt training, but the console gate enforces safe boundaries (e.g.,
+   finish the current batch before applying a fork).
+4. **Checkpointing & Telemetry** – Checkpoint mixins capture weights/optimizer
+   state, register artifacts, and maintain rotation policies. Metrics utilities
+   normalize scalar/tensor outputs before shipping them off to the dashboard.
+5. **Completion** – Sessions either terminate after `fit` or remain alive for
+   follow-up commands (e.g., further forks). External sessions hand control back
+   to the framework once the delegate signals completion.
+
+Fork/Merge Lifecycle
+--------------------
+1. `RunManagementMixin` receives a fork request with filters (dataset subset,
+   metric thresholds, etc.).
+2. The mixin asks `CheckpointMixin` for the latest state, optionally runs SWA or
+   Fisher merging to blend parent/child weights, and spawns a new run ID without
+   restarting the Python process.
+3. The deterministic sampler utilities ensure the new run can replay the same
+   batches or adopt a new sampling policy depending on the command payload.
+4. When a merge is requested, the mixin resolves target checkpoints, performs the
+   combination strategy, and updates the active session before resuming training.
+5. Session code already understands loss-driven selection payloads (e.g.,
+   “quantile” requests for the hardest 15% of samples or k-means clusters),
+   although the current dashboard webview does not expose UI controls for those
+   filters yet.
+
+Extending the System
+--------------------
+- **New Frameworks** – Implement a `FrameworkDelegate` that mirrors the hooks of
+  the target framework, then wrap it in a helper like `attach_lightning` to spin
+  up an `OnTheFlyExternalSession`.
+- **New Telemetry or Commands** – Add a mixin that registers command handlers or
+  telemetry emitters, plug it into `OnTheFlySessionBase`, and expose the result
+  through the dashboard schema.
+- **Custom Checkpoint Policies** – Extend `CheckpointMixin` or provide a new
+  strategy in `ckpt_utils.py`/`merging.py`; all sessions will immediately benefit
+  thanks to the shared base class.
+
+This compartmentalized layout keeps the data/control plane stable while enabling
+multiple front-ends (native PyTorch loops, Lightning, future frameworks) to share
+telemetry, checkpoints, and interactive workflows without reinventing the core.

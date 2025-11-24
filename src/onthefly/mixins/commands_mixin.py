@@ -9,7 +9,7 @@ import torch
 
 from ..control import CommandRouter
 from ..ckpt_utils import _parse_step
-from ..data_explorer import export_subset_table, compute_per_sample_losses
+from ..data_explorer import export_subset_table
 
 
 def _device_type_from(device: Union[str, torch.device]) -> str:
@@ -207,24 +207,14 @@ class CommandsMixin:
 
         # ----------------------------- lifecycle --------------------------------
         @self._router.on("pause")
-        def _pause(_payload):
-            self._paused = True
-            # self._halt_evt.set()
-            self._pause_gen += 1
+        def _pause(payload):
+            reason = str(payload.get("reason", "manual") or "manual")
+            return self.console_action.pause(reason=reason)
 
-            path = self._save_ring_checkpoint()
-            self._pause_ckpt_path = path
-
-            self._event({"type": "paused", "step": self.step})
-            return {"status": "paused", "step": self.step, "ckpt": path}
-        
         @self._router.on("resume")
         def _resume(_payload):
-            self._paused = False
+            return self.console_action.resume()
 
-            self._event({"type": "resumed", "step": self.step})
-            return {"status": "resumed", "step": self.step}
-        
         @self._router.on("clean_disk")
         def _clean_disk(payload):
             root = getattr(self.cfg, "save_dir", None)
@@ -282,6 +272,20 @@ class CommandsMixin:
                     "text": f"clean_disk error: {e}",
                 })
                 return {"ok": False, "error": str(e), "root": root}
+
+        @self._router.on("reset_session")
+        def _reset_session(payload):
+            reason = str(payload.get("reason", "manual") or "manual")
+            run_hint = payload.get("run_name")
+            dedupe = bool(payload.get("dedupe", True))
+            self.console_action.pause(reason=reason)
+            info = self._reset_session_state(run_hint=run_hint, dedupe=dedupe)
+            self._event({
+                "type": "log",
+                "level": "info",
+                "text": f"[reset] session cleared; '{info['run_id']}' ready for resume.",
+            })
+            return {"ok": True, **info}
         
         @self._router.on("stop")
         def _stop(_payload):
@@ -327,53 +331,27 @@ class CommandsMixin:
             # Delegate to the shared helper on TrainMixin
             return self._run_labeled_test_and_ckpt(label=label, source="manual")
         
+        @self._router.on("test")
+        def _test(payload):
+            payload = payload or {}
+            label = str(payload.get("label", "manual") or "manual").strip() or "manual"
+            source = str(payload.get("source", "manual") or "manual").strip() or "manual"
+            return self.console_action.test(label=label, source=source)
+        
         # ----------------------------- simple fork/merge ------------------------
         @self._router.on("fork")
         def _fork(payload):
-            # Enforce the contract: fork only when paused
-            if not self._paused:
-                self._event({"type":"log","level":"warn","text":"Fork requires paused session."})
-                return {"new_run": None, "subset_indices": []}
-            pd = dict(payload or {})
-            mode = str(pd.get("mode", "manual")).lower()
-            allow = bool(pd.get("allow_when_paused", (mode == "manual")))
-            if (self._paused or self._halt_evt.is_set()) and not allow:
-                self._event({"type":"log","level":"info","text":"Fork request ignored: session is paused."})
-                return {"new_run": None, "subset_indices": []}
-            pd["mode"] = mode
-            pd["allow_when_paused"] = allow
-            return self._do_fork(pd)
+            return self.console_action.fork(payload or {})
 
         @self._router.on("merge")
         def _merge(payload):
-            parents = list(payload.get("parents") or [])
-            strategy = payload.get("strategy", "swa")
-            paths = list(payload.get("paths") or [])
-            if not parents and not paths:
-                raise RuntimeError("merge requires either 'parents' or explicit 'paths'")
-            if parents and not paths:
-                ckpts = []
-                for run_name in parents:
-                    p = self._latest_ckpt_for_run(run_name)
-                    if not p:
-                        raise RuntimeError(f"no checkpoint found for parent run: {run_name}")
-                    ckpts.append(p)
-                paths = ckpts
-
-            new_name = str(payload["new_name"]) if payload.get("new_name") else None
-
-            new_id = self._merge_from_checkpoints(
-                paths,
-                strategy=strategy,
-                parents=parents,
-                new_name=new_name,
+            payload = payload or {}
+            return self.console_action.merge(
+                parents=payload.get("parents"),
+                strategy=payload.get("strategy"),
+                paths=payload.get("paths"),
+                new_name=payload.get("new_name"),
             )
-
-            self._rebind_train_loader_to_subset(None)
-            self._active_subset_indices = None
-            self._save_ring_checkpoint()
-
-            return {"new_run": new_id, "parents": parents or None, "strategy": strategy, "paths": paths}
 
         # ----------------------------- reports/exports --------------------------
         @self._router.on("propose_subsets")
@@ -387,7 +365,6 @@ class CommandsMixin:
             if not self._paused:
                 raise RuntimeError("Model must be paused before generating report")
 
-            import numpy as np
             owner = str(_payload.get("owner_run_id") or _payload.get("runId") or self.cfg.run_name)
             subset = _payload.get("subset_indices") or None
             subset_on = _payload.get("subset_on") or "val"
@@ -406,23 +383,12 @@ class CommandsMixin:
                 cf = getattr(self.val_loader, 'collate_fn', None)
                 note = "validation subset" if subset else "validation split"
 
-            # Save + set deterministic RNG
-            cpu_state = torch.random.get_rng_state()
-            np_state = np.random.get_state()
-            py_state = random.getstate()
-            cuda_state = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
-            prev_bench = torch.backends.cudnn.benchmark
-            prev_det = torch.backends.cudnn.deterministic
-            torch.backends.cudnn.benchmark = False
-            torch.backends.cudnn.deterministic = True
-            random.seed(1337); np.random.seed(1337); torch.manual_seed(1337)
-            if torch.cuda.is_available(): torch.cuda.manual_seed_all(1337)
-
             current_run = self.cfg.run_name
             owner_ckpt = None
             if owner == current_run:
                 if getattr(self, "_pause_ckpt_path", None) and os.path.exists(self._pause_ckpt_path):
                     owner_ckpt = self._pause_ckpt_path
+                    print("[otf] using self._pause_ckpt_path")
                 else:
                     expected = os.path.join(
                         self.cfg.save_dir, f"{self.cfg.project}__{owner}__step{self.step}.pt"
@@ -435,60 +401,29 @@ class CommandsMixin:
                 raise RuntimeError(f"No checkpoint found for requested run '{owner}'.")
             owner_step = _parse_step(owner_ckpt)
 
+            report_model = None
             try:
-                # Build a fresh model on the report device and load the owner checkpoint
-                report_model = self._model_factory().to(self.device)
-                owner_blob = torch.load(owner_ckpt, map_location=self.device, weights_only=False)
-                report_model.load_state_dict(owner_blob["model"], strict=True)
-
-                # Choose a loss module
-                criterion = None
-                if isinstance(getattr(self, "raw_loss_fn", None), torch.nn.Module):
-                    criterion = self.raw_loss_fn
-                elif isinstance(getattr(self, "criterion", None), torch.nn.Module):
-                    criterion = self.criterion
-                elif isinstance(getattr(self, "_criterion", None), torch.nn.Module):
-                    criterion = self._criterion
-                else:
-                    fn = getattr(self, "raw_loss_fn", None) or getattr(self, "loss_fn", None)
-                    if callable(fn):
-                        class _CallableLoss(torch.nn.Module):
-                            def __init__(self, f): super().__init__(); self.f = f
-                            def forward(self, logits, target): return self.f(logits, target)
-                        criterion = _CallableLoss(fn)
-                    else:
-                        raise RuntimeError("No usable loss found. Expected an nn.Module at self.raw_loss_fn or self.criterion.")
-
-                with torch.inference_mode():
-                    # Compute per-sample losses on the selected split
-                    losses, sample_indices = compute_per_sample_losses(
-                        model=report_model,
-                        dataset=ds,
-                        collate_fn=cf,
-                        criterion=criterion,
-                        device=self.device,
-                        batch_size=bs,
-                        indices=(subset or None),
-                        mirror_train_semantics=False,
-                        amp_enabled=_device_type_from(self.device) in {"cuda", "mps"},
-                        should_stop=None,
-                    )
+                report_model = self._model_from_checkpoint(owner_ckpt)
+                losses, sample_indices = self._compute_subset_losses(
+                    model=report_model,
+                    dataset=ds,
+                    collate_fn=cf,
+                    batch_size=bs,
+                    indices=(subset or None),
+                    mirror_train_semantics=False,
+                    amp_enabled=_device_type_from(self.device) in {"cuda", "mps"},
+                    deterministic_seed=1337,
+                )
                 losses = _jsonable_list(losses)
                 sample_indices = _jsonable_list(sample_indices)
 
             finally:
-                # Restore RNG + cudnn knobs
-                torch.random.set_rng_state(cpu_state)
-                np.random.set_state(np_state)
-                random.setstate(py_state)
-                if cuda_state is not None: torch.cuda.set_rng_state_all(cuda_state)
-                torch.backends.cudnn.benchmark = prev_bench
-                torch.backends.cudnn.deterministic = prev_det
-                try: del report_model
-                except Exception: pass
+                with contextlib.suppress(Exception):
+                    if report_model is not None:
+                        del report_model
                 if torch.cuda.is_available():
-                    try: torch.cuda.empty_cache()
-                    except Exception: pass
+                    with contextlib.suppress(Exception):
+                        torch.cuda.empty_cache()
 
             return {
                 "losses": losses,
@@ -1295,6 +1230,12 @@ class CommandsMixin:
 
             # Load checkpoint if specified
             ck_info = _maybe_load_init_ckpt(payload)
+            # Ensure pause checkpoint reflects the newly bound run so report
+            # generation does not reuse the previous run's pause artifact.
+            if ck_info.get("loaded"):
+                self._pause_ckpt_path = ck_info.get("path")
+            else:
+                self._pause_ckpt_path = None
 
             self._event({"type": "log", "level": "info",
                         "text": f"Switched to run '{self.cfg.run_name}' (paused). ckpt_loaded={ck_info['loaded']}"})

@@ -1,8 +1,8 @@
 # OnTheFly
 
-**OnTheFly** lets you steer PyTorch training runs live from VS Code — pause, inspect, fork, merge, and export without ever leaving your IDE or sending data to the cloud.
+**OnTheFly** brings continuous model development, logging, experiment tracking, and mid-training actions into one place: your IDE. OnTheFly is a VS-Code training console with live dashboard controls, supporting pausing and resuming, importing and exporting sessions, customizable Adaptive Boosting (forking, merging), and training diagnostics.
 
-With OnTheFly, now you can make incremental, interactive progress on model development. When you start a long run, you can now see and do more during training with OnTheFly. Detect subtle faults in your model before training goes haywire. 
+With OnTheFly, you can make incremental, interactive progress on model development. When you start a long run, you can now see and do more during training with OnTheFly. Detect subtle faults in your model before training goes haywire. 
 
 Being able to test, save a model, and continue training seamlessly is another big time saver. Many engineers quit training after seeing validation error increase when the model fits the training data, but double descent is a common theme in some setups.
 
@@ -21,7 +21,7 @@ This shifts training from a fixed, single-pass run into an incremental process t
 
 
 > [!IMPORTANT]
-> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. Currently, using another trainer at the same time (such as Lightning AI) is not possible, but OnTheFly's endgoal is to support wrapping around other trainers to support a univeral training dashboard.
+> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. Currently, the console only supports PyTorch modules and Lightning trainers, in addition to our native trainer.
 ---
 
 ## When should you use OnTheFly?
@@ -58,7 +58,7 @@ pip install onthefly-ai
 4. The dashboard status badge turns green once a Trainer connects; metrics/controls stream automatically while the tab is open. An idle Trainer does not mean the dashboard lost connection, it just means your model is not currently training.
 
 
-### Quickstart
+### Quickstart with OnTheFlyTrainer
 
 ```python
 import torch, torch.nn as nn
@@ -96,18 +96,166 @@ trainer.fit(
 )
 ```
 
+### Quickstart with Lightning Trainer
+
+```python
+
+import os
+import sys
+from pathlib import Path
+
+import lightning as L
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+
+from onthefly import attach_lightning
+
+
+class LitClassifier(L.LightningModule):
+    def __init__(self):
+        super().__init__()
+        self.net = nn.Sequential(nn.Linear(32, 64), nn.ReLU(), nn.Linear(64, 2))
+        self.loss = nn.CrossEntropyLoss()
+
+    def forward(self, x):
+        return self.net(x)
+
+    def training_step(self, batch, batch_idx):
+        x, y = batch
+        logits = self(x)
+        loss = self.loss(logits, y)
+        self.log("loss", loss, prog_bar=True)
+        return loss
+
+    def configure_optimizers(self):
+        return torch.optim.Adam(self.parameters(), lr=1e-3)
+
+
+def main():
+    # -------------------------------
+    # Toy data: train / val / test
+    # -------------------------------
+    x = torch.randn(2048, 32)
+    y = (x[:, :4].sum(dim=1) > 0).long()
+
+    ds = TensorDataset(x, y)
+    train_ds, val_ds, test_ds = torch.utils.data.random_split(
+        ds, [1536, 256, 256], generator=torch.Generator().manual_seed(0)
+    )
+
+    train_loader = DataLoader(train_ds, batch_size=64, shuffle=True)
+    val_loader = DataLoader(val_ds, batch_size=128, shuffle=False)
+    test_loader = DataLoader(test_ds, batch_size=128, shuffle=False)
+
+    model = LitClassifier()
+    trainer = L.Trainer(max_epochs=5, callbacks=[])
+
+    # ----------------------------------------------
+    # IMPORTANT CONTRACT for attach_lightning:
+    #   - loss function be callable as loss_fn(logits, targets)
+    #     (this is what auto-test uses)
+    # ----------------------------------------------
+    criterion = nn.CrossEntropyLoss()
+
+    def otf_loss_fn(*args):
+        """
+        Dual-mode loss function:
+
+        1) Lightning / auto-test path:
+               loss = otf_loss_fn(logits, targets)
+
+        2) Native OnTheFly-style path:
+               loss = otf_loss_fn(batch, model, fwd_out)
+
+           where:
+               batch   = (x, y)
+               model   = nn.Module
+               fwd_out = model(x) or None
+        """
+        if len(args) == 2:
+            # Called as (logits, targets) -> standard criterion
+            logits, y = args
+            return criterion(logits, y)
+
+        if len(args) == 3:
+            # Called as (batch, model, fwd_out) -> native-style helper
+            batch, model, fwd_out = args
+            x_b, y_b = batch
+            logits = fwd_out if fwd_out is not None else model(x_b)
+            return criterion(logits, y_b)
+
+        raise TypeError(
+            f"otf_loss_fn expected either (logits, targets) or "
+            f"(batch, model, fwd_out), but got {len(args)} positional args."
+        )
+
+    delegate = attach_lightning(
+        trainer=trainer,
+        model=model,
+        datamodule=None,
+        project="demo",
+        run_name="lightning-baseline",
+        loss_fn=otf_loss_fn,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        test_loader=test_loader,
+        do_test_after=True,
+    )
+
+    trainer.fit(model, train_loader)
+
+
+if __name__ == "__main__":
+    main()
+
+```
  -Run your script exactly as you normally would (`python train.py` or `python -m training`); if the script instantiates a `Trainer`, the VS Code dashboard will attach automatically (it listens on `localhost:47621`) whenever a dashboard tab is open.
  - Once you run your script, you will see this in your terminal: [onthefly] dashboard connected on tcp://127.0.0.1:47621. This means that even if your dashboard wasn't open yet, you can still open the dashboard from the Command Palette (Cmd+Shift+P) and you will see the live training.
  -Instantiating this Trainer will wrap around your training, just like tools like Lightning and Accelerate do. Now you can perform actions on your model from the dashboard.
  -To exit the Trainer, use Ctrl+C from the terminal to close the dashboard connection.
 
-`Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely.
-
+`Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely. When `do_test_after=True`, the automatic evaluation runs once the stop condition hits, and then the trainer keeps streaming so you can continue interacting with the run from VS Code.
 
 > **Sessions & storage**
 >
 > Every session is **ephemeral** in storage: when a new session begins, the previous session’s storage is cleaned up.
 > Exporting a session is equivalent to saving a session.
+
+---
+
+### Lightning integration
+
+OnTheFly can also attach to an existing **PyTorch Lightning** training loop. Install the optional extra:
+
+```bash
+pip install "onthefly_ai[lightning]"
+```
+
+Then wrap your Lightning `Trainer` before calling `fit`:
+
+```python
+import lightning as L
+from onthefly.wrappers.lightning import attach_lightning
+
+model = LitClassifier()
+trainer = L.Trainer(max_epochs=5, callbacks=[])
+
+attach_lightning(
+    trainer=trainer,
+    model=model,
+    datamodule=data_module,
+    project="mnist-demo",
+    run_name="lightning-baseline",
+    loss_fn=model.loss,
+)
+
+trainer.fit(model, datamodule=data_module)
+```
+
+Provide your Lightning loss module (and optional explicit dataloaders) so OnTheFly can compute per-sample losses for reports, subsets, forks, and merges.
+
+The dashboard will stream `trainStep`, epoch logs, pause/resume events, and checkpoint notifications exactly like the native OnTheFly trainer. Generate-report, fork, and merge workflows operate on the Lightning model/dataloaders you supplied, so you can pause from VS Code, inspect losses, fork subsets, merge checkpoints, and resume the Lightning loop without leaving the IDE.
 
 ---
 
@@ -130,8 +278,9 @@ trainer.fit(
 - Portable sessions: exported sessions include the final model and can be re-imported to run tests, reports, or further training.
 
 **Training backend**
-- Mirrors training in OnTheFly’s backend for any `torch.nn.Module` (including custom ones) and standard `DataLoader`s.
-- Deterministic distributed runs, with a surfaced determinism “health check” for monitoring.
+- OnTheFly owns training process for any `torch.nn.Module` (including custom ones) and standard `DataLoader`s.
+- Actions like pauses, forks, resumes, and loaded sessions are deterministic, with a surfaced determinism “health check” for monitoring.
+- Supports Automatically Mixed Precision (AMP) training.
 - Seamless continuation of training after tests, whether they were triggered automatically or manually.
 
 ---

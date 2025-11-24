@@ -205,6 +205,7 @@ let resumeInFlight = false;
 let needDiskCleanOnNextTrainer = true;
 let lastExtensionContext = null;
 let hasTrainerConnectedOnce = false;
+let pendingResumeAwaitingFirstRun = false;
 /* ============================ Activate / Deactivate ============================ */
 async function activate(context) {
     lastExtensionContext = context;
@@ -224,8 +225,29 @@ function deactivate() {
     catch { }
 }
 async function hardResetSession(context, opts) {
+    let trainerSeed = null;
+    const hadTrainer = trainerActive();
+    if (hadTrainer && opts?.fromUser) {
+        try {
+            const res = await sendReq('reset_session', { reason: 'manual' }, 60000);
+            trainerSeed = res || null;
+            if (trainerSeed?.run_id) {
+                post({
+                    type: 'log',
+                    text: `[reset] Trainer cleared. Next run "${trainerSeed.run_id}" waits for resume.`,
+                });
+            }
+        }
+        catch (e) {
+            post({
+                type: 'log',
+                level: 'warn',
+                text: `[reset] Backend reset skipped or failed: ${e?.message || String(e)}`,
+            });
+        }
+    }
     // 0) If a backend is alive, ask it to clean its save_dir now (best effort).
-    if (trainerSocket && !trainerSocket.destroyed) {
+    if (trainerActive()) {
         try {
             const res = await sendReq('clean_disk', { scope: 'all' }, 60000);
             post({
@@ -255,6 +277,7 @@ async function hardResetSession(context, opts) {
     runActivityState = null;
     pauseInFlight = false;
     resumeInFlight = false;
+    pendingResumeAwaitingFirstRun = false;
     // 4) Reset storage
     try {
         (0, storage_1.closeStorage)({ retainFile: false });
@@ -264,7 +287,29 @@ async function hardResetSession(context, opts) {
     needDiskCleanOnNextTrainer = true;
     // 5) Tell webview, if it exists
     post({ type: 'resetOk' });
-    post({ type: 'runs', rows: [] });
+    if (trainerSeed?.run_id) {
+        const runId = String(trainerSeed.run_id);
+        const friendly = (trainerSeed.display_name && String(trainerSeed.display_name)) || runId;
+        const projectName = (trainerSeed.project && String(trainerSeed.project)) || 'default';
+        (0, storage_1.insertRun)(runId, projectName, friendly, null);
+        seenRuns.add(runId);
+        currentRunId = runId;
+        modelNavSelectedRunId = runId;
+        nativeRunsThisSession.add(runId);
+        if (trainerSeed.session_id) {
+            currentSessionId = String(trainerSeed.session_id);
+            postCurrentSession();
+        }
+        post({
+            type: 'newRun',
+            run_id: runId,
+            parents: [],
+            meta: { display_name: friendly, kind: 'reset' },
+            session_id: currentSessionId || null,
+        });
+        post({ type: 'modelNav.select', runId });
+    }
+    post({ type: 'runs', rows: (0, storage_1.listRuns)() });
     postStatus(false);
     if (opts?.fromUser) {
         vscode.window.setStatusBarMessage('Onthefly: session reset', 2000);
@@ -506,6 +551,48 @@ function postStatus(connected) {
 function setRunActivity(state) {
     runActivityState = state;
     postStatus(trainerActive());
+}
+async function resumeTrainerOn(target) {
+    if (resumeInFlight) {
+        return;
+    }
+    resumeInFlight = true;
+    try {
+        await ensureTrainerOnRun(target);
+        sendCtl({ cmd: 'resume' });
+        setRunActivity('running');
+    }
+    catch (e) {
+        postErr(e);
+        postStatus(false);
+    }
+    finally {
+        resumeInFlight = false;
+    }
+}
+async function resumeAfterReset() {
+    if (resumeInFlight) {
+        return;
+    }
+    resumeInFlight = true;
+    pendingResumeAwaitingFirstRun = true;
+    try {
+        await startRun();
+        pendingResumeAwaitingFirstRun = false;
+        if (!trainerSocket || trainerSocket.destroyed) {
+            throw new Error('Trainer disconnected before resume.');
+        }
+        sendCtl({ cmd: 'resume' });
+        setRunActivity('running');
+    }
+    catch (e) {
+        postErr(e);
+        throw e;
+    }
+    finally {
+        pendingResumeAwaitingFirstRun = false;
+        resumeInFlight = false;
+    }
 }
 function postCurrentSession() {
     if (currentSessionId)
@@ -812,22 +899,24 @@ async function onMessage(context, m) {
                 modelNavSelectedRunId = requested;
             const target = requested || modelNavSelectedRunId || currentRunId || null;
             if (!target) {
-                post({ type: 'error', text: '[resume] No run selected.' });
+                try {
+                    const rows = (0, storage_1.listRuns)();
+                    if (!rows.length) {
+                        pendingResumeAwaitingFirstRun = true;
+                        post({ type: 'log', text: '[resume] No runs exist yet. Waiting for a fresh trainer session…' });
+                        await resumeAfterReset();
+                    }
+                    else {
+                        post({ type: 'error', text: '[resume] No run selected.' });
+                    }
+                }
+                catch (e) {
+                    pendingResumeAwaitingFirstRun = false;
+                    postErr(e);
+                }
                 break;
             }
-            resumeInFlight = true;
-            try {
-                await ensureTrainerOnRun(target); // <<< switch-and-seed
-                sendCtl({ cmd: 'resume' });
-                setRunActivity('running');
-            }
-            catch (e) {
-                postErr(e);
-                postStatus(false);
-            }
-            finally {
-                resumeInFlight = false;
-            }
+            await resumeTrainerOn(target);
             break;
         }
         case 'testNow': {

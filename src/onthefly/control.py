@@ -10,7 +10,7 @@ import threading
 import time
 import traceback
 import queue
-from typing import Any, Dict, Optional, Callable
+from typing import Any, Dict, Optional, Callable, Protocol
 from collections.abc import Mapping, Sequence
 
 JsonDict = Dict[str, Any]
@@ -391,3 +391,196 @@ def send_error(req_id: str, message: str, *, detail: str | None = None) -> None:
     if detail:
         payload["detail"] = detail
     _writer.enqueue(payload, priority=True)
+
+
+class PauseGate:
+    """
+    Lightweight gate that trainer loops can poll to know when special requests are inflight.
+    """
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._resume = threading.Event()
+        self._resume.set()
+        self._request: dict[str, Any] | None = None
+
+    def request(self, action: dict[str, Any]) -> None:
+        with self._lock:
+            self._request = dict(action or {})
+            self._resume.clear()
+
+    def should_block(self) -> bool:
+        with self._lock:
+            return self._request is not None
+
+    def current_request(self) -> dict[str, Any] | None:
+        with self._lock:
+            return dict(self._request) if self._request is not None else None
+
+    def complete_request(self) -> None:
+        with self._lock:
+            self._request = None
+            self._resume.set()
+
+    def wait_until_resumed(self) -> None:
+        self._resume.wait()
+
+
+class ControlDelegate(Protocol):
+    def on_pause(self, req: dict[str, Any]) -> None:
+        ...
+
+    def on_resume(self) -> None:
+        ...
+
+    def on_fork(self, payload: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+    def on_merge(
+        self,
+        *,
+        parents: list[str] | None,
+        strategy: str | None,
+        paths: list[str] | None,
+        new_name: str | None,
+    ) -> dict[str, Any]:
+        ...
+
+    def on_test(self, label: str, source: str) -> dict[str, Any]:
+        ...
+
+
+class OnTheFlyTrainerDelegate(ControlDelegate):
+    def __init__(self, session: Any, gate: PauseGate | None):
+        self._session = session
+        self._gate = gate
+
+    def on_pause(self, req: dict[str, Any]) -> None:
+        self._session._paused = True
+
+    def on_resume(self) -> None:
+        self._session._paused = False
+
+    def on_fork(self, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._session._do_fork(payload or {})
+
+    def on_merge(
+        self,
+        *,
+        parents: list[str] | None,
+        strategy: str | None,
+        paths: list[str] | None,
+        new_name: str | None,
+    ) -> dict[str, Any]:
+        parents_list = [str(p) for p in (parents or []) if p]
+        strategy_val = str(strategy).lower() if strategy else "swa"
+        paths_list = [str(p) for p in (paths or []) if p]
+        if not parents_list and not paths_list:
+            raise RuntimeError("merge requires either 'parents' or explicit 'paths'")
+        if parents_list and not paths_list:
+            ckpts: list[str] = []
+            for run_id in parents_list:
+                ckpt = self._session._latest_ckpt_for_run(run_id)
+                if not ckpt:
+                    raise RuntimeError(f"no checkpoint found for parent run: {run_id}")
+                ckpts.append(ckpt)
+            paths_list = ckpts
+
+        merged_name = self._session._merge_from_checkpoints(
+            paths_list,
+            strategy=strategy_val,
+            parents=parents_list,
+            new_name=new_name,
+        )
+
+        self._session._rebind_train_loader_to_subset(None)
+        self._session._active_subset_indices = None
+        self._session._save_ring_checkpoint()
+
+        return {
+            "new_run": merged_name,
+            "parents": parents_list or None,
+            "strategy": strategy_val,
+            "paths": paths_list,
+        }
+
+    def on_test(self, label: str, source: str) -> dict[str, Any]:
+        return self._session._run_labeled_test_and_ckpt(label=label, source=source)
+
+
+class ConsoleAction:
+    def __init__(self, session: Any, delegate: ControlDelegate, gate: PauseGate | None):
+        self.session = session
+        self.delegate = delegate
+        self.gate = gate
+
+    def _enter_pause_window(self, action: dict[str, Any]) -> bool:
+        if getattr(self.session, "_paused", False):
+            return False
+        if self.gate:
+            self.gate.request(action)
+        self.delegate.on_pause(action)
+        self.session._pause_gen = int(getattr(self.session, "_pause_gen", 0) or 0) + 1
+        ckpt_path = self.session._save_ring_checkpoint()
+        self.session._pause_ckpt_path = ckpt_path
+        evt: dict[str, Any] = {"type": "paused", "step": int(getattr(self.session, "step", 0)), "request": action}
+        if ckpt_path:
+            evt["ckpt"] = ckpt_path
+        self.session._event(evt)
+        return True
+
+    def _exit_pause_window(self) -> bool:
+        if not getattr(self.session, "_paused", False):
+            return False
+        self.delegate.on_resume()
+        if self.gate:
+            self.gate.complete_request()
+        self.session._pause_ckpt_path = None
+        self.session._event({"type": "resumed", "step": int(getattr(self.session, "step", 0))})
+        return True
+
+    def _with_paused_window(self, action: dict[str, Any], handler: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        entered = self._enter_pause_window(action)
+        try:
+            return handler()
+        finally:
+            if entered:
+                self._exit_pause_window()
+
+    def pause(self, reason: str = "manual") -> dict[str, Any]:
+        action = {"action": "pause", "reason": reason}
+        self._enter_pause_window(action)
+        return {
+            "status": "paused",
+            "step": int(getattr(self.session, "step", 0)),
+            "ckpt": getattr(self.session, "_pause_ckpt_path", None),
+        }
+
+    def resume(self) -> dict[str, Any]:
+        self._exit_pause_window()
+        return {"status": "resumed", "step": int(getattr(self.session, "step", 0))}
+
+    def fork(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        action = {"action": "fork", "payload": dict(payload or {})}
+        return self._with_paused_window(action, lambda: self.delegate.on_fork(payload or {}))
+
+    def merge(
+        self,
+        parents: list[str] | None = None,
+        strategy: str | None = None,
+        paths: list[str] | None = None,
+        new_name: str | None = None,
+    ) -> dict[str, Any]:
+        action = {"action": "merge", "parents": parents, "strategy": strategy, "paths": paths, "new_name": new_name}
+        return self._with_paused_window(
+            action,
+            lambda: self.delegate.on_merge(
+                parents=parents,
+                strategy=strategy,
+                paths=paths,
+                new_name=new_name,
+            ),
+        )
+
+    def test(self, label: str, source: str) -> dict[str, Any]:
+        action = {"action": "test", "label": label, "source": source}
+        return self._with_paused_window(action, lambda: self.delegate.on_test(label=label, source=source))

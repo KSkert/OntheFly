@@ -10,8 +10,6 @@ const btnStart = byId('btnStart');
 const btnStop = byId('btnStop');
 const btnPause = byId('btnPause');
 const btnResume = byId('btnResume');
-const btnRewind = byId('btnRewind');
-const rewindSteps = byId('rewindSteps');
 const btnSaveCkpt = byId('btnSaveCkpt');
 const btnFork = byId('btnFork');
 const btnMerge = byId('btnMerge');
@@ -32,7 +30,6 @@ btnStart.onclick = () => send('start', { mode: modeSel.value });
 btnStop.onclick = () => send('stop');
 btnPause.onclick = () => send('pause');
 btnResume.onclick = () => send('resume');
-btnRewind.onclick = () => send('rewind', { steps: Number(rewindSteps.value || 0) });
 btnSaveCkpt.onclick = () => send('saveCkpt');
 btnFork.onclick = () => send('fork', { payload: { hparams: { lr_mul: 0.5 } } });
 btnMerge.onclick = async () => {

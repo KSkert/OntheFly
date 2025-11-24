@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
-from .session import OnTheFlySession
+from .session.native import OnTheFlySession
 from .control import set_channel
 from .dashboard_channel import SocketChannel
 

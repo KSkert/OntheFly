@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, time, math
+import os, time, math, contextlib
 from typing import Dict, Any, Optional
 import torch
 
@@ -11,7 +11,6 @@ from ..runtime_metrics import (
     estimate_batch_size as _estimate_batch_size,
     weight_norm as _weight_norm,
 )
-from ..control import serve_commands
 
 
 def _metric_float(val):
@@ -54,60 +53,6 @@ class TrainMixin:
     Keeps the outer 'OnTheFlySession' thin while preserving method names.
     """
 
-
-    def _safe_load_state(self, blob: Dict[str, Any]):
-        if "model" in blob:
-            self.model.load_state_dict(blob["model"])
-        if "optimizer" in blob and self.optimizer is not None:
-            try: self.optimizer.load_state_dict(blob["optimizer"])
-            except Exception: pass
-        if "scheduler" in blob and self.scheduler is not None:
-            try: self.scheduler.load_state_dict(blob["scheduler"])
-            except Exception: pass
-        if "scaler" in blob and hasattr(self, "scaler") and self.scaler is not None:
-            try: self.scaler.load_state_dict(blob["scaler"])
-            except Exception: pass
-        if "epoch" in blob:  # optional
-            try: self.epoch = int(blob["epoch"])
-            except Exception: pass
-        if "last_val_loss" in blob:
-            try: self._last_val_loss = float(blob["last_val_loss"])
-            except Exception: pass
-
-    def _load_checkpoint_into_state(self, path: str) -> int:
-        """
-        Load a Seamless checkpoint. Prefer the safe weights-only path first
-        (PyTorch >=2.6 default). If that fails or isn't supported, fall back
-        to a full, trusted load. Returns the resume step (default 0).
-        """
-        import inspect
-        blob = None
-
-        # Does this torch.load accept weights_only?
-        _supports_weights_only = 'weights_only' in inspect.signature(torch.load).parameters
-
-        try:
-            if _supports_weights_only:
-                # Try safe path first (may raise WeightsOnly errors on older objects)
-                blob = torch.load(path, map_location=self.device, weights_only=True)
-            else:
-                # Older torch: no weights_only kw → just try normal load
-                blob = torch.load(path, map_location=self.device)
-        except Exception as e_safe:
-            # Fall back to a full unpickle. Only do this for your own, trusted files.
-            if _supports_weights_only:
-                blob = torch.load(path, map_location=self.device, weights_only=False)
-            else:
-                blob = torch.load(path, map_location=self.device)
-
-        # Accept both raw dicts and SnapshotManager payloads
-        state = blob.get("state", blob) if isinstance(blob, dict) else blob
-        self._safe_load_state(state)
-
-        # Step may be stored under different keys; normalize
-        return int(state.get("step", state.get("global_step", 0)))
-
-
     def _sync_device(self):
         _sync_device_by_name(self.device)
 
@@ -142,7 +87,7 @@ class TrainMixin:
         acc = _batch_accuracy(logits, y)
         lr = lr_from_optimizer(self.optimizer)
         payload = {"loss": loss.detach(), "grad_norm": grad_norm, "lr": lr}
-        
+
         if acc is not None:
             payload["accuracy"] = acc
         return payload
@@ -164,34 +109,13 @@ class TrainMixin:
                 out = self._validation_step_fn(batch, self._state(train=False))
                 losses.append(float(out["val_loss"]))
         self.model.train()
-        avg = sum(losses)/max(1, len(losses))
+        avg = sum(losses) / max(1, len(losses))
 
         return avg
 
-    def _run_test(self) -> float:
-        if self.test_loader is None:
-            return float("nan")
-        self.model.eval()
-        losses = []
-        with torch.no_grad():
-            self._event({"type":"log","level":"info","phase":"test","text":"[test] starting evaluation pass"})
-            tstep = 0
-            for batch in self.test_loader:
-                x, y = batch[0].to(self.device), batch[1].to(self.device)
-                logits = self.model(x)
-                loss_t = _to_scalar_loss(self.loss_fn(logits, y), device=self.device).detach()
-                l = float(loss_t)
-                tstep += 1
-                self._emit({"type":"testStep","step":tstep,"loss":l})
-                self._event({"type":"log","level":"info","phase":"test","text":f"step {tstep}: test_loss = {l:.6f}"})
-                losses.append(l)
-        avg = (sum(losses) / max(1, len(losses)))
-        self._event({"type":"log","level":"info","phase":"test","text":f"test_avg_loss = {avg:.6f}"})
-        self._event({"type":"log","level":"info","phase":"test","text":"[test] evaluation pass complete"})
-        self.model.train()
-        return avg
-
-    def _runtime_metric_snapshot(self, metrics: Dict[str, Any], batch, step_duration: float, scheduler=None) -> Dict[str, Optional[float]]:
+    def _runtime_metric_snapshot(
+        self, metrics: Dict[str, Any], batch, step_duration: float, scheduler=None
+    ) -> Dict[str, Optional[float]]:
         snapshot: Dict[str, Optional[float]] = {}
 
         accuracy = _metric_float(metrics.get("accuracy"))
@@ -257,9 +181,6 @@ class TrainMixin:
 
         return snapshot
 
-    def _maybe_handle_commands(self):
-        serve_commands(self._bus, self._router, poll_sec=0.0)
-
     def _validation_frequency(self) -> int:
         freq = getattr(self, "_val_every_n_epochs", None)
         try:
@@ -286,6 +207,11 @@ class TrainMixin:
         epoch_idx = int(getattr(self, "epoch", 0) or 0)
         return ((epoch_idx + 1) % freq) == 0
 
+    def _maybe_pause_gate(self):
+        gate = getattr(self, "console_gate", None)
+        if gate and gate.should_block():
+            gate.wait_until_resumed()
+
     # ---------------- public API ----------------
     def training_step(self, fn):
         self._training_step_fn = fn
@@ -298,14 +224,14 @@ class TrainMixin:
     def embedding_hook(self, fn):
         self._embedding_hook_fn = fn
         return fn
-    
 
     def serve(self, max_steps: Optional[int] = None, max_epochs: Optional[int] = None, do_test_after: bool = False):
         hit_criterion = False
+        auto_test_ran = False
 
         # --- 1) Extension-assisted resume (imported bundles only) ---
-        resume_run    = os.getenv("ONTHEFLY_RESUME_RUN_ID") or None
-        init_ckpt     = os.getenv("ONTHEFLY_INIT_CKPT") or None
+        resume_run = os.getenv("ONTHEFLY_RESUME_RUN_ID") or None
+        init_ckpt = os.getenv("ONTHEFLY_INIT_CKPT") or None
         init_step_env = os.getenv("ONTHEFLY_INIT_STEP") or None
         is_resume = bool(resume_run or init_ckpt)
 
@@ -325,12 +251,20 @@ class TrainMixin:
                     else:
                         self.step = ckpt_step
 
-                    self._event({"type":"log","level":"info",
-                                "text": f"[resume] restored from {os.path.basename(init_ckpt)}  step={self.step}  epoch={getattr(self,'epoch',0)}"})
-                    self._event({"type":"checkpoint_loaded","path": init_ckpt, "step": int(self.step)})
+                    self._event(
+                        {
+                            "type": "log",
+                            "level": "info",
+                            "text": f"[resume] restored from {os.path.basename(init_ckpt)}  step={self.step}  "
+                            f"epoch={getattr(self, 'epoch', 0)}",
+                        }
+                    )
+                    self._event(
+                        {"type": "checkpoint_loaded", "path": init_ckpt, "step": int(self.step)}
+                    )
 
                 except Exception as e:
-                    self._event({"type":"log","level":"error", "text": f"[resume] failed: {e}"})
+                    self._event({"type": "log", "level": "error", "text": f"[resume] failed: {e}"})
 
         start_step = int(getattr(self, "step", 0) or 0)
         start_epoch = int(getattr(self, "epoch", 0) or 0)
@@ -338,160 +272,232 @@ class TrainMixin:
         steps_before = int(start_step)
         epochs_before = int(start_epoch)
 
-        target_step  = None if max_steps  is None else start_step  + max_steps
+        target_step = None if max_steps is None else start_step + max_steps
         target_epoch = None if max_epochs is None else start_epoch + max_epochs
 
         self._last_emitted_epoch = None
 
-        # --- 2) Session header & run identity (unchanged) ---
-        self._event({"type":"session_started","project": self.cfg.project, "run_name": self.cfg.run_name})
-
-        self._event({"type":"log","level":"info","text": f"model session_id={self.session_id}"})
-        self._event({"type":"log","level":"info","text": "training"})
-        self._event({"type":"log","level":"info","text": self.cfg.run_name or "baseline"})
-
+        # --- 2) Session header & run identity ---
+        self.before_training()
         self._maybe_handle_commands()
 
-        self._emit_new_run(self.cfg.run_name, parents=[], meta={"display_name": self.cfg.run_name})
         val_reason = self._validation_disabled_reason()
         if val_reason:
             freq = self._validation_frequency()
             level = "warn" if (val_reason == "no val_loader provided" and freq > 0) else "info"
             self._event({"type": "log", "level": level, "text": f"validation disabled ({val_reason})"})
         try:
-            while self._running and (target_step is None or self.step < target_step) and (target_epoch is None or self.epoch < target_epoch):
-                self._maybe_handle_commands()
+            while self._running:
+                # --- main training loop, bounded by step/epoch limits ---
+                while (
+                    self._running
+                    and (target_step is None or self.step < target_step)
+                    and (target_epoch is None or self.epoch < target_epoch)
+                ):
+                    self._maybe_handle_commands()
 
-                if self._paused:
-                    time.sleep(0.05)
-                    continue
+                    if self._paused:
+                        time.sleep(0.05)
+                        continue
 
-                self._sampler_set_epoch(self.epoch)
+                    self._sampler_set_epoch(self.epoch)
 
-                self._event({"type": "log", "level": "info", "text": f"epoch {self.epoch}"})
+                    self._event({"type": "log", "level": "info", "text": f"epoch {self.epoch}"})
 
-                k = int(getattr(self, "_epoch_batch_idx", 0) or 0)
-                it = iter(self.train_loader)
-                if k > 0:
-                    for _ in range(k):
-                        try:
-                            next(it)
-                        except StopIteration:
+                    k = int(getattr(self, "_epoch_batch_idx", 0) or 0)
+                    it = iter(self.train_loader)
+                    if k > 0:
+                        for _ in range(k):
+                            try:
+                                next(it)
+                            except StopIteration:
+                                break
+
+                    for batch in it:
+                        self._maybe_handle_commands()
+                        if not self._running:
                             break
 
-                for batch in it:
-                    self._maybe_handle_commands()
+                        if self._paused:
+                            try:
+                                self._event(
+                                    {"type": "paused", "run_id": self.cfg.run_name, "step": self.step}
+                                )
+                            except Exception:
+                                pass
+                        while self._paused and self._running:
+                            self._maybe_handle_commands()
+                            time.sleep(0.05)
+                        if not self._running:
+                            break
+
+                        step_start = time.perf_counter()
+                        metrics = self._training_step_fn(batch, self._state())
+                        step_elapsed = max(time.perf_counter() - step_start, 1e-9)
+                        self._sync_device()
+
+                        loss = float(metrics.get("loss", float("inf")))
+                        if not math.isfinite(loss):
+                            self._event(
+                                {
+                                    "type": "log",
+                                    "level": "error",
+                                    "text": f"Non-finite loss at step {self.step}. "
+                                    f"Restoring last checkpoint if available and skipping step.",
+                                }
+                            )
+                            if self._ckpts:
+                                try:
+                                    self.step = self._load_checkpoint_into_state(self._ckpts[-1])
+                                except Exception:
+                                    pass
+                            self.scaler = _SafeScaler(
+                                torch.cuda.amp.GradScaler(enabled=(self.cfg.amp and "cuda" in self.device))
+                            )
+                            continue
+
+                        runtime_metrics = self._runtime_metric_snapshot(
+                            metrics, batch, step_elapsed, self.scheduler
+                        )
+
+                        self.step += 1
+                        self._epoch_batch_idx = int(getattr(self, "_epoch_batch_idx", 0) or 0) + 1
+                        current_epoch = int(getattr(self, "epoch", 0) or 0)
+
+                        payload = {
+                            "type": "trainStep",
+                            "step": self.step,
+                            "loss": loss,
+                            "val_loss": (
+                                float(self._last_val_loss) if self._last_val_loss is not None else None
+                            ),
+                        }
+
+                        # Only include epoch when it changes (edge-triggered)
+                        last_emitted = getattr(self, "_last_emitted_epoch", None)
+                        if last_emitted is None or current_epoch != last_emitted:
+                            payload["epoch"] = current_epoch
+                            self._last_emitted_epoch = current_epoch
+                            self._event(
+                                {
+                                    "type": "log",
+                                    "level": "info",
+                                    "phase": "train",
+                                    "text": f"[epoch] now at epoch {current_epoch} (step {self.step})",
+                                }
+                            )
+
+                        payload.update(runtime_metrics)
+                        self._emit(payload)
+
+                        last_v = (
+                            f"{self._last_val_loss:.6f}"
+                            if self._last_val_loss is not None
+                            else "None"
+                        )
+                        self._event(
+                            {
+                                "type": "log",
+                                "level": "info",
+                                "text": f"step {self.step}: train_loss = {loss:.6f}, val_loss = {last_v}",
+                            }
+                        )
+
+                        if self.scheduler:
+                            self.scheduler.step()
+
+                        if target_step is not None and self.step >= target_step:
+                            break
+
+                        self._maybe_pause_gate()
+
                     if not self._running:
                         break
 
-                    if self._paused:
-                        try:
-                            self._event({"type": "paused", "run_id": self.cfg.run_name, "step": self.step})
-                        except Exception:
-                            pass
                     while self._paused and self._running:
                         self._maybe_handle_commands()
                         time.sleep(0.05)
                     if not self._running:
                         break
 
-                    step_start = time.perf_counter()
-                    metrics = self._training_step_fn(batch, self._state())
-                    step_elapsed = max(time.perf_counter() - step_start, 1e-9)
-                    self._sync_device()
+                    epoch_val_loss = None
+                    if self._should_run_validation_epoch():
+                        vloss = self._run_validation()
+                        epoch_val_loss = float(vloss)
+                        self._last_val_loss = epoch_val_loss
+                        self._event(
+                            {
+                                "type": "log",
+                                "level": "info",
+                                "text": f"epoch {self.epoch} val_loss = {vloss:.6f}",
+                            }
+                        )
 
-                    loss = float(metrics.get("loss", float("inf")))
-                    if not math.isfinite(loss):
-                        self._event({"type": "log", "level": "error",
-                                    "text": f"Non-finite loss at step {self.step}. "
-                                            f"Restoring last checkpoint if available and skipping step."})
-                        if self._ckpts:
-                            try:
-                                self.step = self._load_checkpoint_into_state(self._ckpts[-1])
-                            except Exception:
-                                pass
-                        self.scaler = _SafeScaler(torch.cuda.amp.GradScaler(enabled=(self.cfg.amp and "cuda" in self.device)))
+                    self._event(
+                        {"type": "epoch_end", "epoch": self.epoch, "val_loss": epoch_val_loss}
+                    )
+
+                    self._epoch_batch_idx = 0
+                    self.epoch += 1
+
+                # ---- we get here when training criteria are hit or _running went false ----
+                progressed = (int(self.step) > steps_before) or (int(self.epoch) > epochs_before)
+
+                if progressed:
+                    if target_epoch is not None and self.epoch >= target_epoch:
+                        hit_criterion = True
+                    if target_step is not None and self.step >= target_step:
+                        hit_criterion = True
+
+                auto_ckpt_path = None
+                if (
+                    progressed
+                    and not is_resume
+                    and hit_criterion
+                    and do_test_after
+                    and self.test_loader is not None
+                    and self._running
+                ):
+                    result = self._run_labeled_test_and_ckpt(label="final", source="auto")
+                    auto_ckpt_path = result.get("ckpt_path")
+                    auto_test_ran = True
+                    self._paused = True
+                    self._pause_ckpt_path = auto_ckpt_path
+                    self._pause_gen = int(getattr(self, "_pause_gen", 0) or 0) + 1
+                    pause_action = {"action": "auto_test_pause", "reason": "auto_test_complete"}
+                    pause_evt: Dict[str, Any] = {
+                        "type": "paused",
+                        "run_id": self.cfg.run_name,
+                        "step": int(getattr(self, "step", 0)),
+                        "request": pause_action,
+                    }
+                    if auto_ckpt_path:
+                        pause_evt["ckpt"] = auto_ckpt_path
+                    self._event(pause_evt)
+
+                # ---- wait here after auto-test until the user resumes or stops ----
+                if auto_test_ran and self._running:
+                    while self._running and self._paused:
+                        self._maybe_handle_commands()
+                        time.sleep(0.05)
+                    if not self._running:
+                        break
+                    if not self._paused:
+                        steps_before = int(self.step)
+                        epochs_before = int(self.epoch)
+                        target_step = None
+                        target_epoch = None
+                        auto_test_ran = False
+                        hit_criterion = False
+                        is_resume = True
+                        do_test_after = False
                         continue
 
-                    runtime_metrics = self._runtime_metric_snapshot(metrics, batch, step_elapsed, self.scheduler)
-
-                    self.step += 1
-                    self._epoch_batch_idx = int(getattr(self, "_epoch_batch_idx", 0) or 0) + 1
-                    current_epoch = int(getattr(self, "epoch", 0) or 0)
-
-                    payload = {
-                        "type":     "trainStep",
-                        "step":     self.step,
-                        "loss":     loss,
-                        "val_loss": (float(self._last_val_loss) if self._last_val_loss is not None else None),
-                    }
-
-                    # Only include epoch when it changes (edge-triggered)
-                    last_emitted = getattr(self, "_last_emitted_epoch", None)
-                    if last_emitted is None or current_epoch != last_emitted:
-                        payload["epoch"] = current_epoch
-                        self._last_emitted_epoch = current_epoch
-                        self._event({
-                            "type":  "log",
-                            "level": "info",
-                            "phase": "train",
-                            "text":  f"[epoch] now at epoch {current_epoch} (step {self.step})",
-                        })
-
-                    payload.update(runtime_metrics)
-                    self._emit(payload)
-
-                    last_v = (f"{self._last_val_loss:.6f}" if self._last_val_loss is not None else "None")
-                    self._event({"type": "log", "level": "info",
-                                "text": f"step {self.step}: train_loss = {loss:.6f}, val_loss = {last_v}"})
-
-                    if self.scheduler:
-                        self.scheduler.step()
-
-                    if max_steps and self.step >= max_steps:
-                        break
-
-                if not self._running:
-                    break
-
-                while self._paused and self._running:
-                    self._maybe_handle_commands()
-                    time.sleep(0.05)
-                if not self._running:
-                    break
-
-                epoch_val_loss = None
-                if self._should_run_validation_epoch():
-                    vloss = self._run_validation()
-                    epoch_val_loss = float(vloss)
-                    self._last_val_loss = epoch_val_loss
-                    self._event({"type": "log", "level": "info", "text": f"epoch {self.epoch} val_loss = {vloss:.6f}"})
-
-                self._event({"type": "epoch_end", "epoch": self.epoch, "val_loss": epoch_val_loss})
-
-                self._epoch_batch_idx = 0
-                self.epoch += 1
-            
-            progressed = (int(self.step) > steps_before) or (int(self.epoch) > epochs_before)
-
-            if progressed:
-                if target_epoch is not None and self.epoch >= target_epoch:
-                    hit_criterion = True
-                if target_step is not None and self.step >= target_step:
-                    hit_criterion = True
-
-            if (
-                progressed
-                and not is_resume
-                and hit_criterion
-                and do_test_after
-                and self.test_loader is not None
-                and self._running
-            ):
-                _ = self._run_labeled_test_and_ckpt(label="final", source="auto")
+                break
 
         finally:
-            self._bus.stop()
+            status = "completed" if (hit_criterion or self._running) else "stopped"
+            self.after_training(status=status)
             tracker = getattr(self, "_activation_tracker", None)
             if tracker is not None:
                 try:
@@ -504,74 +510,9 @@ class TrainMixin:
                     monitor.close()
                 except Exception:
                     pass
-
-
-    def _run_labeled_test_and_ckpt(self, label: str = "final", source: str = "manual") -> Dict[str, Any]:
-        if self.test_loader is None:
-            raise RuntimeError("test_loader is not configured; cannot run test.")
-
-        if getattr(self, "_test_inflight", False):
-            return {
-                "status": "busy",
-                "run_id": self.cfg.run_name,
-                "session_id": getattr(self, "session_id", None),
-                "step": int(self.step),
-                "label": label,
-            }
-
-        self._test_inflight = True
-        try:
-            self._event({
-                "type": "log",
-                "level": "info",
-                "phase": "test",
-                "text": f"[test] requested evaluation for label '{label}' (source={source})",
-            })
-
-            avg = float(self._run_test())
-
-            # force a checkpoint even though we're not paused
-            ckpt_path = self._save_ring_checkpoint(force=True)
-
-            if ckpt_path is not None:
-                import os
-                self._event({
-                    "type": "log",
-                    "level": "info",
-                    "phase": "test",
-                    "text": f"[test] checkpoint saved for label '{label}': {os.path.basename(ckpt_path)}",
-                })
-            else:
-                # Should not happen with force=True
-                self._event({
-                    "type": "log",
-                    "level": "warn",
-                    "phase": "test",
-                    "text": f"[test] requested checkpoint for label '{label}' but save returned None",
-                })
-
-            result: Dict[str, Any] = {
-                "status": "ok",
-                "avg_loss": avg,
-                "run_id": self.cfg.run_name,
-                "session_id": getattr(self, "session_id", None),
-                "step": int(self.step),
-                "label": label,
-                "ckpt_path": ckpt_path,
-            }
-
-            event = dict(result)
-            event["type"] = "test_complete"
-            event["source"] = source
-            self._event(event)
-
-            if source == "auto":
-                auto_evt = dict(result)
-                auto_evt["type"] = "auto_test_complete"
-                auto_evt["source"] = "auto"
-                self._event(auto_evt)
-
-            return result
-
-        finally:
-            self._test_inflight = False
+            # Optional snapshot cleanup, if provided by outer session
+            with contextlib.suppress(Exception):
+                wait_fn = getattr(self, "_wait_for_reset_snapshot", None)
+                if callable(wait_fn):
+                    wait_fn(timeout=5.0)
+                self._cleanup_reset_snapshot()

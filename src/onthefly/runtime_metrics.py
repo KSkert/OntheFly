@@ -3,9 +3,35 @@ from __future__ import annotations
 import math
 import sys
 import threading
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
+
+from .metrics_utils import _grad_norm
+
+
+def metric_float(val: Any) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        if torch.is_tensor(val):
+            if val.numel() == 0:
+                return None
+            data = val.detach()
+            if data.ndim > 0:
+                data = data.reshape(-1)
+            out = float(data.mean().item())
+            return out if math.isfinite(out) else None
+        if isinstance(val, (list, tuple)):
+            for item in val:
+                out = metric_float(item)
+                if out is not None:
+                    return out
+            return None
+        out = float(val)
+        return out if math.isfinite(out) else None
+    except Exception:
+        return None
 
 
 def _float_or_none(val: Any) -> Optional[float]:
@@ -197,6 +223,85 @@ class ActivationZeroTracker:
             except Exception:
                 pass
         self._hooks.clear()
+
+
+def runtime_snapshot(
+    metrics: Dict[str, Any],
+    batch: Any,
+    step_duration: float,
+    *,
+    model: Optional[torch.nn.Module],
+    optimizer: Optional[torch.optim.Optimizer],
+    scheduler: Optional[Any],
+    activation_tracker: Optional[ActivationZeroTracker],
+    device_monitor: Optional['DeviceStatsMonitor'],
+    prev_lr: Optional[float] = None,
+) -> Dict[str, Optional[float]]:
+    snapshot: Dict[str, Optional[float]] = {}
+
+    accuracy = metric_float(metrics.get("accuracy"))
+    snapshot["accuracy"] = accuracy
+
+    grad_norm = metric_float(metrics.get("grad_norm"))
+    if grad_norm is None and model is not None:
+        try:
+            grad_norm = float(_grad_norm(model))
+        except Exception:
+            grad_norm = None
+    snapshot["grad_norm"] = grad_norm
+
+    lr = metric_float(metrics.get("lr"))
+    if lr is None and optimizer is not None:
+        lr = current_learning_rate(optimizer)
+    if lr is None and scheduler is not None:
+        try:
+            if hasattr(scheduler, "get_last_lr"):
+                last_lr_seq = scheduler.get_last_lr()
+                if isinstance(last_lr_seq, (list, tuple)):
+                    last_vals = [float(v) for v in last_lr_seq if math.isfinite(float(v))]
+                    if last_vals:
+                        lr = float(sum(last_vals) / len(last_vals))
+                elif last_lr_seq is not None:
+                    val = float(last_lr_seq)
+                    if math.isfinite(val):
+                        lr = val
+        except Exception:
+            pass
+    if lr is None and prev_lr is not None:
+        lr = float(prev_lr)
+    snapshot["lr"] = lr
+
+    weight = metric_float(metrics.get("weight_norm"))
+    if weight is None and model is not None:
+        weight = weight_norm(model)
+    snapshot["weight_norm"] = weight
+
+    zero_frac = metric_float(metrics.get("activation_zero_frac"))
+    if zero_frac is None and activation_tracker is not None:
+        try:
+            zero_frac = activation_tracker.pop_recent()
+        except Exception:
+            zero_frac = None
+    snapshot["activation_zero_frac"] = zero_frac
+
+    throughput = metric_float(metrics.get("throughput"))
+    if throughput is None:
+        batch_size = estimate_batch_size(batch)
+        if batch_size and step_duration > 0:
+            throughput = float(batch_size) / max(step_duration, 1e-9)
+    snapshot["throughput"] = throughput
+
+    mem_vram = None
+    gpu_util = None
+    if device_monitor is not None:
+        try:
+            mem_vram, gpu_util = device_monitor.snapshot()
+        except Exception:
+            mem_vram, gpu_util = None, None
+    snapshot["mem_vram"] = mem_vram
+    snapshot["gpu_util"] = gpu_util
+
+    return snapshot
 
 
 class DeviceStatsMonitor:

@@ -265,7 +265,7 @@ function notifyModelNavSelected(runId) {
 }
 
 function currentPageRunId() {
-  return RunState.currentPageRunId();
+  return RunState.currentPageRunId() || RunState.getLiveRun() || null;
 }
 
 function applyRunSelection(runId) {

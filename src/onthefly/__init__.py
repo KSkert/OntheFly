@@ -1,4 +1,4 @@
-from .session import quickstart
 from .trainer import Trainer
+from .wrappers.lightning import attach_lightning
 
-__all__ = ["quickstart", "Trainer"]
+__all__ = ["Trainer", "attach_lightning"]

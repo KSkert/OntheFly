@@ -14,7 +14,6 @@ from ..merging import (
 )
 
 from ..data_explorer import (
-    compute_per_sample_losses,
     compute_embeddings,
     cluster_embeddings,
     select_hard_clusters,
@@ -225,16 +224,21 @@ class RunManagementMixin:
             parents,
             {**(meta or {}), "display_name": display_name, "run_gen": self._run_gen},
         )
+        print("[otf] reached end of start_new_run")
+        print("[otf][test] model device:",
+            next(self.model.parameters()).device,
+            "session.device:", getattr(self, "device", None))
         return fs_id
 
     # -------------------- Fork execution (feature-aware) --------------------
     def _do_fork(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        print(["[otf] entered _do_fork and will see where we go from here."])
         mode = str(payload.get("mode", "manual")).lower()
         allow_when_paused = bool(payload.get("allow_when_paused", mode == "manual"))
         if (self._paused or self._halt_evt.is_set()) and not allow_when_paused:
             self._event({"type": "log", "level": "info", "text": "Fork skipped: session is paused."})
             return {"new_run": None, "subset_indices": []}
-
+        print("[otf] gone further than stop condition:  self._paused or self._halt_evt.is_set()) and not allow_when_paused")
         hparams = payload.get("hparams", {})
         selection = payload.get("selection")
         region = payload.get("region") or {}
@@ -259,35 +263,39 @@ class RunManagementMixin:
                         "text": f"No checkpoint found for parent '{parent}'. Forking with current weights.",
                     }
                 )
-
+        print("[otf] gone further than if elif if else")
         if payload.get("run_name"):
             # Manual override still allowed
             new_id = str(payload["run_name"])
         else:
             # Auto: fork1, fork2, fork3, ...
             new_id = self._next_run_name("fork")
-
+        print("[otf] gone further than payload.get run_name")
         sel_indices: List[int] = []
         if (selection or region) and self._train_root_ds is not None:
+            print("[otf] inside condition (selection or region) and self._train_root_ds is not None")
             ds = self._train_root_ds
             cancel = (lambda: (not self._running)) if allow_when_paused else (
                 lambda: (not self._running) or self._paused or self._halt_evt.is_set()
             )
-            tr_losses, __ = compute_per_sample_losses(
-                self.model,
-                ds,
-                getattr(self.train_loader, "collate_fn", None),
-                self.raw_loss_fn,
-                device=self.device,
+            tr_losses, __ = self._compute_subset_losses(
+                model=self.model,
+                dataset=ds,
+                collate_fn=getattr(self.train_loader, "collate_fn", None),
                 batch_size=getattr(self.train_loader, "batch_size", 256),
                 indices=None,
                 mirror_train_semantics=True,
-                amp_enabled=bool(self.cfg.amp and "cuda" in self.device),
+                amp_enabled=bool(self.cfg.amp and "cuda" in str(self.device)),
                 should_stop=cancel,
             )
+            print("[otf][test] model device:",
+                next(self.model.parameters()).device,
+                "session.device:", getattr(self, "device", None))
+            print("[otf] just passed compute_per_sample_losses")
             if not tr_losses and (not self._running):
                 self._event({"type": "log", "level": "warn", "text": "Fork cancelled during loss scan."})
                 return {"new_run": None, "subset_indices": []}
+            
             feature_cache: Dict[str, Any] = {"loss": tr_losses}
 
             if selection:
@@ -330,7 +338,10 @@ class RunManagementMixin:
                     for i, L in enumerate(tr_losses)
                     if (L is not None and lo <= float(L) <= hi)
                 ]
-
+        print("[otf][test] model device:",
+            next(self.model.parameters()).device,
+            "session.device:", getattr(self, "device", None))
+        print("[otf] reached just before _switch_to_new_run")
         child_id = self._switch_to_new_run(
             new_id,
             parents=[parent],
@@ -404,16 +415,14 @@ class RunManagementMixin:
         bs = getattr(self.train_loader, "batch_size", 256)
         cf = getattr(self.train_loader, "collate_fn", None)
 
-        losses, __ = compute_per_sample_losses(
-            tmp_model,
-            ds,
-            cf,
-            self.raw_loss_fn,
-            device=self.device,
+        losses, __ = self._compute_subset_losses(
+            model=tmp_model,
+            dataset=ds,
+            collate_fn=cf,
             batch_size=bs,
             indices=None,
             mirror_train_semantics=True,
-            amp_enabled=bool(self.cfg.amp and "cuda" in self.device),
+            amp_enabled=bool(self.cfg.amp and "cuda" in str(self.device)),
             should_stop=lambda: False,
         )
 

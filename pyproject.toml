@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 explorer = ["scikit-learn>=1.3", "umap-learn>=0.5"]
 dev = ["ipython", "pytest", "ruff", "mypy", "build", "twine"]
+lightning = ["lightning>=2.2.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

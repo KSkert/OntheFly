@@ -1,6 +1,6 @@
 from __future__ import annotations
 import os, json
-from typing import Optional
+from typing import Optional, Dict, Any
 from ..ckpt_utils import _parse_step
 
 class CheckpointMixin:
@@ -10,17 +10,8 @@ class CheckpointMixin:
     _ckpts: list
 
 
-    def _save_ring_checkpoint(self, *, force: bool = False) -> Optional[str]:
-        # Respect your "only when paused" rule *unless* someone explicitly forces it
-        if not force and not getattr(self, "_paused", False):
-            return None
-
-        path = os.path.join(
-            self.cfg.save_dir,
-            f"{self.cfg.project}__{self.cfg.run_name}__step{self.step}.pt"
-        )
-
-        payload = {
+    def _checkpoint_payload(self) -> Dict[str, Any]:
+        return {
             "model": self.model.state_dict(),
             "optimizer": (self.optimizer.state_dict() if self.optimizer is not None else None),
             "scheduler": (self.scheduler.state_dict() if self.scheduler is not None else None),
@@ -36,27 +27,39 @@ class CheckpointMixin:
             ),
         }
 
-        import torch, os as _os
-        _os.makedirs(self.cfg.save_dir, exist_ok=True)
-        torch.save(payload, path)
 
+    def _write_checkpoint_to(self, path: str) -> str:
+        payload = self._checkpoint_payload()
+        import torch, os as _os
+        directory = _os.path.dirname(path)
+        if directory:
+            _os.makedirs(directory, exist_ok=True)
+        torch.save(payload, path)
+        return path
+
+
+    def _save_ring_checkpoint(self, *, force: bool = False) -> Optional[str]:
+        # Respect your "only when paused" rule *unless* someone explicitly forces it
+        if not force and not getattr(self, "_paused", False):
+            return None
+
+        path = os.path.join(
+            self.cfg.save_dir,
+            f"{self.cfg.project}__{self.cfg.run_name}__step{self.step}.pt"
+        )
+
+        self._write_checkpoint_to(path)
         self._ckpts.append(path)
         if len(self._ckpts) > self.cfg.ckpt_keep:
             old = self._ckpts.pop(0)
             for p in (old, old + ".meta.json"):
                 try:
-                    _os.remove(p)
+                    os.remove(p)
                 except Exception:
                     pass
 
         return path
 
-
-    def _find_ckpt_for_rewind(self, steps_back: int) -> Optional[str]:
-        target = max(0, self.step - steps_back)
-        before = [p for p in self._ckpts if _parse_step(p) <= target]
-        if not before: return self._ckpts[0] if self._ckpts else None
-        return before[-1]
 
     def _latest_ckpt_for_run(self, run_name: str) -> Optional[str]:
         patt = f"{self.cfg.project}__{run_name}__step"

@@ -3,6 +3,7 @@ onthefly/
 ├─ README.md
 ├─ MANIFEST.in
 ├─ src/
+│  ├─ architecture.txt
 │  └─ onthefly/
 │     ├─ mixins/
 │           ├─ checkpoint_mixin.py
@@ -11,23 +12,33 @@ onthefly/
 │           ├─ feature_mixin.py
 │           ├─ run_management_mixin.py
 │           ├─ train_mixin.py
+│     ├─ wrappers
+│           ├─ base.py
+│           ├─ lightning.py
 │     ├─ __init__.py
 │     ├─ checkpoints.py
 │     ├─ ckpt_utils.py
 │     ├─ config.py
 │     ├─ control.py
+│     ├─ dashboard_channel.py
 │     ├─ data_explorer.py
 │     ├─ device_utils.py
 │     ├─ factory.py
 │     ├─ ids.py
-│     ├─ kmeans_utils.py ---prob won't need now that we don't do autofork
+│     ├─ kmeans_utils.py
 │     ├─ merging.py
 │     ├─ metrics_utils.py
 │     ├─ runtime_metrics.py
 │     ├─ sampler_utils.py
 │     ├─ scale.py
-│     ├─ session.py
-│     └─ utils.py
+│     ├─ session/
+│           ├─ __init__.py
+│           ├─ base.py
+│           ├─ external.py
+│           └─ native.py
+│     ├─ trainer.py
+│     ├─ utils.py
+│     └─ wrapper.py
 ├─ vscode-onthefly
 │  ├─ package.json
 │  ├─ tsconfig.json
