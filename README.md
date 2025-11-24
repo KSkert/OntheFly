@@ -29,9 +29,8 @@ This shifts training from a fixed, single-pass run into an incremental process t
 OnTheFly is aimed at people who:
 
 - train **PyTorch models** (classification, regression, etc.) and want more actionability than TensorBoard/print logs
-- are not currently using another trainer, such as Lightning, in your setup. 
-- care about **bad slices / drift / outliers** and don't want to wait until the run is over to investigate
-- prefer a **local, offline** workflow inside VS Code rather than wiring up cloud dashboards
+- are currently using no trainer or a lightning trainer
+- prefer a **local, offline** workflow inside VS Code rather than cloud dashboards
 
 ---
 
