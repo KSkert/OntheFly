@@ -11,7 +11,7 @@
 
   const STATE = {
     labels: [],
-    epochs: [],      // strictly increasing epoch numbers (optional summary)
+    epochs: [],      // strictly increasing epoch numbers (summary)
     stepEpochs: [],  // per-step epoch reference (number or null)
     series: SERIES,
     loss: (SERIES.loss = []),
@@ -29,11 +29,13 @@
 
   const MIN_DRAW_INTERVAL_MS = 120;
   const MAX_POINTS_PER_SERIES = 6000;
+  const MAX_AXIS_TICKS = 8;
   let lastDrawTs = 0;
   let rafPending = false;
   const AXIS_STEP = 'step';
   const AXIS_EPOCH = 'epoch';
   let axisMode = AXIS_STEP;
+  let epochTickLock = false; // once 8 epochs are seen, keep 8 ticks forever
 
   function ensureSeries(store, metric) {
     if (!store[metric]) store[metric] = [];
@@ -140,8 +142,6 @@
   function pendPush(step, values, epoch) {
     if (!Number.isFinite(step)) return;
     const s = +step;
-
-    // epoch here is effectiveEpoch from the webview (either a number, or null)
     const e = Number.isFinite(epoch) ? Number(epoch) : null;
 
     PEND.labels.push(s);
@@ -195,64 +195,149 @@
     chart.options.scales.y.max = maxL + padL;
   }
 
-  // Build a simple cache: step labels + per-step epochs by index
   function labelCacheFromState() {
     const stepLabels = STATE.labels.map(Number);
     return {
       steps: stepLabels,
-      stepEpochs: STATE.stepEpochs.slice(), // number or null per step
+      stepEpochs: STATE.stepEpochs.slice(),
     };
   }
 
-  // Return a Set of indices where the epoch "starts" (first index per epoch)
-  function findEpochBoundaries(stepEpochs) {
-    const boundaries = new Set();
-    if (!Array.isArray(stepEpochs) || !stepEpochs.length) return boundaries;
+  // --- Helpers for Epoch Tick Logic ---
+  // Derive epoch labels from sparse epoch markers so we can keep the step-axis tick
+  // positions stable while simply relabeling them in epoch units.
 
-    let last = null;
-    for (let i = 0; i < stepEpochs.length; i++) {
+  function collectEpochAnchors(steps, stepEpochs) {
+    const anchors = [];
+    if (!Array.isArray(steps) || !Array.isArray(stepEpochs)) return anchors;
+    const n = Math.min(steps.length, stepEpochs.length);
+    for (let i = 0; i < n; i += 1) {
       const ep = stepEpochs[i];
       if (!Number.isFinite(ep)) continue;
-      if (!Number.isFinite(last) || ep !== last) {
-        boundaries.add(i);
-        last = ep;
+      const step = Number(steps[i]);
+      if (!Number.isFinite(step)) continue;
+      if (anchors.length && anchors[anchors.length - 1].step === step && anchors[anchors.length - 1].epoch === ep) {
+        continue;
       }
+      anchors.push({ step, epoch: ep });
     }
-    return boundaries;
+    return anchors;
   }
 
-  function makeEpochTickFormatter(stepEpochs, epochBoundaries) {
-    if (!Array.isArray(stepEpochs) || !stepEpochs.length) return null;
+  function median(values) {
+    if (!Array.isArray(values) || !values.length) return null;
+    const sorted = values.slice().sort((a, b) => a - b);
+    const mid = sorted.length >> 1;
+    if (sorted.length % 2) return sorted[mid];
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
 
-    const boundarySet = epochBoundaries || findEpochBoundaries(stepEpochs);
+  function estimateStepsPerEpoch(anchors) {
+    if (!Array.isArray(anchors) || anchors.length < 2) return null;
+    const ratios = [];
+    for (let i = 1; i < anchors.length; i += 1) {
+      const prev = anchors[i - 1];
+      const cur = anchors[i];
+      const dEpoch = cur.epoch - prev.epoch;
+      const dStep = cur.step - prev.step;
+      if (dEpoch > 0 && dStep > 0) {
+        ratios.push(dStep / dEpoch);
+      }
+    }
+    if (!ratios.length) return null;
+    const m = median(ratios);
+    return (m && m > 0 && Number.isFinite(m)) ? m : null;
+  }
+
+  function distinctEpochCount(stepEpochs) {
+    if (!Array.isArray(stepEpochs) || !stepEpochs.length) return 0;
+    const set = new Set();
+    for (const ep of stepEpochs) {
+      if (Number.isFinite(ep)) set.add(Math.round(ep));
+    }
+    return set.size;
+  }
+
+  // Robust lookup: if stepEpochs[index] is null, search neighbors
+  function findNearestKnownEpoch(index, stepEpochs) {
+    if (!stepEpochs || index < 0 || index >= stepEpochs.length) return null;
+
+    // Direct hit?
+    if (Number.isFinite(stepEpochs[index])) return stepEpochs[index];
+
+    // Scan radius (snap to closest available data)
+    const scanLimit = 150;
+    for (let r = 1; r < scanLimit; r++) {
+      const left = index - r;
+      const right = index + r;
+      const leftValid = left >= 0;
+      const rightValid = right < stepEpochs.length;
+
+      if (!leftValid && !rightValid) break;
+
+      // Prefer left (past data) slightly
+      if (leftValid && Number.isFinite(stepEpochs[left])) return stepEpochs[left];
+      if (rightValid && Number.isFinite(stepEpochs[right])) return stepEpochs[right];
+    }
+    return null;
+  }
+
+  function formatEpochLabel(epoch) {
+    if (!Number.isFinite(epoch)) return '';
+    return String(Math.round(epoch));
+  }
+
+  function estimateEpochFromStep(stepVal, anchors, stepsPerEpoch) {
+    if (!anchors?.length || !Number.isFinite(stepVal)) return null;
+
+    const hasRatio = Number.isFinite(stepsPerEpoch) && stepsPerEpoch > 0;
+    let base = anchors[0];
+    for (let i = anchors.length - 1; i >= 0; i -= 1) {
+      if (anchors[i].step <= stepVal) { base = anchors[i]; break; }
+    }
+
+    if (!hasRatio) return base?.epoch ?? null;
+    if (stepVal <= base.step) return base.epoch;
+
+    let next = anchors[anchors.length - 1];
+    for (let i = 0; i < anchors.length; i += 1) {
+      if (anchors[i].step >= stepVal) { next = anchors[i]; break; }
+    }
+
+    const approx = base.epoch + (stepVal - base.step) / stepsPerEpoch;
+    if (next && next.step !== base.step) {
+      const lo = Math.min(base.epoch, next.epoch);
+      const hi = Math.max(base.epoch, next.epoch);
+      return Math.min(hi, Math.max(lo, approx));
+    }
+    return approx;
+  }
+
+  function makeStepAlignedEpochFormatter(steps, stepEpochs) {
+    if (!Array.isArray(steps) || !steps.length) return null;
+    const anchors = collectEpochAnchors(steps, stepEpochs);
+    const stepsPerEpoch = estimateStepsPerEpoch(anchors);
 
     return function epochTickFormatter(value, index, ticks) {
       const tick = ticks && ticks[index];
+      const labelIndex = tick && typeof tick.value === 'number' ? tick.value : index;
+      const stepVal = (labelIndex >= 0 && labelIndex < steps.length) ? Number(steps[labelIndex]) : Number(value);
 
-      // For a category scale, tick.value is the index into labels[]
-      const labelIndex =
-        tick && typeof tick.value === 'number'
-          ? tick.value
-          : index;
+      const inferred = estimateEpochFromStep(stepVal, anchors, stepsPerEpoch);
+      const fallback = findNearestKnownEpoch(labelIndex, stepEpochs);
+      const epoch = Number.isFinite(inferred) ? inferred : fallback;
 
-      // Only label epoch *boundaries*
-      if (!boundarySet.has(labelIndex)) return '';
-
-      const epoch = stepEpochs[labelIndex];
       if (!Number.isFinite(epoch)) return '';
-
-      return String(epoch);
+      return formatEpochLabel(epoch);
     };
   }
-
-
 
   function applyMetric(metric, labelCache) {
     const chart = charts[metric];
     if (!chart) return;
 
     const cache = labelCache || labelCacheFromState();
-    const labels = cache.steps;
+    const labels = cache.steps; // step numbers (sorted)
     const data = ensureSeries(SERIES, metric).slice(0, labels.length);
 
     if (chart.data) {
@@ -271,11 +356,12 @@
     const xScale = chart.options?.scales?.x;
     if (xScale) {
       const ticks = xScale.ticks || (xScale.ticks = {});
-      const grid  = xScale.grid  || (xScale.grid  = {});
+      const grid = xScale.grid || (xScale.grid = {});
 
-      // Cache a baseline grid color once (string or Chart default)
+      // Helps prevent sub-pixel shimmer on some canvases/DPIs (Chart.js v4).
+      xScale.alignToPixels = true;
+
       if (grid.__origColor === undefined) {
-        // Prefer an explicit string already set, otherwise Chart default, otherwise a light gray
         const chartDefault =
           (Chart?.defaults?.scales?.category?.grid?.color) ??
           (Chart?.defaults?.scales?.linear?.grid?.color);
@@ -284,43 +370,28 @@
 
       if (axisMode === AXIS_EPOCH) {
         const stepEpochs = cache.stepEpochs.slice();
-
-        const epochBoundaries = findEpochBoundaries(stepEpochs);
-        const formatter = makeEpochTickFormatter(stepEpochs, epochBoundaries);
+        const formatter = makeStepAlignedEpochFormatter(labels, stepEpochs);
         ticks.callback = formatter || undefined;
 
-        // Epoch mode: we still show all ticks, but only draw gridlines
-        // at the FIRST step of each epoch.
-        ticks.autoSkip = false;
-        if (Object.prototype.hasOwnProperty.call(ticks, 'maxTicksLimit')) {
-          delete ticks.maxTicksLimit;
-        }
+        ticks.autoSkip = true;
+        const epochCount = distinctEpochCount(stepEpochs);
+        if (epochCount >= MAX_AXIS_TICKS) epochTickLock = true;
+        const cap = epochTickLock ? MAX_AXIS_TICKS : Math.min(MAX_AXIS_TICKS, Math.max(1, epochCount || 0));
+        ticks.maxTicksLimit = cap;
 
         grid.display = true;
-        const visibleColor = grid.__origColor || '#e5e7eb';
-        grid.color = function (ctx) {
-          const tick = ctx.tick;
-          const idx = (tick && typeof tick.value === 'number') ? tick.value : ctx.index;
-          return epochBoundaries.has(idx) ? visibleColor : 'transparent';
-        };
-
+        grid.color = grid.__origColor || '#e5e7eb';
       } else {
-        // Step mode: normal behavior with sparse grid & limited ticks
         ticks.callback = undefined;
         ticks.autoSkip = true;
-        // Always enforce our 8 verticals
-        ticks.maxTicksLimit = 8;
+        ticks.maxTicksLimit = MAX_AXIS_TICKS;
 
         grid.display = true;
-        // IMPORTANT: explicitly restore to a concrete color
         grid.color = grid.__origColor || '#e5e7eb';
-        // (Optional) if you previously tweaked other grid props, reset them here too:
-        // grid.lineWidth = 1; grid.drawTicks = true; grid.drawOnChartArea = true;
       }
     }
 
     chart.update('none');
-
   }
 
   function applyStateToCharts() {
@@ -359,6 +430,7 @@
 
     lastDrawTs = 0;
     rafPending = false;
+    epochTickLock = false;
     applyStateToCharts();
   }
 

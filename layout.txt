@@ -39,25 +39,30 @@ onthefly/
 │     ├─ trainer.py
 │     ├─ utils.py
 │     └─ wrapper.py
-├─ vscode-onthefly
+├─ vscode-onthefly/
+│  ├─ architecture.txt
 │  ├─ package.json
 │  ├─ tsconfig.json
 │  ├─ src/
-│     ├─ extension.js
-│     ├─ storage.js
-│     ├─ webview/
-│        ├─ dashboard.html
-│        ├─ dashboard.js
-│        ├─ dag_layout.js
-│        ├─ dag_render.js
-│        ├─ health_monitor.js
-│        ├─ chart_bootstrap.js
-│        ├─ chart_creation.js
-│        ├─ chart_plugins.js
-│        ├─ chart_report.js
-│        ├─ chart_stream.js
-│        ├─ chart_utils.js
-│        ├─ ipc_controls.js
-│        ├─ log_buffer.js
-│        ├─ report_selection.js
-│        ├─ run_state.js
+│  │  ├─ extension.ts
+│  │  ├─ storage.ts
+│  │  ├─ extensionHost/
+│  │  │     ├─ ipc.ts
+│  │  │     ├─ state.ts
+│  │  │     └─ types.ts
+│  │  └─ webview/
+│  │        ├─ dashboard.html
+│  │        ├─ dashboard.js
+│  │        ├─ chart_bootstrap.js
+│  │        ├─ chart_creation.js
+│  │        ├─ chart_plugins.js
+│  │        ├─ chart_report.js
+│  │        ├─ chart_stream.js
+│  │        ├─ chart_utils.js
+│  │        ├─ dag_layout.js
+│  │        ├─ dag_render.js
+│  │        ├─ health_monitor.js
+│  │        ├─ ipc_controls.js
+│  │        ├─ log_buffer.js
+│  │        ├─ report_selection.js
+│  │        └─ run_state.js

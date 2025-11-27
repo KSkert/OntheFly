@@ -1,7 +1,7 @@
 from __future__ import annotations
 import contextlib
 import random
-from typing import Callable, Dict, Any, Optional, List, Tuple
+from typing import Callable, Dict, Any, Optional, List, Tuple, Union
 
 import numpy as np
 import warnings
@@ -10,7 +10,14 @@ from torch.utils.data import DataLoader, Subset
 
 from ..metrics_utils import _top2_margin
 from ..device_utils import _noop_ctx
-from ..data_explorer import compute_per_sample_losses
+from ..runtime_metrics import move_batch_like
+from ..data_explorer import (
+    compute_per_sample_losses,
+    model_input_candidates,
+    should_retry_model_input,
+    ensure_tensor_output,
+    ChunkedArraySpool,
+)
 
 
 class FeatureMixin:
@@ -72,7 +79,21 @@ class FeatureMixin:
         if not path or not hasattr(self, "_model_factory"):
             raise RuntimeError("Cannot load model for report; checkpoint path or factory missing.")
         model = self._model_factory()
-        model = model.to(self.device)
+        if not isinstance(model, torch.nn.Module):
+            raise TypeError(
+                "model_factory must return a torch.nn.Module; "
+                f"got {type(model).__name__!s} instead."
+            )
+        try:
+            print("[otf] do we reach this line?")
+            model = model.to(self.device)
+            print("[otf] and this line?")
+        except AttributeError as exc:
+            raise TypeError(
+                "model_factory returned an object without `.to(...)`; "
+                f"type={type(model).__name__!s}. Make sure the factory "
+                "creates and returns a torch.nn.Module."
+            ) from exc
         blob = torch.load(path, map_location=self.device, weights_only=False)
         state = blob.get("model", blob)
         model.load_state_dict(state, strict=True)
@@ -90,7 +111,12 @@ class FeatureMixin:
         amp_enabled: Optional[bool] = None,
         deterministic_seed: Optional[int] = None,
         should_stop: Optional[Callable[[], bool]] = None,
-    ) -> Tuple[List[float], List[int]]:
+        materialize: bool = True,
+        data_loader: Optional[DataLoader] = None,
+    ) -> Tuple[
+        Union[List[float], ChunkedArraySpool],
+        Union[List[int], ChunkedArraySpool],
+    ]:
         criterion = self._loss_module_for_features()
         device_hint = str(getattr(self, "device", "cpu"))
         amp_flag = bool(amp_enabled if amp_enabled is not None else (self.cfg.amp and "cuda" in device_hint))
@@ -106,6 +132,8 @@ class FeatureMixin:
                 mirror_train_semantics=mirror_train_semantics,
                 amp_enabled=amp_flag,
                 should_stop=should_stop,
+                materialize=materialize,
+                data_loader=data_loader,
             )
         return losses, sample_indices
 
@@ -120,40 +148,136 @@ class FeatureMixin:
         need_embed: bool = False,
         embed_max_dim: int = 256,
     ) -> Tuple[List[float], List[List[float]]]:
-        margins: List[float] = [] if need_margin else []
-        embeds:  List[List[float]] = [] if need_embed else []
-        self.model.eval(); old_train = self.model.training
+        margin_spool: Optional[ChunkedArraySpool] = None
+        embed_spool: Optional[ChunkedArraySpool] = None
+        embed_row_width: Optional[int] = None
+
+        if need_margin:
+            margin_chunk = min(max(1024, batch_size * 4), 65536)
+            margin_spool = ChunkedArraySpool(chunk_size=margin_chunk, typecode="f", value_cast=float)
+        use_embed = need_embed and (self._embedding_hook_fn is not None)
+        if use_embed:
+            embed_chunk = max(1024, batch_size * max(1, embed_max_dim))
+            embed_chunk = min(embed_chunk, 262144)
+            embed_spool = ChunkedArraySpool(chunk_size=embed_chunk, typecode="f", value_cast=float)
+
+        self.model.eval()
+        old_train = self.model.training
         autocast = torch.cuda.amp.autocast if (amp_enabled and torch.cuda.is_available()) else _noop_ctx
+        loader = DataLoader(
+            Subset(ds, indices) if indices is not None else ds,
+            batch_size=batch_size,
+            shuffle=False,
+            drop_last=False,
+            collate_fn=getattr(self.train_loader, 'collate_fn', None),
+        )
+        using_cuda = torch.cuda.is_available() and "cuda" in str(self.device).lower()
+
         try:
-            loader = DataLoader(
-                Subset(ds, indices) if indices is not None else ds,
-                batch_size=batch_size, shuffle=False,
-                drop_last=False,
-                collate_fn=getattr(self.train_loader, 'collate_fn', None)
-            )
             with torch.no_grad():
                 for batch in loader:
-                    x = batch[0].to(self.device)
-                    with autocast():
-                        logits = self.model(x)
-                    if need_margin:
-                        m = _top2_margin(logits)
-                        margins.extend([float(v) for v in m.cpu().tolist()])
-                    if need_embed and self._embedding_hook_fn is not None:
-                        try:
-                            e = self._embedding_hook_fn(self.model, x, logits)
-                            if not torch.is_tensor(e):
-                                raise RuntimeError("embedding_hook must return a Tensor[B,D]")
-                            if e.dim() == 1: e = e.unsqueeze(1)
-                            if e.size(1) > embed_max_dim: e = e[:, :embed_max_dim]
-                            el = e.detach().cpu().tolist()
-                            embeds.extend([list(map(float, row)) for row in el])
-                        except Exception as ex:
-                            warnings.warn(f"embedding_hook failed: {ex}")
-                            need_embed = False
+                    logits_t: Optional[torch.Tensor] = None
+                    embed_tensor: Optional[torch.Tensor] = None
+                    active_input: Optional[Any] = None
+                    first: Any = None
+                    rest: List[Any] = []
+                    candidates_list: List[Any] = []
+                    try:
+                        batch = move_batch_like(batch, self.device)
+                        first, rest = (
+                            (batch, [])
+                            if not isinstance(batch, (list, tuple))
+                            else (batch[0], list(batch[1:]))
+                        )
+                        candidates_list = model_input_candidates(self.model, first, rest)
+                        last_exc: Optional[Exception] = None
+                        for cand in candidates_list:
+                            try:
+                                with autocast():
+                                    logits = self.model(cand)
+                                logits_t = ensure_tensor_output(logits)
+                                active_input = cand
+                                break
+                            except Exception as exc:
+                                if should_retry_model_input(exc):
+                                    last_exc = exc
+                                    continue
+                                raise
+                        else:
+                            if last_exc is not None:
+                                raise last_exc
+                            raise RuntimeError("Could not prepare batch for margin/embedding scan")
+
+                        if need_margin and margin_spool is not None and logits_t is not None:
+                            margin_vals = _top2_margin(logits_t)
+                            margin_spool.extend(float(v) for v in margin_vals.detach().cpu().tolist())
+
+                        if use_embed and embed_spool is not None and self._embedding_hook_fn is not None:
+                            try:
+                                e = self._embedding_hook_fn(self.model, active_input, logits_t)
+                                if not torch.is_tensor(e):
+                                    raise RuntimeError("embedding_hook must return a Tensor[B,D]")
+                                embed_tensor = e
+                                if e.dim() == 1:
+                                    e = e.unsqueeze(1)
+                                if e.size(1) > embed_max_dim:
+                                    e = e[:, :embed_max_dim]
+                                row_block = e.detach().cpu().tolist()
+                                for row in row_block:
+                                    vals = [float(v) for v in row]
+                                    if embed_row_width is None:
+                                        embed_row_width = len(vals)
+                                    if embed_row_width == 0:
+                                        continue
+                                    if len(vals) < embed_row_width:
+                                        vals = vals + [0.0] * (embed_row_width - len(vals))
+                                    elif len(vals) > embed_row_width:
+                                        vals = vals[:embed_row_width]
+                                    embed_spool.extend(vals)
+                            except Exception as ex:
+                                warnings.warn(f"embedding_hook failed: {ex}")
+                                use_embed = False
+                                if embed_spool is not None:
+                                    embed_spool.cleanup()
+                                    embed_spool = None
+                    finally:
+                        if torch.is_tensor(embed_tensor):
+                            if embed_tensor.device.type == "cuda":
+                                embed_tensor = embed_tensor.detach().cpu()
+                            embed_tensor = None
+                        if torch.is_tensor(logits_t):
+                            if logits_t.device.type == "cuda":
+                                logits_t = logits_t.detach().cpu()
+                            logits_t = None
+                        active_input = None
+                        del first
+                        del rest
+                        del batch
+                        del candidates_list
+                        if using_cuda:
+                            with contextlib.suppress(Exception):
+                                torch.cuda.empty_cache()
         finally:
             self.model.train(old_train)
-        return margins, embeds
+
+        def _finish_embeddings() -> List[List[float]]:
+            if embed_spool is None or not embed_row_width or embed_row_width <= 0:
+                if embed_spool is not None:
+                    embed_spool.finish()
+                return []
+            flat = embed_spool.finish()
+            width = embed_row_width
+            return [flat[i:i + width] for i in range(0, len(flat), width)]
+
+        try:
+            margins = margin_spool.finish() if margin_spool is not None else []
+            embeds = _finish_embeddings()
+            return margins, embeds
+        finally:
+            if margin_spool is not None:
+                margin_spool.cleanup()
+            if embed_spool is not None:
+                embed_spool.cleanup()
 
     def _build_features_for_selection(
         self,

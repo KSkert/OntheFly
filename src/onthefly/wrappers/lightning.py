@@ -97,19 +97,6 @@ class _LightningFitDriver:
         but we transparently re-enter the original `.fit` as needed after
         auto-test pauses.
         """
-        # Debug: see if we ever get here and what we're patching
-        try:
-            print(f"[otf] _LightningFitDriver.bind() trainer={self.trainer!r}", file=sys.stderr)
-            print(f"[otf]   current trainer.fit={getattr(self.trainer, 'fit', None)!r}", file=sys.stderr)
-        except Exception:
-            pass
-
-        if getattr(self.trainer, "_onthefly_fit_wrapped", False):
-            try:
-                print("[otf]   _onthefly_fit_wrapped already True, skipping patch", file=sys.stderr)
-            except Exception:
-                pass
-            return
 
         def _wrapped(trainer_self, *args, **kwargs):
             return self(trainer_self, *args, **kwargs)
@@ -117,12 +104,6 @@ class _LightningFitDriver:
         self.trainer._onthefly_fit_wrapped = True
         self.trainer._onthefly_orig_fit = self._orig_fit
         self.trainer.fit = types.MethodType(_wrapped, self.trainer)
-
-        try:
-            print(f"[otf]   patched trainer.fit={self.trainer.fit!r}", file=sys.stderr)
-            print(f"[otf]   orig_fit={self._orig_fit!r}", file=sys.stderr)
-        except Exception:
-            pass
 
 
     # ------------------------------------------------------------------ main driver
@@ -519,12 +500,6 @@ class LightningFrameworkDelegate(FrameworkDelegate):
         self.session.configure_datamodule(datamodule)
         self._patch_dataloader_sources()
 
-        # Debug: confirm we hit attach and see callbacks and fit state
-        try:
-            print(f"[otf] LightningFrameworkDelegate.attach trainer={trainer!r}", file=sys.stderr)
-            print(f"[otf]   before bind: trainer.fit={getattr(trainer, 'fit', None)!r}", file=sys.stderr)
-        except Exception:
-            pass
 
         if not any(cb is self._callback for cb in getattr(trainer, "callbacks", [])):
             trainer.callbacks.append(self._callback)
@@ -532,11 +507,6 @@ class LightningFrameworkDelegate(FrameworkDelegate):
         # Wrap trainer.fit once we are attached
         self._fit_driver.bind()
 
-        try:
-            print(f"[otf]   after bind: trainer.fit={getattr(trainer, 'fit', None)!r}", file=sys.stderr)
-            print(f"[otf]   _onthefly_orig_fit={getattr(trainer, '_onthefly_orig_fit', None)!r}", file=sys.stderr)
-        except Exception:
-            pass
 
     def install_batch_boundary_hook(self, gate: PauseGate) -> None:
         self._callback.set_gate(gate)
@@ -871,33 +841,25 @@ class LightningFrameworkDelegate(FrameworkDelegate):
           * Emits a 'paused' event with action='auto_test_pause'.
           * The fit driver is responsible for actually waiting on resume/stop.
         """
-        print("[otf] we've entered the _run_auto_test_after_training step")
 
         # 1) Config says "no auto-test"
         if not self._do_test_after:
-            print("[otf] auto-test disabled via do_test_after=False; skipping")
             return
 
         # 2) Already ran once for this session → one-shot behavior
         if self._auto_test_count >= 1:
-            print("[otf] auto-test already run once for this session; skipping")
             return
 
         # 3) Usual safety guards
         if not getattr(self.session, "test_loader", None):
-            print("[otf] condition passed: no test_loader; skipping auto-test")
             return
         if not getattr(self.session, "_running", False):
-            print("[otf] condition passed: session not running; skipping auto-test")
             return
         if int(getattr(self.session, "step", 0) or 0) <= 0:
-            print("[otf] condition passed: step <= 0; skipping auto-test")
             return
 
         try:
-            print("[otf] we are about to call _run_labeled_test_and_ckpt")
             result = self.session._run_labeled_test_and_ckpt(label="final", source="auto")
-            print(f"[otf] _run_labeled_test_and_ckpt results are in: ", result)
         except Exception as exc:
             self.session._event(
                 {
@@ -937,7 +899,6 @@ class LightningFrameworkDelegate(FrameworkDelegate):
                 ),
             }
         )
-        print("[otf] reaching a pause in _run_ato_test_after_training")
         self.session._event(pause_evt)
 
 
@@ -971,13 +932,6 @@ def attach_lightning(
         attach_lightning(trainer=trainer, model=model, project="demo", run_name="baseline")
         trainer.fit(model, datamodule=...)
     """
-    try:
-        print("[otf] attach_lightning called", file=sys.stderr)
-        print(f"[otf]   lightning module file = {__file__}", file=sys.stderr)
-        print(f"[otf]   trainer type = {type(trainer)}", file=sys.stderr)
-        print(f"[otf]   initial trainer.fit = {getattr(trainer, 'fit', None)!r}", file=sys.stderr)
-    except Exception:
-        pass
 
     if auto_connect:
         if channel is None:

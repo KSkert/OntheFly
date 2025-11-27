@@ -35,180 +35,21 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
-exports.stripUiOnlyFields = stripUiOnlyFields;
 const vscode = __importStar(require("vscode"));
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
-const net = __importStar(require("net"));
-const crypto = __importStar(require("crypto"));
 const storage_1 = require("./storage");
 const os = __importStar(require("os"));
-const pending = new Map();
-const DASHBOARD_PORT = Number(process.env.ONTHEFLY_DASHBOARD_PORT || '47621');
-let trainerSocket = null;
-let trainerBuffer = '';
-let trainerServer = null;
-function sendReq(cmd, payload = {}, timeoutMs = 15000) {
-    if (!trainerSocket || trainerSocket.destroyed) {
-        return Promise.reject(new Error('No Trainer connected. Run your script with OnTheFlyTrainer first.'));
-    }
-    const id = crypto.randomUUID();
-    const line = JSON.stringify({ id, cmd, payload }) + '\n';
-    trainerSocket.write(line, 'utf8');
-    return new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            pending.delete(id);
-            reject(new Error(`timeout waiting for ${cmd}`));
-        }, timeoutMs);
-        pending.set(id, { resolve, reject, timer });
-    });
-}
+const ipc_1 = require("./extensionHost/ipc");
+const state_1 = require("./extensionHost/state");
+// Stash latest config (webview can set it before or after starting the run)
 function isRunImportedForThisSession(runId) {
-    // Imported == NOT created/touched by the current live Python session.
-    // If there is no live session yet, treat EVERYTHING as imported.
-    if (!trainerSocket || trainerSocket.destroyed)
+    if (!(0, ipc_1.trainerActive)())
         return true;
-    return !nativeRunsThisSession.has(runId);
+    return !state_1.extensionState.nativeRunsThisSession.has(runId);
 }
-/* ============================ Trainer socket ============================ */
-function ensureTrainerServer() {
-    if (trainerServer)
-        return;
-    trainerServer = net.createServer((socket) => {
-        if (trainerSocket && !trainerSocket.destroyed) {
-            socket.destroy();
-            vscode.window.showWarningMessage('Another Trainer tried to connect while one is active. Close the existing run first.');
-            return;
-        }
-        // Handle new trainer connection in an async block so we can await the reset
-        (async () => {
-            // If we've ever had a trainer before, a new one means "new session" → hard reset.
-            if (hasTrainerConnectedOnce && lastExtensionContext) {
-                try {
-                    await hardResetSession(lastExtensionContext, { fromUser: false });
-                }
-                catch (e) {
-                    console.warn('[onthefly] automatic session reset on new trainer failed:', e);
-                }
-            }
-            hasTrainerConnectedOnce = true;
-            // Now wire up the newly connected Trainer
-            trainerSocket = socket;
-            trainerBuffer = '';
-            socket.setEncoding('utf8');
-            socket.on('data', (chunk) => handleTrainerData(chunk));
-            socket.on('error', (err) => {
-                post({ type: 'error', text: `[trainer] ${err?.message || err}` });
-            });
-            socket.on('close', () => {
-                post({ type: 'log', text: 'Trainer disconnected.' });
-                // NOTE: this does NOT reset DB/session/dashboard anymore; it just tears down the socket.
-                disconnectTrainer(false);
-            });
-            postStatus(true);
-            post({ type: 'log', text: 'Trainer connected. Streaming events live.' });
-            // if user had a run selected, seed + attach immediately
-            const target = (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
-                (currentRunId && currentRunId.trim()) ||
-                null;
-            if (target) {
-                seedTrainerForRun(target).catch((e) => {
-                    console.warn('[onthefly] attach_context failed on connect:', e);
-                });
-            }
-        })().catch((err) => {
-            console.warn('[onthefly] trainer connection handler failed:', err);
-        });
-    });
-    trainerServer.on('error', (err) => {
-        const msg = `OnTheFly dashboard could not listen on port ${DASHBOARD_PORT}: ${err?.message || err}`;
-        vscode.window.showErrorMessage(msg);
-        post({ type: 'error', text: msg });
-    });
-    trainerServer.listen(DASHBOARD_PORT, '127.0.0.1', () => {
-        post({
-            type: 'log',
-            text: `Waiting for Trainer connections on localhost:${DASHBOARD_PORT}. Run your script to attach.`,
-        });
-    });
-}
-function trainerActive() {
-    return Boolean(trainerSocket && !trainerSocket.destroyed);
-}
-function requireTrainerConnection() {
-    if (!trainerActive()) {
-        vscode.window.showErrorMessage('No Trainer connection. Run your training script with an OnTheFlyTrainer to stream data.');
-        postStatus(false);
-        return false;
-    }
-    return true;
-}
-function shutdownTrainerServer() {
-    if (trainerServer) {
-        try {
-            trainerServer.close();
-        }
-        catch { }
-        trainerServer = null;
-    }
-    disconnectTrainer(false);
-}
-function disconnectTrainer(notify = true) {
-    if (trainerSocket) {
-        try {
-            trainerSocket.destroy();
-        }
-        catch { }
-        trainerSocket = null;
-    }
-    trainerBuffer = '';
-    setRunActivity(null);
-    pauseInFlight = false;
-    resumeInFlight = false;
-    for (const [, p] of pending) {
-        clearTimeout(p.timer);
-        p.reject(new Error('Trainer disconnected'));
-    }
-    pending.clear();
-    if (notify) {
-        post({ type: 'log', text: 'Trainer connection closed.' });
-    }
-    postStatus(false);
-}
-function handleTrainerData(chunk) {
-    trainerBuffer += chunk;
-    let idx;
-    while ((idx = trainerBuffer.indexOf('\n')) >= 0) {
-        const line = trainerBuffer.slice(0, idx);
-        trainerBuffer = trainerBuffer.slice(idx + 1);
-        if (line.trim()) {
-            handleLine(line);
-        }
-    }
-}
-const optimisticEcho = {
-    pause: 'paused',
-    resume: 'resumed',
-    save_ckpt: 'checkpointSaved',
-    merge: 'merged'
-};
-/* ============================ Globals ============================ */
-let panel = null;
-let currentRunId = null;
-const seenRuns = new Set();
-let currentSessionId = null; // sticky session id for log stamping
-const nativeRunsThisSession = new Set(); // runs touched by THIS python session
-let modelNavSelectedRunId = null;
-let runActivityState = null;
-let pauseInFlight = false;
-let resumeInFlight = false;
-let needDiskCleanOnNextTrainer = true;
-let lastExtensionContext = null;
-let hasTrainerConnectedOnce = false;
-let pendingResumeAwaitingFirstRun = false;
-/* ============================ Activate / Deactivate ============================ */
 async function activate(context) {
-    lastExtensionContext = context;
+    state_1.extensionState.lastExtensionContext = context;
     context.subscriptions.push(vscode.commands.registerCommand('onthefly.showDashboard', () => openPanel(context)));
     context.subscriptions.push(vscode.window.registerWebviewPanelSerializer('ontheflyDashboard', {
         async deserializeWebviewPanel(webviewPanel) {
@@ -218,7 +59,7 @@ async function activate(context) {
     await (0, storage_1.initStorage)(context);
 }
 function deactivate() {
-    shutdownTrainerServer();
+    (0, ipc_1.shutdownTrainerServer)();
     try {
         (0, storage_1.closeStorage)({ retainFile: true });
     }
@@ -226,20 +67,20 @@ function deactivate() {
 }
 async function hardResetSession(context, opts) {
     let trainerSeed = null;
-    const hadTrainer = trainerActive();
+    const hadTrainer = (0, ipc_1.trainerActive)();
     if (hadTrainer && opts?.fromUser) {
         try {
-            const res = await sendReq('reset_session', { reason: 'manual' }, 60000);
+            const res = await (0, ipc_1.sendReq)('reset_session', { reason: 'manual' }, 60000);
             trainerSeed = res || null;
             if (trainerSeed?.run_id) {
-                post({
+                (0, state_1.post)({
                     type: 'log',
                     text: `[reset] Trainer cleared. Next run "${trainerSeed.run_id}" waits for resume.`,
                 });
             }
         }
         catch (e) {
-            post({
+            (0, state_1.post)({
                 type: 'log',
                 level: 'warn',
                 text: `[reset] Backend reset skipped or failed: ${e?.message || String(e)}`,
@@ -247,10 +88,10 @@ async function hardResetSession(context, opts) {
         }
     }
     // 0) If a backend is alive, ask it to clean its save_dir now (best effort).
-    if (trainerActive()) {
+    if ((0, ipc_1.trainerActive)()) {
         try {
-            const res = await sendReq('clean_disk', { scope: 'all' }, 60000);
-            post({
+            const res = await (0, ipc_1.sendReq)('clean_disk', { scope: 'all' }, 60000);
+            (0, state_1.post)({
                 type: 'log',
                 level: res?.ok ? 'info' : 'warn',
                 text: res?.ok
@@ -259,7 +100,7 @@ async function hardResetSession(context, opts) {
             });
         }
         catch (e) {
-            post({
+            (0, state_1.post)({
                 type: 'log',
                 level: 'warn',
                 text: `[reset] Disk cleanup skipped or failed: ${e?.message || String(e)}`,
@@ -267,54 +108,55 @@ async function hardResetSession(context, opts) {
         }
     }
     // 1) Disconnect trainer (does not stop user's script; it will reconnect if still running)
-    disconnectTrainer(true);
+    (0, ipc_1.disconnectTrainer)(true);
     // 3) Clear in-memory extension state
-    currentRunId = null;
-    seenRuns.clear();
-    currentSessionId = null;
-    nativeRunsThisSession.clear();
-    modelNavSelectedRunId = null;
-    runActivityState = null;
-    pauseInFlight = false;
-    resumeInFlight = false;
-    pendingResumeAwaitingFirstRun = false;
+    state_1.extensionState.currentRunId = null;
+    state_1.extensionState.seenRuns.clear();
+    state_1.extensionState.currentSessionId = null;
+    state_1.extensionState.nativeRunsThisSession.clear();
+    state_1.extensionState.modelNavSelectedRunId = null;
+    state_1.extensionState.runActivityState = null;
+    state_1.extensionState.pauseInFlight = false;
+    state_1.extensionState.resumeInFlight = false;
+    state_1.extensionState.pendingResumeAwaitingFirstRun = false;
     // 4) Reset storage
     try {
         (0, storage_1.closeStorage)({ retainFile: false });
     }
     catch { }
     await (0, storage_1.initStorage)(context);
-    needDiskCleanOnNextTrainer = true;
+    state_1.extensionState.needDiskCleanOnNextTrainer = true;
     // 5) Tell webview, if it exists
-    post({ type: 'resetOk' });
+    (0, state_1.post)({ type: 'resetOk' });
     if (trainerSeed?.run_id) {
         const runId = String(trainerSeed.run_id);
         const friendly = (trainerSeed.display_name && String(trainerSeed.display_name)) || runId;
         const projectName = (trainerSeed.project && String(trainerSeed.project)) || 'default';
         (0, storage_1.insertRun)(runId, projectName, friendly, null);
-        seenRuns.add(runId);
-        currentRunId = runId;
-        modelNavSelectedRunId = runId;
-        nativeRunsThisSession.add(runId);
+        state_1.extensionState.seenRuns.add(runId);
+        state_1.extensionState.currentRunId = runId;
+        state_1.extensionState.modelNavSelectedRunId = runId;
+        state_1.extensionState.nativeRunsThisSession.add(runId);
         if (trainerSeed.session_id) {
-            currentSessionId = String(trainerSeed.session_id);
-            postCurrentSession();
+            state_1.extensionState.currentSessionId = String(trainerSeed.session_id);
+            (0, state_1.postCurrentSession)();
         }
-        post({
+        (0, state_1.post)({
             type: 'newRun',
             run_id: runId,
             parents: [],
             meta: { display_name: friendly, kind: 'reset' },
-            session_id: currentSessionId || null,
+            session_id: state_1.extensionState.currentSessionId || null,
         });
-        post({ type: 'modelNav.select', runId });
+        (0, state_1.post)({ type: 'modelNav.select', runId });
     }
-    post({ type: 'runs', rows: (0, storage_1.listRuns)() });
-    postStatus(false);
+    (0, state_1.post)({ type: 'runs', rows: (0, storage_1.listRuns)() });
+    (0, state_1.postStatus)(false);
     if (opts?.fromUser) {
         vscode.window.setStatusBarMessage('Onthefly: session reset', 2000);
     }
 }
+(0, ipc_1.registerHardResetHandler)(hardResetSession);
 /* ============================ Panel & HTML ============================ */
 function getLocalResourceRoots(context) {
     return [
@@ -325,8 +167,8 @@ function getLocalResourceRoots(context) {
     ];
 }
 async function openPanel(context) {
-    if (panel) {
-        panel.reveal(vscode.ViewColumn.Active);
+    if (state_1.extensionState.panel) {
+        state_1.extensionState.panel.reveal(vscode.ViewColumn.Active);
         return;
     }
     const newPanel = vscode.window.createWebviewPanel('ontheflyDashboard', 'OnTheFly', vscode.ViewColumn.Active, {
@@ -340,33 +182,33 @@ async function revivePanel(context, webviewPanel) {
     configurePanel(context, webviewPanel);
 }
 function configurePanel(context, webviewPanel) {
-    ensureTrainerServer();
-    panel = webviewPanel;
-    panel.webview.options = {
+    (0, ipc_1.ensureTrainerServer)();
+    state_1.extensionState.panel = webviewPanel;
+    state_1.extensionState.panel.webview.options = {
         enableScripts: true,
         localResourceRoots: getLocalResourceRoots(context),
     };
     const nonce = getNonce();
-    let webviewVisible = panel.visible;
-    panel.onDidChangeViewState(({ webviewPanel }) => {
+    let webviewVisible = state_1.extensionState.panel.visible;
+    state_1.extensionState.panel.onDidChangeViewState(({ webviewPanel }) => {
         webviewVisible = webviewPanel.visible;
         if (webviewVisible) {
             // when user returns, cheaply re-sync UI (no heavy streams)
             try {
-                post({ type: 'runs', rows: (0, storage_1.listRuns)() });
+                (0, state_1.post)({ type: 'runs', rows: (0, storage_1.listRuns)() });
             }
             catch { }
-            postStatus(trainerActive());
+            (0, state_1.postStatus)((0, ipc_1.trainerActive)());
         }
     });
-    panel.onDidDispose(() => {
+    state_1.extensionState.panel.onDidDispose(() => {
         // Just drop the reference; let deactivate() handle shutdown.
-        if (panel === webviewPanel) {
-            panel = null;
+        if (state_1.extensionState.panel === webviewPanel) {
+            state_1.extensionState.panel = null;
         }
     });
-    panel.webview.onDidReceiveMessage((m) => { onMessage(context, m); });
-    panel.webview.html = getHtml(context, panel.webview, nonce);
+    state_1.extensionState.panel.webview.onDidReceiveMessage((m) => { onMessage(context, m); });
+    state_1.extensionState.panel.webview.html = getHtml(context, state_1.extensionState.panel.webview, nonce);
 }
 function getHtml(context, webview, nonce) {
     const htmlPath = [
@@ -527,79 +369,7 @@ function getNonce() {
     return text;
 }
 /* ============================ Utilities ============================ */
-function post(msg) {
-    try {
-        panel?.webview.postMessage(msg);
-    }
-    catch (e) {
-        console.log('[EXT->WEB] post threw:', e);
-    }
-}
-function postErr(e) { post({ type: 'error', text: String(e?.message || e) }); }
-function postStatus(connected) {
-    const activity = runActivityState;
-    const running = connected && activity === 'running';
-    const paused = connected && activity === 'paused';
-    post({
-        type: 'status',
-        connected,
-        running, // "is actively training"
-        paused, // "trainer attached but paused"
-        run_id: currentRunId || null,
-    });
-}
-function setRunActivity(state) {
-    runActivityState = state;
-    postStatus(trainerActive());
-}
-async function resumeTrainerOn(target) {
-    if (resumeInFlight) {
-        return;
-    }
-    resumeInFlight = true;
-    try {
-        await ensureTrainerOnRun(target);
-        sendCtl({ cmd: 'resume' });
-        setRunActivity('running');
-    }
-    catch (e) {
-        postErr(e);
-        postStatus(false);
-    }
-    finally {
-        resumeInFlight = false;
-    }
-}
-async function resumeAfterReset() {
-    if (resumeInFlight) {
-        return;
-    }
-    resumeInFlight = true;
-    pendingResumeAwaitingFirstRun = true;
-    try {
-        await startRun();
-        pendingResumeAwaitingFirstRun = false;
-        if (!trainerSocket || trainerSocket.destroyed) {
-            throw new Error('Trainer disconnected before resume.');
-        }
-        sendCtl({ cmd: 'resume' });
-        setRunActivity('running');
-    }
-    catch (e) {
-        postErr(e);
-        throw e;
-    }
-    finally {
-        pendingResumeAwaitingFirstRun = false;
-        resumeInFlight = false;
-    }
-}
-function postCurrentSession() {
-    if (currentSessionId)
-        post({ type: 'fs.session.current', id: currentSessionId });
-}
 const TEST_NOW_TIMEOUT_MS = 10 * 60 * 1000;
-const LAST_EXPORT_DIR_KEY = 'onthefly.lastExportDir';
 function ensurePng(name) {
     return name.toLowerCase().endsWith('.png') ? name : `${name}.png`;
 }
@@ -631,63 +401,13 @@ function systemDownloadsDir() {
     return home;
 }
 function getInitialExportDir(context) {
-    const remembered = context.globalState.get(LAST_EXPORT_DIR_KEY);
+    const remembered = context.globalState.get(state_1.LAST_EXPORT_DIR_KEY);
     if (remembered && fs.existsSync(remembered))
         return remembered;
     return systemDownloadsDir();
 }
 function timestampSlug() {
     return new Date().toISOString().replace(/[:.]/g, '-');
-}
-function isUiLogLike(v) {
-    return !!v && typeof v === 'object';
-}
-// clean up `ts` logs -- python needs more explicit logs but user doesn't
-function stripUiOnlyFields(rows) {
-    const cleanOne = (r) => {
-        if (!isUiLogLike(r))
-            return r;
-        const { ts, ...rest } = r; // drop ts
-        if (typeof rest.text === 'string') {
-            const mentionsStep = /\bstep\b\s*(?:[:#]\s*)?\d+(?:\s*[:#])?/i.test(rest.text);
-            if (mentionsStep)
-                delete rest.step; // drop step to suppress [s:N]
-        }
-        return rest;
-    };
-    return Array.isArray(rows) ? rows.map(cleanOne) : cleanOne(rows);
-}
-function computeForkMergeCounters() {
-    let forkMax = 0;
-    let mergeMax = 0;
-    try {
-        const runs = (0, storage_1.listRuns)();
-        const reFork = /^fork(\d+)$/i;
-        const reMerge = /^merge(\d+)$/i;
-        for (const r of runs) {
-            for (const v of [r.name, r.run_id]) {
-                if (!v)
-                    continue;
-                const s = String(v).trim();
-                let m = reFork.exec(s);
-                if (m) {
-                    const n = parseInt(m[1], 10);
-                    if (Number.isFinite(n) && n > forkMax)
-                        forkMax = n;
-                }
-                m = reMerge.exec(s);
-                if (m) {
-                    const n = parseInt(m[1], 10);
-                    if (Number.isFinite(n) && n > mergeMax)
-                        mergeMax = n;
-                }
-            }
-        }
-    }
-    catch (e) {
-        console.warn('[onthefly] computeForkMergeCounters failed:', e);
-    }
-    return { forkMax, mergeMax };
 }
 /* ============================ Message handling ============================ */
 async function onMessage(context, m) {
@@ -710,17 +430,17 @@ async function onMessage(context, m) {
                     throw new Error('Invalid PNG data.');
                 const buf = Buffer.from(base64, 'base64');
                 fs.writeFileSync(picked.fsPath, buf);
-                await context.globalState.update(LAST_EXPORT_DIR_KEY, path.dirname(picked.fsPath));
+                await context.globalState.update(state_1.LAST_EXPORT_DIR_KEY, path.dirname(picked.fsPath));
                 vscode.window.showInformationMessage(`Chart exported to: ${picked.fsPath}`);
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
         case 'exportSubset': {
             try {
-                const runId = m.runId || currentRunId;
+                const runId = m.runId || state_1.extensionState.currentRunId;
                 if (!runId) {
                     vscode.window.showWarningMessage('No run selected.');
                     break;
@@ -738,7 +458,7 @@ async function onMessage(context, m) {
                 const picked = await vscode.window.showSaveDialog({ title: 'Export subset', defaultUri, filters });
                 if (!picked)
                     break;
-                await context.globalState.update(LAST_EXPORT_DIR_KEY, path.dirname(picked.fsPath));
+                await context.globalState.update(state_1.LAST_EXPORT_DIR_KEY, path.dirname(picked.fsPath));
                 const payload = {
                     run_id: String(runId),
                     format: fmt,
@@ -758,7 +478,7 @@ async function onMessage(context, m) {
                     const haveStored = Array.isArray(stored) && stored.length > 0;
                     if (region && Number.isFinite(region.minLoss) && Number.isFinite(region.maxLoss)) {
                         try {
-                            const indices = await getSelectedRegionIndices(String(runId), region.minLoss, region.maxLoss);
+                            const indices = await (0, ipc_1.getSelectedRegionIndices)(String(runId), region.minLoss, region.maxLoss);
                             if (indices.length)
                                 payload.subset_indices = indices;
                             else if (haveStored)
@@ -773,23 +493,23 @@ async function onMessage(context, m) {
                         payload.subset_indices = stored.map((n) => Number(n) | 0);
                     }
                 }
-                const data = await sendReq('export_subset', payload, 10 * 60 * 1000);
-                post({ type: 'subsetExported', run_id: String(runId), ...data });
+                const data = await (0, ipc_1.sendReq)('export_subset', payload, 10 * 60 * 1000);
+                (0, state_1.post)({ type: 'subsetExported', run_id: String(runId), ...data });
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
         case 'modelNav.select': {
             const id = String(m.runId || '').trim();
             if (id) {
-                modelNavSelectedRunId = id;
-                post({ type: 'log', text: `[modelNav] selected: ${id}` });
-                post({ type: 'modelNav.select', runId: id }); // echo to webview so it knows which run is selected
+                state_1.extensionState.modelNavSelectedRunId = id;
+                (0, state_1.post)({ type: 'log', text: `[modelNav] selected: ${id}` });
+                (0, state_1.post)({ type: 'modelNav.select', runId: id }); // echo to webview so it knows which run is selected
                 try {
                     const rows = (0, storage_1.getLogs)(id); // all phases
-                    post({ type: 'logs', run_id: id, rows: stripUiOnlyFields(rows) });
+                    (0, state_1.post)({ type: 'logs', run_id: id, rows: (0, state_1.stripUiOnlyFields)(rows) });
                 }
                 catch (e) {
                     console.warn('[onthefly] failed to load logs for selected run', id, e);
@@ -801,73 +521,73 @@ async function onMessage(context, m) {
             try {
                 const phase = m.phase;
                 const requested = String(m.runId || '').trim();
-                const selected = modelNavSelectedRunId && modelNavSelectedRunId.trim();
-                const active = currentRunId && currentRunId.trim();
+                const selected = state_1.extensionState.modelNavSelectedRunId && state_1.extensionState.modelNavSelectedRunId.trim();
+                const active = state_1.extensionState.currentRunId && state_1.extensionState.currentRunId.trim();
                 const rid = requested || selected || active || '';
                 let rows = rid ? (0, storage_1.getLogs)(rid, phase) : [];
-                if ((!rows || rows.length === 0) && currentSessionId) {
-                    rows = (0, storage_1.getLogsBySession)(currentSessionId, phase);
+                if ((!rows || rows.length === 0) && state_1.extensionState.currentSessionId) {
+                    rows = (0, storage_1.getLogsBySession)(state_1.extensionState.currentSessionId, phase);
                 }
-                post({ type: 'logs', run_id: rid || null, rows: stripUiOnlyFields(rows) });
+                (0, state_1.post)({ type: 'logs', run_id: rid || null, rows: (0, state_1.stripUiOnlyFields)(rows) });
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
         case 'requestTestRows': {
             try {
                 const rows = (0, storage_1.getTestRows)(String(m.runId));
-                post({ type: 'testRows', run_id: String(m.runId), rows });
+                (0, state_1.post)({ type: 'testRows', run_id: String(m.runId), rows });
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
         case 'pause': {
-            if (pauseInFlight) {
-                post({ type: 'log', text: '[pause] Request already in progress.' });
+            if (state_1.extensionState.pauseInFlight) {
+                (0, state_1.post)({ type: 'log', text: '[pause] Request already in progress.' });
                 break;
             }
-            if (runActivityState === 'paused') {
+            if (state_1.extensionState.runActivityState === 'paused') {
                 break;
             }
-            pauseInFlight = true;
+            state_1.extensionState.pauseInFlight = true;
             try {
                 // 1) Ask the backend to pause (finish current step, flush state, etc.)
-                const pauseInfo = await requestBackendPause(30_000); // backend will do its own checkpointing if it wants
+                const pauseInfo = await (0, ipc_1.requestBackendPause)(30_000); // backend will do its own checkpointing if it wants
                 // 2) Figure out which run this pause applies to
-                const runId = (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
-                    (currentRunId && currentRunId.trim()) ||
+                const runId = (state_1.extensionState.modelNavSelectedRunId && state_1.extensionState.modelNavSelectedRunId.trim()) ||
+                    (state_1.extensionState.currentRunId && state_1.extensionState.currentRunId.trim()) ||
                     null;
                 if (!runId) {
-                    post({ type: 'warn', text: '[pause] No runId available to attach checkpoint to.' });
+                    (0, state_1.post)({ type: 'warn', text: '[pause] No runId available to attach checkpoint to.' });
                     break;
                 }
                 const pausedStep = Number(pauseInfo?.step);
                 const payload = { cmd: 'pause', run_id: runId };
                 if (Number.isFinite(pausedStep))
                     payload.step = pausedStep;
-                post({
+                (0, state_1.post)({
                     type: 'paused',
                     payload,
                 });
                 // 3) Explicitly save a checkpoint and persist it in storage
                 try {
-                    const ck = await sendReq('save_ckpt', {}, 120_000);
+                    const ck = await (0, ipc_1.sendReq)('save_ckpt', {}, 120_000);
                     if (ck?.path) {
                         const stepNum = Number(ck.step) || 0;
                         const ckptId = `${runId}:${stepNum}:${Date.now()}`; // same style as elsewhere
                         (0, storage_1.insertCheckpoint)(ckptId, runId, stepNum, String(ck.path));
-                        post({
+                        (0, state_1.post)({
                             type: 'log',
                             level: 'info',
                             text: `[pause] checkpoint saved for run ${runId} at step ${stepNum}`,
                         });
                     }
                     else {
-                        post({
+                        (0, state_1.post)({
                             type: 'warn',
                             text: '[pause] save_ckpt returned no path; checkpoint not recorded in DB.',
                         });
@@ -875,59 +595,59 @@ async function onMessage(context, m) {
                 }
                 catch (ckErr) {
                     console.warn('[onthefly] pause: save_ckpt / insertCheckpoint failed:', ckErr);
-                    post({
+                    (0, state_1.post)({
                         type: 'warn',
                         text: `[pause] Failed to save/persist checkpoint: ${ckErr?.message || String(ckErr)}`,
                     });
                 }
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             finally {
-                pauseInFlight = false;
+                state_1.extensionState.pauseInFlight = false;
             }
             break;
         }
         case 'resume': {
-            if (resumeInFlight) {
-                post({ type: 'log', text: '[resume] Request already in progress.' });
+            if (state_1.extensionState.resumeInFlight) {
+                (0, state_1.post)({ type: 'log', text: '[resume] Request already in progress.' });
                 break;
             }
             const requested = String(m.runId || '').trim();
             if (requested)
-                modelNavSelectedRunId = requested;
-            const target = requested || modelNavSelectedRunId || currentRunId || null;
+                state_1.extensionState.modelNavSelectedRunId = requested;
+            const target = requested || state_1.extensionState.modelNavSelectedRunId || state_1.extensionState.currentRunId || null;
             if (!target) {
                 try {
                     const rows = (0, storage_1.listRuns)();
                     if (!rows.length) {
-                        pendingResumeAwaitingFirstRun = true;
-                        post({ type: 'log', text: '[resume] No runs exist yet. Waiting for a fresh trainer session…' });
-                        await resumeAfterReset();
+                        state_1.extensionState.pendingResumeAwaitingFirstRun = true;
+                        (0, state_1.post)({ type: 'log', text: '[resume] No runs exist yet. Waiting for a fresh trainer session…' });
+                        await (0, ipc_1.resumeAfterReset)();
                     }
                     else {
-                        post({ type: 'error', text: '[resume] No run selected.' });
+                        (0, state_1.post)({ type: 'error', text: '[resume] No run selected.' });
                     }
                 }
                 catch (e) {
-                    pendingResumeAwaitingFirstRun = false;
-                    postErr(e);
+                    state_1.extensionState.pendingResumeAwaitingFirstRun = false;
+                    (0, state_1.postErr)(e);
                 }
                 break;
             }
-            await resumeTrainerOn(target);
+            await (0, ipc_1.resumeTrainerOn)(target);
             break;
         }
         case 'testNow': {
             const requested = m.runId;
             const candidate = (requested && requested.trim())
-                || (modelNavSelectedRunId && modelNavSelectedRunId.trim())
-                || (currentRunId && currentRunId.trim())
+                || (state_1.extensionState.modelNavSelectedRunId && state_1.extensionState.modelNavSelectedRunId.trim())
+                || (state_1.extensionState.currentRunId && state_1.extensionState.currentRunId.trim())
                 || null;
             try {
                 if (!candidate) {
-                    post({ type: 'log', text: 'Select a model in Model Nav before testing.' });
+                    (0, state_1.post)({ type: 'log', text: 'Select a model in Model Nav before testing.' });
                     break;
                 }
                 const runs = (0, storage_1.listRuns)();
@@ -937,21 +657,21 @@ async function onMessage(context, m) {
                     detail: 'Confirming will test immediately and replace the stored final checkpoint for this session. You can continue training this and other models after.'
                 }, 'Confirm Test');
                 if (choice !== 'Confirm Test') {
-                    post({ type: 'log', text: 'Test cancelled.' });
+                    (0, state_1.post)({ type: 'log', text: 'Test cancelled.' });
                     break;
                 }
                 const target = candidate;
-                await ensureTrainerOnRun(target);
+                await (0, ipc_1.ensureTrainerOnRun)(target);
                 try {
-                    await requestBackendPause(30_000);
+                    await (0, ipc_1.requestBackendPause)(30_000);
                 }
                 catch (pauseErr) {
                     console.warn('[onthefly] pause before test failed', pauseErr);
                 }
-                post({ type: 'testNow', status: 'pending', run_id: target });
-                const data = await sendReq('test_now', { label: 'final' }, TEST_NOW_TIMEOUT_MS);
+                (0, state_1.post)({ type: 'testNow', status: 'pending', run_id: target });
+                const data = await (0, ipc_1.sendReq)('test_now', { label: 'final' }, TEST_NOW_TIMEOUT_MS);
                 const normalizedLoss = Number.isFinite(Number(data?.avg_loss)) ? Number(data.avg_loss) : null;
-                const sessionIdRaw = (data?.session_id && String(data.session_id)) || currentSessionId || '';
+                const sessionIdRaw = (data?.session_id && String(data.session_id)) || state_1.extensionState.currentSessionId || '';
                 const sessionId = (sessionIdRaw && sessionIdRaw.trim()) || `session-${target}`;
                 const ckptPath = data?.ckpt_path ? String(data.ckpt_path) : '';
                 if (sessionId && ckptPath) {
@@ -968,7 +688,7 @@ async function onMessage(context, m) {
                         console.warn('[onthefly] failed to persist final model', persistErr);
                     }
                 }
-                post({
+                (0, state_1.post)({
                     type: 'testNow',
                     status: 'completed',
                     run_id: target,
@@ -976,9 +696,9 @@ async function onMessage(context, m) {
                 });
             }
             catch (e) {
-                const fallback = candidate || modelNavSelectedRunId || currentRunId || null;
-                post({ type: 'testNow', status: 'error', run_id: fallback, error: String(e?.message || e) });
-                postErr(e);
+                const fallback = candidate || state_1.extensionState.modelNavSelectedRunId || state_1.extensionState.currentRunId || null;
+                (0, state_1.post)({ type: 'testNow', status: 'error', run_id: fallback, error: String(e?.message || e) });
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -997,29 +717,29 @@ async function onMessage(context, m) {
                 // Also consider runId as a parent hint
                 const hinted = String(payloadIn.owner_run_id || payloadIn.parent_run_id || payloadIn.runId || '').trim();
                 const target = hinted ||
-                    modelNavSelectedRunId ||
-                    currentRunId ||
+                    state_1.extensionState.modelNavSelectedRunId ||
+                    state_1.extensionState.currentRunId ||
                     pickAnchorRunForAction(payloadIn) ||
                     '';
                 if (!target) {
-                    postErr('No run selected to fork from.');
+                    (0, state_1.postErr)('No run selected to fork from.');
                     break;
                 }
-                await ensureTrainerOnRun(target);
+                await (0, ipc_1.ensureTrainerOnRun)(target);
                 try {
-                    await requestBackendPause(30_000);
+                    await (0, ipc_1.requestBackendPause)(30_000);
                 }
                 catch { }
                 let ckptPath = (0, storage_1.latestCheckpointForRun)(target)?.path;
                 if (!ckptPath) {
                     try {
-                        const ck = await sendReq('save_ckpt', {}, 120_000);
+                        const ck = await (0, ipc_1.sendReq)('save_ckpt', {}, 120_000);
                         ckptPath = ck?.path;
                     }
                     catch { }
                 }
                 // Forward region/hparams through to backend
-                const data = await sendReq('fork', {
+                const data = await (0, ipc_1.sendReq)('fork', {
                     parent_run_id: target,
                     owner_run_id: target,
                     ...payloadIn,
@@ -1027,10 +747,10 @@ async function onMessage(context, m) {
                 }, 120_000);
                 const child = String(data?.new_run || data?.child_id || data?.run_id || '').trim();
                 if (child) {
-                    currentRunId = child;
-                    modelNavSelectedRunId = child;
-                    nativeRunsThisSession.add(child);
-                    post({ type: 'modelNav.select', runId: child });
+                    state_1.extensionState.currentRunId = child;
+                    state_1.extensionState.modelNavSelectedRunId = child;
+                    state_1.extensionState.nativeRunsThisSession.add(child);
+                    (0, state_1.post)({ type: 'modelNav.select', runId: child });
                     if (Array.isArray(data?.subset_indices)) {
                         try {
                             (0, storage_1.setRunSubset)(child, data.subset_indices.map((n) => Number(n) | 0));
@@ -1038,13 +758,13 @@ async function onMessage(context, m) {
                         catch { }
                     }
                     try {
-                        sendCtl({ cmd: 'resume' });
+                        (0, ipc_1.sendCtl)({ cmd: 'resume' });
                     }
                     catch { }
                 }
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1053,33 +773,33 @@ async function onMessage(context, m) {
                 const payload = m.payload;
                 const anchor = pickAnchorRunForAction(payload);
                 if (!anchor) {
-                    postErr('No runs available to anchor the merge. Select a run or include parents[].');
+                    (0, state_1.postErr)('No runs available to anchor the merge. Select a run or include parents[].');
                     break;
                 }
-                await ensureTrainerOnRun(anchor);
+                await (0, ipc_1.ensureTrainerOnRun)(anchor);
                 try {
-                    await requestBackendPause(30_000);
+                    await (0, ipc_1.requestBackendPause)(30_000);
                 }
                 catch { }
                 // Preflight: all parents must have checkpoints.
                 const parents = Array.isArray(payload.parents) ? payload.parents : [];
                 const missing = parents.filter(p => !(0, storage_1.latestCheckpointForRun)(p));
                 if (missing.length) {
-                    post({
+                    (0, state_1.post)({
                         type: 'error',
                         text: `[merge] Missing checkpoints for parent runs: ${missing.join(', ')}. Pause runs in your script to create checkpoints first.`,
                     });
                     break;
                 }
                 // Perform the merge.
-                const data = await sendReq('merge', payload, 120000);
+                const data = await (0, ipc_1.sendReq)('merge', payload, 120000);
                 // --- immediately navigate to the merged child & start running (mirror fork behavior) ---
                 const child = String((data && (data.new_run ?? data.child_id ?? data.run_id)) || '').trim();
                 if (child) {
-                    currentRunId = child;
-                    modelNavSelectedRunId = child;
-                    nativeRunsThisSession.add(child);
-                    post({ type: 'modelNav.select', runId: child });
+                    state_1.extensionState.currentRunId = child;
+                    state_1.extensionState.modelNavSelectedRunId = child;
+                    state_1.extensionState.nativeRunsThisSession.add(child);
+                    (0, state_1.post)({ type: 'modelNav.select', runId: child });
                     // If backend provided a subset, persist it like we do on fork.
                     if (Array.isArray(data?.subset_indices)) {
                         try {
@@ -1089,7 +809,7 @@ async function onMessage(context, m) {
                     }
                     // Nudge the backend to resume the new merged run.
                     try {
-                        sendCtl({ cmd: 'resume' });
+                        (0, ipc_1.sendCtl)({ cmd: 'resume' });
                     }
                     catch { }
                 }
@@ -1099,7 +819,7 @@ async function onMessage(context, m) {
                 }
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1109,13 +829,13 @@ async function onMessage(context, m) {
                 const target = await requireActiveRun(rid);
                 if (!target)
                     break;
-                await ensureTrainerOnRun(target);
-                modelNavSelectedRunId = target;
-                post({ type: 'modelNav.select', runId: target });
-                await runHealth('dist_health', { require_all_ranks: false, sample_weights: 0 }, 'distHealth', 30_000, target);
+                await (0, ipc_1.ensureTrainerOnRun)(target);
+                state_1.extensionState.modelNavSelectedRunId = target;
+                (0, state_1.post)({ type: 'modelNav.select', runId: target });
+                await (0, ipc_1.runHealth)('dist_health', { require_all_ranks: false, sample_weights: 0 }, 'distHealth', 30_000, target);
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1125,13 +845,13 @@ async function onMessage(context, m) {
                 const target = await requireActiveRun(rid);
                 if (!target)
                     break;
-                await ensureTrainerOnRun(target);
-                modelNavSelectedRunId = target;
-                post({ type: 'modelNav.select', runId: target });
-                await runHealth('throughput_health', { budget_steps: 2, micro_backward: false }, 'throughputHealth', 45_000, target);
+                await (0, ipc_1.ensureTrainerOnRun)(target);
+                state_1.extensionState.modelNavSelectedRunId = target;
+                (0, state_1.post)({ type: 'modelNav.select', runId: target });
+                await (0, ipc_1.runHealth)('throughput_health', { budget_steps: 2, micro_backward: false }, 'throughputHealth', 45_000, target);
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1141,13 +861,13 @@ async function onMessage(context, m) {
                 const target = await requireActiveRun(rid);
                 if (!target)
                     break;
-                await ensureTrainerOnRun(target);
-                modelNavSelectedRunId = target;
-                post({ type: 'modelNav.select', runId: target });
-                await runHealth('activations_health', { budget_steps: 2, topk: 12, eps: 1e-3 }, 'activationsHealth', 60_000, target);
+                await (0, ipc_1.ensureTrainerOnRun)(target);
+                state_1.extensionState.modelNavSelectedRunId = target;
+                (0, state_1.post)({ type: 'modelNav.select', runId: target });
+                await (0, ipc_1.runHealth)('activations_health', { budget_steps: 2, topk: 12, eps: 1e-3 }, 'activationsHealth', 60_000, target);
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1157,13 +877,13 @@ async function onMessage(context, m) {
                 const target = await requireActiveRun(rid);
                 if (!target)
                     break;
-                await ensureTrainerOnRun(target);
-                modelNavSelectedRunId = target;
-                post({ type: 'modelNav.select', runId: target });
-                await runHealth('numerics_health', { sample_layers: 25 }, 'numericsHealth', 30_000, target);
+                await (0, ipc_1.ensureTrainerOnRun)(target);
+                state_1.extensionState.modelNavSelectedRunId = target;
+                (0, state_1.post)({ type: 'modelNav.select', runId: target });
+                await (0, ipc_1.runHealth)('numerics_health', { sample_layers: 25 }, 'numericsHealth', 30_000, target);
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1173,13 +893,13 @@ async function onMessage(context, m) {
                 const target = await requireActiveRun(rid);
                 if (!target)
                     break;
-                await ensureTrainerOnRun(target);
-                modelNavSelectedRunId = target;
-                post({ type: 'modelNav.select', runId: target });
-                await runHealth('determinism_health', {}, 'determinismHealth', 20_000, target);
+                await (0, ipc_1.ensureTrainerOnRun)(target);
+                state_1.extensionState.modelNavSelectedRunId = target;
+                (0, state_1.post)({ type: 'modelNav.select', runId: target });
+                await (0, ipc_1.runHealth)('determinism_health', {}, 'determinismHealth', 20_000, target);
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1189,28 +909,28 @@ async function onMessage(context, m) {
                 if (!runId || !String(runId).trim()) {
                     const anchor = pickAnchorRunForAction(); // choose something sensible if not provided
                     if (!anchor) {
-                        post({ type: 'error', text: 'No active run selected for report.' });
+                        (0, state_1.post)({ type: 'error', text: 'No active run selected for report.' });
                         break;
                     }
                     runId = anchor;
                 }
                 runId = String(runId).trim();
-                await ensureTrainerOnRun(runId);
+                await (0, ipc_1.ensureTrainerOnRun)(runId);
                 const target = await requireActiveRun(runId);
                 if (!target)
                     break;
                 runId = target;
-                modelNavSelectedRunId = runId;
-                post({ type: 'modelNav.select', runId });
-                await requestBackendPause(30_000);
+                state_1.extensionState.modelNavSelectedRunId = runId;
+                (0, state_1.post)({ type: 'modelNav.select', runId });
+                await (0, ipc_1.requestBackendPause)(30_000);
                 const subset = (0, storage_1.getRunSubset)(String(target));
                 const subset_on = 'train';
-                const data = await sendReq('generate_report', {
+                const data = await (0, ipc_1.sendReq)('generate_report', {
                     owner_run_id: target,
                     subset_indices: subset.length ? subset : undefined,
                     subset_on,
                     reqId: m.reqId
-                });
+                }, 10 * 60 * 1000);
                 const losses = Array.isArray(data?.losses)
                     ? data.losses.map(Number).filter(Number.isFinite)
                     : [];
@@ -1234,7 +954,7 @@ async function onMessage(context, m) {
                     at_epoch,
                     samples: losses.length
                 });
-                post({
+                (0, state_1.post)({
                     type: 'reportData',
                     run_id: String(runId),
                     owner_run_id: String(runId),
@@ -1245,7 +965,7 @@ async function onMessage(context, m) {
                 });
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1256,7 +976,7 @@ async function onMessage(context, m) {
                     break;
                 const row = (0, storage_1.getReportLossDist)(String(runId), 'train');
                 if (row) {
-                    post({
+                    (0, state_1.post)({
                         type: 'reportFromDb',
                         run_id: String(runId),
                         owner_run_id: String(runId),
@@ -1266,14 +986,14 @@ async function onMessage(context, m) {
                 }
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
         case 'notify': {
             const lvl = m.level || 'info';
             const type = lvl === 'error' ? 'error' : 'log';
-            post({ type, text: m.text });
+            (0, state_1.post)({ type, text: m.text });
             break;
         }
         case 'exportSession': {
@@ -1288,26 +1008,26 @@ async function onMessage(context, m) {
                 if (!picked)
                     break;
                 const bundleDir = picked.fsPath;
-                await context.globalState.update(LAST_EXPORT_DIR_KEY, path.dirname(bundleDir));
+                await context.globalState.update(state_1.LAST_EXPORT_DIR_KEY, path.dirname(bundleDir));
                 fs.mkdirSync(bundleDir, { recursive: true });
                 // NOTE: "modelNav" → we don't keep a separate nav map here; the DB is source of truth.
                 // Grab every run_id we know and treat that as the nav list.
                 const allRuns = (0, storage_1.listRuns)().map(r => String(r.run_id));
                 const owners = Array.from(new Set(allRuns)).filter(Boolean);
                 let spillRoot = null;
-                if (trainerActive()) {
+                if ((0, ipc_1.trainerActive)()) {
                     spillRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'onthefly-spill-'));
                     // 1) try the multi-owner prepare_export API (forces snapshots/ckpts for all runs)
                     let prep = null;
                     try {
                         // latest_only keeps the bundle trim
-                        prep = await sendReq('prepare_export', { dir: spillRoot, latest_only: true, owners }, 10 * 60 * 1000);
+                        prep = await (0, ipc_1.sendReq)('prepare_export', { dir: spillRoot, latest_only: true, owners }, 10 * 60 * 1000);
                     }
                     catch (e) {
                         // old servers won't know prepare_export(owners=...), fall back to a generic spill
-                        post({ type: 'log', text: '[export] prepare_export not available or failed; falling back to spill_all().' });
+                        (0, state_1.post)({ type: 'log', text: '[export] prepare_export not available or failed; falling back to spill_all().' });
                         try {
-                            const recs = await sendReq('spill_all', { dir: spillRoot, latest_only: true }, 10 * 60 * 1000);
+                            const recs = await (0, ipc_1.sendReq)('spill_all', { dir: spillRoot, latest_only: true }, 10 * 60 * 1000);
                             prep = { ckpt: null, snapshots: recs };
                         }
                         catch (e2) {
@@ -1341,7 +1061,7 @@ async function onMessage(context, m) {
                 }
                 else {
                     // not running → just bundle whatever DB already references
-                    post({ type: 'log', text: '[export] Python not running; bundling existing DB checkpoints only.' });
+                    (0, state_1.post)({ type: 'log', text: '[export] Python not running; bundling existing DB checkpoints only.' });
                 }
                 // 5) build the portable bundle (copies DB + referenced ckpts into bundle)
                 (0, storage_1.exportBundle)(bundleDir);
@@ -1355,10 +1075,10 @@ async function onMessage(context, m) {
                 const choice = await vscode.window.showInformationMessage(`Export complete: ${bundleDir}`, 'Reveal in Finder/Explorer');
                 if (choice)
                     vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(bundleDir));
-                post({ type: 'sessionSaved', path: bundleDir });
+                (0, state_1.post)({ type: 'sessionSaved', path: bundleDir });
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1377,7 +1097,7 @@ async function onMessage(context, m) {
                     break;
                 const chosen = picked[0].fsPath;
                 const isDir = fs.existsSync(chosen) && fs.statSync(chosen).isDirectory();
-                await context.globalState.update(LAST_EXPORT_DIR_KEY, isDir ? chosen : path.dirname(chosen));
+                await context.globalState.update(state_1.LAST_EXPORT_DIR_KEY, isDir ? chosen : path.dirname(chosen));
                 let bundleDir = null;
                 if (isDir) {
                     const manifestPath = path.join(chosen, 'bundle.json');
@@ -1398,22 +1118,22 @@ async function onMessage(context, m) {
                 // Load the bundle into the live DB
                 (0, storage_1.loadBundle)(bundleDir, context);
                 for (const s of (0, storage_1.listSessions)()) {
-                    post({ type: 'log', text: `[print] session ${s.session_id}: ${(0, storage_1.getLogsBySession)(String(s.session_id)).length} logs` });
+                    (0, state_1.post)({ type: 'log', text: `[print] session ${s.session_id}: ${(0, storage_1.getLogsBySession)(String(s.session_id)).length} logs` });
                 }
                 // Notify UI & refresh runs
-                post({ type: 'sessionLoaded' });
+                (0, state_1.post)({ type: 'sessionLoaded' });
                 const runs = (0, storage_1.listRuns)();
-                post({ type: 'runs', rows: runs });
+                (0, state_1.post)({ type: 'runs', rows: runs });
                 try {
                     const sessions = (0, storage_1.listSessions)();
-                    post({ type: 'fs.session.list', items: sessions });
+                    (0, state_1.post)({ type: 'fs.session.list', items: sessions });
                 }
                 catch { }
                 // Hydrate logs for each run so the webview has something to render immediately
                 for (const r of runs) {
                     try {
                         const rows = (0, storage_1.getLogs)(String(r.run_id)); // all phases
-                        post({ type: 'logs', run_id: String(r.run_id), rows: stripUiOnlyFields(rows) });
+                        (0, state_1.post)({ type: 'logs', run_id: String(r.run_id), rows: (0, state_1.stripUiOnlyFields)(rows) });
                     }
                     catch (e) {
                         console.warn('[onthefly] failed to load logs for run', r.run_id, e);
@@ -1424,7 +1144,7 @@ async function onMessage(context, m) {
                     vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(bundleDir));
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
@@ -1434,7 +1154,7 @@ async function onMessage(context, m) {
                 detail: 'Any running training will be stopped. Nothing will be saved if you have not exported session.',
             }, 'Erase & Refresh');
             if (pick !== 'Erase & Refresh') {
-                post({ type: 'log', text: 'Refresh cancelled.' });
+                (0, state_1.post)({ type: 'log', text: 'Refresh cancelled.' });
                 break;
             }
             await hardResetSession(context, { fromUser: true });
@@ -1443,93 +1163,25 @@ async function onMessage(context, m) {
         case 'requestRuns': {
             try {
                 const rows = (0, storage_1.listRuns)();
-                post({ type: 'runs', rows });
+                (0, state_1.post)({ type: 'runs', rows });
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
         case 'requestRows': {
             try {
-                post({ type: 'rows', rows: (0, storage_1.getRunRows)(m.runId) });
+                (0, state_1.post)({ type: 'rows', rows: (0, storage_1.getRunRows)(m.runId) });
             }
             catch (e) {
-                postErr(e);
+                (0, state_1.postErr)(e);
             }
             break;
         }
     }
 }
 /* ============================ Python process (training) ============================ */
-async function startRun() {
-    ensureTrainerServer();
-    if (trainerSocket && !trainerSocket.destroyed) {
-        postStatus(true);
-        return;
-    }
-    await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: 'Waiting for OnTheFly Trainer connection…' }, async () => {
-        try {
-            await waitForTrainerConnection(60000);
-            postStatus(true);
-        }
-        catch (e) {
-            throw new Error('No Trainer connected. Run your training script in a terminal and instantiate OnTheFlyTrainer.');
-        }
-    });
-}
-async function waitForTrainerConnection(timeoutMs = 0) {
-    const start = Date.now();
-    while (true) {
-        if (trainerSocket && !trainerSocket.destroyed)
-            return;
-        if (timeoutMs && Date.now() - start > timeoutMs) {
-            throw new Error('Timed out waiting for Trainer connection.');
-        }
-        await new Promise((res) => setTimeout(res, 250));
-    }
-}
-function sendCtl(cmd) {
-    if (!trainerSocket || trainerSocket.destroyed) {
-        post({ type: 'error', text: 'No Trainer connected. Run your script first.' });
-        return;
-    }
-    try {
-        trainerSocket.write(JSON.stringify(cmd) + '\n');
-        const t = cmd.cmd;
-        if (t === 'resume')
-            setRunActivity('running');
-        if (t && optimisticEcho[t])
-            post({ type: optimisticEcho[t], payload: cmd });
-    }
-    catch (e) {
-        postErr(e);
-    }
-}
-async function requestBackendPause(timeoutMs = 30_000) {
-    const data = await sendReq('pause', {}, timeoutMs);
-    setRunActivity('paused');
-    return data;
-}
-async function runHealth(cmd, payload, eventType, timeoutMs = 60_000, forRunId) {
-    const run_id = forRunId || modelNavSelectedRunId || currentRunId || null;
-    try {
-        // tell the webview to show a loading placeholder
-        post({ type: eventType, run_id, pending: true });
-        try {
-            await requestBackendPause(30_000);
-        }
-        catch { }
-        const data = await sendReq(cmd, payload, timeoutMs);
-        // normal success event (what your webview already handles)
-        post({ type: eventType, cmd, payload, data, run_id });
-    }
-    catch (e) {
-        // let the UI show an error if needed
-        post({ type: eventType, run_id, error: String(e?.message || e) });
-        postErr(e);
-    }
-}
 function pickAnchorRunForAction(hint) {
     const fromRunId = typeof hint?.runId === 'string' && hint.runId.trim() ? String(hint.runId).trim() : null;
     const fromParents = Array.isArray(hint?.parents) && hint.parents.length ? String(hint.parents[0]) : null;
@@ -1537,10 +1189,10 @@ function pickAnchorRunForAction(hint) {
         return fromRunId;
     if (fromParents)
         return fromParents;
-    if (modelNavSelectedRunId?.trim())
-        return modelNavSelectedRunId.trim();
-    if (currentRunId?.trim())
-        return currentRunId.trim();
+    if (state_1.extensionState.modelNavSelectedRunId?.trim())
+        return state_1.extensionState.modelNavSelectedRunId.trim();
+    if (state_1.extensionState.currentRunId?.trim())
+        return state_1.extensionState.currentRunId.trim();
     try {
         const first = (0, storage_1.listRuns)()[0]?.run_id;
         if (first)
@@ -1550,374 +1202,10 @@ function pickAnchorRunForAction(hint) {
     return null;
 }
 async function requireActiveRun(requestedRunId) {
-    const target = String(requestedRunId || modelNavSelectedRunId || currentRunId || '').trim();
+    const target = String(requestedRunId || state_1.extensionState.modelNavSelectedRunId || state_1.extensionState.currentRunId || '').trim();
     if (!target)
         return null;
-    await ensureTrainerOnRun(target);
+    await (0, ipc_1.ensureTrainerOnRun)(target);
     return target;
-}
-function normalizeParents(from) {
-    const raw = (from && (from.parents ?? from.parent)) ?? [];
-    if (Array.isArray(raw))
-        return raw.filter(Boolean).map((s) => String(s));
-    if (raw == null || raw === '')
-        return [];
-    return [String(raw)];
-}
-/* ============================ Line handler ============================ */
-function handleLine(line) {
-    let obj = null;
-    try {
-        obj = JSON.parse(line);
-    }
-    catch {
-        post({ type: 'log', text: line });
-        return;
-    }
-    if (obj && obj.event && !obj.type) {
-        obj.type = obj.event;
-        delete obj.event;
-    }
-    // ==== RPC responses (leave as-is) ====
-    if (obj && obj.id && (obj.ok === true || obj.ok === false)) {
-        const p = pending.get(obj.id);
-        if (p) {
-            clearTimeout(p.timer);
-            pending.delete(obj.id);
-            obj.ok ? p.resolve(obj.data) : p.reject(new Error(obj.error || 'python error'));
-        }
-        return;
-    }
-    if (obj && obj.type === 'testStep') {
-        const run_id = obj.run_id || currentRunId || 'live';
-        const step = Number(obj.step) || 0;
-        const loss = Number(obj.loss);
-        post({ type: 'testStep', run_id, step, loss: Number.isFinite(loss) ? loss : null, ts: Date.now() });
-        try {
-            (0, storage_1.insertTestMetric)(run_id, step, Number.isFinite(loss) ? loss : null);
-        }
-        catch { }
-        return;
-    }
-    if (obj?.type === 'paused') {
-        setRunActivity('paused');
-        pauseInFlight = false;
-    }
-    else if (obj?.type === 'resumed') {
-        setRunActivity('running');
-        resumeInFlight = false;
-    }
-    else if (obj?.type === 'trainingFinished') {
-        setRunActivity(null);
-        pauseInFlight = false;
-        resumeInFlight = false;
-    }
-    if (obj?.type === 'log') {
-        const run_id = obj.run_id || currentRunId || 'live';
-        // Prefer explicit, then fallback to sticky session
-        const session_id = obj.session_id || obj.sessionId || currentSessionId || null;
-        if (run_id && session_id && currentSessionId && session_id === currentSessionId) {
-            nativeRunsThisSession.add(String(run_id));
-        }
-        const level = obj.level || 'info';
-        const text = String(obj.text || '');
-        // 1) honor explicit phase if provided by backend
-        const pRaw = (obj.phase && String(obj.phase).toLowerCase()) || null;
-        let phase = (pRaw === 'train' || pRaw === 'test' || pRaw === 'info') ? pRaw : 'info';
-        // parse a few common patterns to enrich rows (prefer TEST first)
-        let step = null;
-        let epoch = null;
-        const mEpoch = text.match(/^\s*epoch\s+(\d+)\s*$/i);
-        if (mEpoch && phase === 'info') {
-            epoch = Number(mEpoch[1]);
-            phase = 'train';
-        }
-        // ---- TEST first (looser match) ----
-        const mTest = text.match(/step\s+(\d+)\s*:\s*test[_\s]*loss\s*=\s*([0-9.eE+\-]+)/i);
-        if (mTest && phase === 'info') {
-            step = Number(mTest[1]);
-            phase = 'test';
-        }
-        if (/\btesting\b/i.test(text) && phase === 'info')
-            phase = 'test';
-        if (/\b(?:eval|evaluation)\b/i.test(text) && /\b(loss|acc|metric)\b/i.test(text) && phase === 'info')
-            phase = 'test';
-        // ---- TRAIN (slightly looser too) ----
-        const mTrain = text.match(/step\s+(\d+)\s*:\s*train[_\s]*loss\s*=\s*([0-9.eE+\-]+).*?val[_\s]*loss\s*=\s*([0-9.eE+\-]+|None)/i);
-        if (mTrain && phase === 'info') {
-            step = Number(mTrain[1]);
-            phase = 'train';
-        }
-        if ((/\btrain[_\s]*loss\b/i.test(text) || /\bval[_\s]*loss\b/i.test(text)) && phase === 'info') {
-            phase = 'train';
-        }
-        const tsMs = (Number(obj.ts) > 0 ? Math.round(Number(obj.ts) * 1000) : Date.now());
-        // If the raw text already includes "step N", don't also render the UI "s: N" badge.
-        const hasStepInText = /\bstep\b\s*(?:[:#]\s*)?\d+(?:\s*[:#])?/i.test(text);
-        const stepForUI = hasStepInText ? null : step;
-        try {
-            // keep full fidelity in storage
-            (0, storage_1.insertLog)({ run_id, session_id, level, text, phase, step, epoch, ts: tsMs });
-        }
-        catch { }
-        // suppress redundant "s:" in the webview
-        post({ type: 'log', run_id, session_id, level, text, phase, step: stepForUI, epoch });
-        return;
-    }
-    // swallow unsolicited reportData (RPC handles reply)
-    if (obj?.type === 'reportData') {
-        return;
-    }
-    if (obj?.type === 'merge_gating') {
-        post({
-            type: 'merge_gating',
-            reason: obj.reason || 'unknown',
-            parents: Array.isArray(obj.parents) ? obj.parents.map(String) : [],
-            step: Number(obj.step) || null,
-            run_id: obj.run_id || currentRunId || null,
-            // pass through any other fields (e.g., have_parent_ckpt, have_child_ckpt, child_id, etc.)
-            ...obj
-        });
-        return;
-    }
-    // ==== streaming steps ====
-    if (obj && obj.type === 'trainStep') {
-        const run_id = obj.run_id || currentRunId || 'live';
-        const num = (value) => (Number.isFinite(value) ? Number(value) : null);
-        //keep extension-side notion of "current run" in sync with the stream
-        currentRunId = run_id;
-        if (!modelNavSelectedRunId) {
-            modelNavSelectedRunId = run_id;
-        }
-        const row = {
-            run_id,
-            step: Number(obj.step) || 0,
-            epoch: num(obj.epoch),
-            loss: num(obj.loss),
-            val_loss: num(obj.val_loss),
-            accuracy: num(obj.accuracy),
-            lr: num(obj.lr),
-            grad_norm: num(obj.grad_norm),
-            weight_norm: num(obj.weight_norm),
-            activation_zero_frac: num(obj.activation_zero_frac),
-            throughput: num(obj.throughput),
-            mem_vram: num(obj.mem_vram),
-            gpu_util: num(obj.gpu_util),
-            ts: Number(obj.ts) || Date.now(),
-        };
-        const lastVal = (obj.val_loss == null ? 'None' : String(obj.val_loss));
-        post({ type: 'trainStep', ...row });
-        const logLine = `step ${row.step}: train_loss = ${row.loss ?? 'None'}, val_loss = ${lastVal}`;
-        if (runActivityState !== 'running') {
-            setRunActivity('running'); // this will now call postStatus(true) with run_id
-        }
-        post({ type: 'log', level: 'info', phase: 'train', text: logLine });
-        try {
-            (0, storage_1.insertMetric)(run_id, row);
-        }
-        catch (e) {
-            console.warn('[onthefly] metric persist error:', e);
-        }
-        return;
-    }
-    if (obj?.type === 'log' && obj.text && /model\s+session_id/i.test(obj.text)) {
-        const m = String(obj.text).match(/session_id\s*=\s*([^\s]+)/i);
-        if (m && m[1]) {
-            currentSessionId = m[1];
-            postCurrentSession();
-        }
-    }
-    // ==== canonical run creation ====
-    if (obj && obj.type === 'newRun') {
-        const id = String(obj.run_id || '').trim();
-        if (id)
-            nativeRunsThisSession.add(id);
-        if (!id)
-            return;
-        // If backend includes a session id on newRun, remember it
-        if (obj.session_id || obj.sessionId) {
-            currentSessionId = String(obj.session_id || obj.sessionId);
-            postCurrentSession();
-        }
-        const parents = normalizeParents(obj);
-        const project = obj.project || 'default';
-        const name = obj.run_name || id;
-        if (!seenRuns.has(id)) {
-            seenRuns.add(id);
-            currentRunId = id;
-            // If storage only supports single parent, store the first (primary)
-            const primaryParent = (parents && parents[0]) ?? null;
-            const existingRuns = (0, storage_1.listRuns)();
-            const existsInDb = existingRuns.some(r => r.run_id === id);
-            if (!existsInDb) {
-                (0, storage_1.insertRun)(id, project, name, primaryParent);
-            }
-        }
-        else {
-            currentRunId = id;
-        }
-        // include meta so webview can gate auto/manual UI
-        post({
-            type: 'newRun',
-            run_id: id,
-            parents,
-            meta: obj.meta,
-            session_id: currentSessionId || null,
-        });
-        post({ type: 'runs', rows: (0, storage_1.listRuns)() });
-        return;
-    }
-    if (obj?.type === 'auto_test_complete') {
-        const runId = String(obj.run_id || currentRunId || '').trim();
-        const ckptPath = obj.ckpt_path ? String(obj.ckpt_path) : '';
-        const step = Number(obj.step) || 0;
-        if (runId && ckptPath) {
-            try {
-                const ckptId = `${runId}:${step}:${Date.now()}`;
-                (0, storage_1.insertCheckpoint)(ckptId, runId, step, ckptPath);
-                post({
-                    type: 'log',
-                    level: 'info',
-                    text: `[auto-test] checkpoint recorded for run ${runId} at step ${step}`,
-                });
-            }
-            catch (e) {
-                console.warn('[onthefly] failed to persist auto-test checkpoint', e);
-                post({
-                    type: 'log',
-                    level: 'warn',
-                    text: `[auto-test] failed to persist checkpoint for run ${runId}: ${String(e?.message || e)}`,
-                });
-            }
-        }
-        else {
-            post({
-                type: 'log',
-                level: 'warn',
-                text: '[auto-test] auto_test_complete event missing run_id or ckpt_path; not recorded.',
-            });
-        }
-        // We already emitted a generic test_complete earlier, and that fell
-        // through to the default `post(obj)` below. This extra event is
-        // extension-only plumbing; no need to forward it again.
-        return;
-    }
-    // Default: forward to webview, then extra persistence for other events
-    post(obj);
-    try {
-        switch (obj?.type) {
-            case 'session_started': {
-                currentRunId = obj.run_id || currentRunId;
-                if (obj.session_id || obj.sessionId) {
-                    currentSessionId = String(obj.session_id || obj.sessionId);
-                    postCurrentSession();
-                }
-                if (needDiskCleanOnNextTrainer && trainerActive()) {
-                    needDiskCleanOnNextTrainer = false;
-                    (async () => {
-                        try {
-                            const res = await sendReq('clean_disk', { scope: 'all' }, 60_000);
-                            post({
-                                type: 'log',
-                                level: res?.ok ? 'info' : 'warn',
-                                text: res?.ok
-                                    ? '[startup] clean_disk: removed old runs from save_dir'
-                                    : `[startup] clean_disk reported an issue: ${res?.error ?? 'unknown error'}`,
-                            });
-                        }
-                        catch (e) {
-                            post({
-                                type: 'log',
-                                level: 'warn',
-                                text: `[startup] clean_disk failed (will continue anyway): ${e?.message || String(e)}`,
-                            });
-                        }
-                    })();
-                }
-                break;
-            }
-            case 'checkpoint_saved': {
-                const ckptId = `${obj.run_id}:${obj.step}:${Date.now()}`;
-                (0, storage_1.insertCheckpoint)(ckptId, obj.run_id, Number(obj.step) || 0, obj.path || '');
-                break;
-            }
-            case 'epoch_end': {
-                if (Number.isFinite(obj.val_loss)) {
-                    (0, storage_1.upsertSummary)(obj.run_id, null, obj.val_loss);
-                }
-                break;
-            }
-            default:
-                break;
-        }
-    }
-    catch (e) {
-        console.warn('[onthefly] sqlite persist error:', e);
-    }
-}
-//helpers
-function latestResumeHints(runId) {
-    if (!runId)
-        return null;
-    const ck = (0, storage_1.latestCheckpointForRun)(runId);
-    return ck ? { init_ckpt: ck.path, init_step: Number(ck.step) || 0 } : null;
-}
-async function seedTrainerForRun(targetRunId) {
-    const { forkMax, mergeMax } = computeForkMergeCounters();
-    const hints = latestResumeHints(targetRunId) || {};
-    // Use attach_context only when we really need to bind/attach:
-    if (!currentRunId || currentRunId !== targetRunId) {
-        await sendReq('attach_context', {
-            run_id: targetRunId,
-            ...hints,
-            fork_counter_init: forkMax || 0,
-            merge_counter_init: mergeMax || 0,
-        }, 30_000);
-    }
-    else {
-        // Already on this run – just send counter seeds if you care:
-        await sendReq('set_counter_seeds', {
-            fork_counter_init: forkMax || 0,
-            merge_counter_init: mergeMax || 0,
-        }, 30_000);
-    }
-}
-/** Try to attach the connected Trainer to a specific run, creating resume wiring. */
-async function ensureTrainerOnRun(targetRunId) {
-    if (!targetRunId)
-        throw new Error('No target run.');
-    await startRun(); // wait for socket
-    if (!requireTrainerConnection())
-        return;
-    const alreadyOn = currentRunId && currentRunId === targetRunId;
-    // If Trainer is already on this run, do nothing.
-    // No attach_context, no _bind_to_run, no ckpt reload.
-    if (alreadyOn) {
-        return;
-    }
-    // We are switching runs -> use switch_run + init hints.
-    const hints = latestResumeHints(targetRunId) || {};
-    const { forkMax, mergeMax } = computeForkMergeCounters();
-    await sendReq('switch_run', {
-        run_id: targetRunId,
-        ...hints,
-        fork_counter_init: forkMax || 0,
-        merge_counter_init: mergeMax || 0,
-    }, 30_000);
-    currentRunId = targetRunId;
-    modelNavSelectedRunId = targetRunId;
-    post({ type: 'modelNav.select', runId: targetRunId });
-}
-async function getSelectedRegionIndices(runId, minLoss, maxLoss) {
-    const data = await sendReq('get_selected_region_indices', {
-        run_id: String(runId),
-        min_loss: Number(minLoss),
-        max_loss: Number(maxLoss),
-    }, 60_000);
-    const arr = Array.isArray(data?.indices) ? data.indices : [];
-    // normalize to ints
-    return arr
-        .map((n) => Number(n) | 0)
-        .filter((n) => Number.isFinite(n) && n >= 0);
 }
 //# sourceMappingURL=extension.js.map

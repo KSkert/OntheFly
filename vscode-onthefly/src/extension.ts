@@ -1,16 +1,10 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as net from 'net';
-import * as crypto from 'crypto';
-import * as semver from 'semver';
-
 import {
   initStorage,
   insertRun,
-  insertMetric,
   insertCheckpoint,
-  upsertSummary,
   upsertFinalModel,
   listRuns,
   getRunRows,
@@ -19,11 +13,8 @@ import {
   upsertReportLossDist,
   getReportLossDist,
   closeStorage,
-  insertLog,
-  insertTestMetric,
   getTestRows,
   getLogs,
-  runsForSession,
   getLogsBySession,
   listSessions,
   exportBundle as storageExportBundle,
@@ -31,279 +22,39 @@ import {
   latestCheckpointForRun
 } from './storage';
 import * as os from 'os';
-
+import {
+  disconnectTrainer,
+  ensureTrainerOnRun,
+  ensureTrainerServer,
+  getSelectedRegionIndices,
+  registerHardResetHandler,
+  requestBackendPause,
+  resumeAfterReset,
+  resumeTrainerOn,
+  runHealth,
+  sendCtl,
+  sendReq,
+  shutdownTrainerServer,
+  trainerActive,
+} from './extensionHost/ipc';
+import {
+  extensionState,
+  LAST_EXPORT_DIR_KEY,
+  post,
+  postCurrentSession,
+  postErr,
+  postStatus,
+  stripUiOnlyFields,
+} from './extensionHost/state';
+import { TrainerResetSeed, WebMsg } from './extensionHost/types';
 
 // Stash latest config (webview can set it before or after starting the run)
-/* ============================ RPC state ============================ */
-
-type Pending = {
-  resolve: (v: any) => void;
-  reject: (e: any) => void;
-  timer: NodeJS.Timeout;
-};
-const pending = new Map<string, Pending>();
-
-const DASHBOARD_PORT = Number(process.env.ONTHEFLY_DASHBOARD_PORT || '47621');
-let trainerSocket: net.Socket | null = null;
-let trainerBuffer = '';
-let trainerServer: net.Server | null = null;
-
-function sendReq(cmd: string, payload: any = {}, timeoutMs = 15000): Promise<any> {
-  if (!trainerSocket || trainerSocket.destroyed) {
-    return Promise.reject(new Error('No Trainer connected. Run your script with OnTheFlyTrainer first.'));
-  }
-  const id = crypto.randomUUID();
-  const line = JSON.stringify({ id, cmd, payload }) + '\n';
-  trainerSocket.write(line, 'utf8');
-
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`timeout waiting for ${cmd}`));
-    }, timeoutMs);
-    pending.set(id, { resolve, reject, timer });
-  });
-}
-
 function isRunImportedForThisSession(runId: string): boolean {
-  // Imported == NOT created/touched by the current live Python session.
-  // If there is no live session yet, treat EVERYTHING as imported.
-  if (!trainerSocket || trainerSocket.destroyed) return true;
-  return !nativeRunsThisSession.has(runId);
+  if (!trainerActive()) return true;
+  return !extensionState.nativeRunsThisSession.has(runId);
 }
-
-/* ============================ Trainer socket ============================ */
-
-function ensureTrainerServer() {
-  if (trainerServer) return;
-
-  trainerServer = net.createServer((socket) => {
-    if (trainerSocket && !trainerSocket.destroyed) {
-      socket.destroy();
-      vscode.window.showWarningMessage(
-        'Another Trainer tried to connect while one is active. Close the existing run first.'
-      );
-      return;
-    }
-
-    // Handle new trainer connection in an async block so we can await the reset
-    (async () => {
-      // If we've ever had a trainer before, a new one means "new session" → hard reset.
-      if (hasTrainerConnectedOnce && lastExtensionContext) {
-        try {
-          await hardResetSession(lastExtensionContext, { fromUser: false });
-        } catch (e) {
-          console.warn('[onthefly] automatic session reset on new trainer failed:', e);
-        }
-      }
-
-      hasTrainerConnectedOnce = true;
-
-      // Now wire up the newly connected Trainer
-      trainerSocket = socket;
-      trainerBuffer = '';
-      socket.setEncoding('utf8');
-      socket.on('data', (chunk: string) => handleTrainerData(chunk));
-      socket.on('error', (err: any) => {
-        post({ type: 'error', text: `[trainer] ${err?.message || err}` });
-      });
-      socket.on('close', () => {
-        post({ type: 'log', text: 'Trainer disconnected.' });
-        // NOTE: this does NOT reset DB/session/dashboard anymore; it just tears down the socket.
-        disconnectTrainer(false);
-      });
-
-      postStatus(true);
-      post({ type: 'log', text: 'Trainer connected. Streaming events live.' });
-
-      // if user had a run selected, seed + attach immediately
-      const target =
-        (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
-        (currentRunId && currentRunId.trim()) ||
-        null;
-
-      if (target) {
-        seedTrainerForRun(target).catch((e) => {
-          console.warn('[onthefly] attach_context failed on connect:', e);
-        });
-      }
-    })().catch((err) => {
-      console.warn('[onthefly] trainer connection handler failed:', err);
-    });
-  });
-
-  trainerServer.on('error', (err: any) => {
-    const msg = `OnTheFly dashboard could not listen on port ${DASHBOARD_PORT}: ${err?.message || err}`;
-    vscode.window.showErrorMessage(msg);
-    post({ type: 'error', text: msg });
-  });
-
-  trainerServer.listen(DASHBOARD_PORT, '127.0.0.1', () => {
-    post({
-      type: 'log',
-      text: `Waiting for Trainer connections on localhost:${DASHBOARD_PORT}. Run your script to attach.`,
-    });
-  });
-}
-
-function trainerActive(): boolean {
-  return Boolean(trainerSocket && !trainerSocket.destroyed);
-}
-
-function requireTrainerConnection(): boolean {
-  if (!trainerActive()) {
-    vscode.window.showErrorMessage('No Trainer connection. Run your training script with an OnTheFlyTrainer to stream data.');
-    postStatus(false);
-    return false;
-  }
-  return true;
-}
-
-function shutdownTrainerServer() {
-  if (trainerServer) {
-    try { trainerServer.close(); } catch {}
-    trainerServer = null;
-  }
-  disconnectTrainer(false);
-}
-
-function disconnectTrainer(notify = true) {
-  if (trainerSocket) {
-    try { trainerSocket.destroy(); } catch {}
-    trainerSocket = null;
-  }
-  trainerBuffer = '';
-  setRunActivity(null);
-  pauseInFlight = false;
-  resumeInFlight = false;
-
-  for (const [, p] of pending) {
-    clearTimeout(p.timer);
-    p.reject(new Error('Trainer disconnected'));
-  }
-  pending.clear();
-
-  if (notify) {
-    post({ type: 'log', text: 'Trainer connection closed.' });
-  }
-  postStatus(false);
-}
-
-function handleTrainerData(chunk: string) {
-  trainerBuffer += chunk;
-  let idx: number;
-  while ((idx = trainerBuffer.indexOf('\n')) >= 0) {
-    const line = trainerBuffer.slice(0, idx);
-    trainerBuffer = trainerBuffer.slice(idx + 1);
-    if (line.trim()) {
-      handleLine(line);
-    }
-  }
-}
-
-
-/* ============================ Persisted keys ============================ */
-
-/* ============================ Webview -> Ext messages ============================ */
-
-type CompareView = 'train' | 'test' | 'info'; //not using but hypothetically, ifwe wanted to display test/train logs separate, or do cross-session compare
-
-type WebMsg =
-  | { command: 'pause' }
-  | { command: 'resume' }
-  | { command: 'testNow'; runId?: string }
-  | { command: 'fork'; payload?: any }
-  | { command: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string; new_name?: string } }
-  | { command: 'exportSession' }
-  | { command: 'loadSession' }
-  | { command: 'requestRuns' }
-  | { command: 'requestRows'; runId: string }
-  | { command: 'requestReport'; runId: string }
-  | { command: 'generateReport'; runId?: string; reqId?: number }
-  | { command: 'dist_health' }
-  | { command: 'throughput_health' }
-  | { command: 'numerics_health' }
-  | { command: 'activations_health' }
-  | { command: 'determinism_health' }
-  | { command: 'throughput_health' }
-  | { command: 'notify'; level?: 'info' | 'warn' | 'error'; text: string }
-  | { command: 'modelNav.select'; runId: string }
-  | { command: 'exportChart'; filename?: string; dataUrl: string }
-  | { command: 'resetAll' }
-  | { command: 'requestLogs'; runId: string; phase?: CompareView }
-  | { command: 'requestTestRows'; runId: string }
-  | {
-      command: 'exportSubset';
-      runId?: string;
-      format?: 'parquet' | 'csv' | 'feather';
-      region?: { minLoss: number; maxLoss: number };
-      subset_indices?: number[];
-    };
-
-/* ============================ Control messages to Python ============================ */
-
-type Ctl =
-  | { cmd: 'pause' }
-  | { cmd: 'resume' }
-  | { cmd: 'save_ckpt' }
-  | { cmd: 'fork'; payload?: any }
-  | { cmd: 'merge'; payload: { paths?: string[]; parents?: string[]; strategy?: string; new_name?: string } };
-
-type RunActivityState = 'running' | 'paused' | null;
-
-const optimisticEcho: Record<string, string> = {
-  pause: 'paused',
-  resume: 'resumed',
-  save_ckpt: 'checkpointSaved',
-  merge: 'merged'
-};
-
-/* ============================ Globals ============================ */
-
-let panel: vscode.WebviewPanel | null = null;
-let currentRunId: string | null = null;
-const seenRuns = new Set<string>();
-let currentSessionId: string | null = null;   // sticky session id for log stamping
-const nativeRunsThisSession = new Set<string>(); // runs touched by THIS python session
-let modelNavSelectedRunId: string | null = null;
-let runActivityState: RunActivityState = null;
-let pauseInFlight = false;
-let resumeInFlight = false;
-let needDiskCleanOnNextTrainer = true;
-let lastExtensionContext: vscode.ExtensionContext | null = null;
-let hasTrainerConnectedOnce = false;
-let pendingResumeAwaitingFirstRun = false;
-
-/* ============================ Types ============================ */
-
-type StepRow = {
-  run_id: string;
-  step: number;
-  epoch?: number | null;
-  loss: number | null;
-  val_loss: number | null;
-  accuracy?: number | null;
-  lr?: number | null;
-  grad_norm?: number | null;
-  weight_norm?: number | null;
-  activation_zero_frac?: number | null;
-  throughput?: number | null;
-  mem_vram?: number | null;
-  gpu_util?: number | null;
-  ts?: number | null;
-};
-
-type TrainerResetSeed = {
-  run_id?: string;
-  display_name?: string;
-  project?: string;
-  session_id?: string;
-};
-
-/* ============================ Activate / Deactivate ============================ */
-
 export async function activate(context: vscode.ExtensionContext) {
-  lastExtensionContext = context;
+  extensionState.lastExtensionContext = context;
   context.subscriptions.push(
     vscode.commands.registerCommand('onthefly.showDashboard', () => openPanel(context)),
   );
@@ -368,21 +119,21 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
   disconnectTrainer(true);
 
   // 3) Clear in-memory extension state
-  currentRunId = null;
-  seenRuns.clear();
-  currentSessionId = null;
-  nativeRunsThisSession.clear();
-  modelNavSelectedRunId = null;
-  runActivityState = null;
-  pauseInFlight = false;
-  resumeInFlight = false;
-  pendingResumeAwaitingFirstRun = false;
+  extensionState.currentRunId = null;
+  extensionState.seenRuns.clear();
+  extensionState.currentSessionId = null;
+  extensionState.nativeRunsThisSession.clear();
+  extensionState.modelNavSelectedRunId = null;
+  extensionState.runActivityState = null;
+  extensionState.pauseInFlight = false;
+  extensionState.resumeInFlight = false;
+  extensionState.pendingResumeAwaitingFirstRun = false;
 
   // 4) Reset storage
   try { closeStorage({ retainFile: false }); } catch {}
   await initStorage(context);
   
-  needDiskCleanOnNextTrainer = true;
+  extensionState.needDiskCleanOnNextTrainer = true;
 
   // 5) Tell webview, if it exists
   post({ type: 'resetOk' });
@@ -391,12 +142,12 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
     const friendly = (trainerSeed.display_name && String(trainerSeed.display_name)) || runId;
     const projectName = (trainerSeed.project && String(trainerSeed.project)) || 'default';
     insertRun(runId, projectName, friendly, null);
-    seenRuns.add(runId);
-    currentRunId = runId;
-    modelNavSelectedRunId = runId;
-    nativeRunsThisSession.add(runId);
+    extensionState.seenRuns.add(runId);
+    extensionState.currentRunId = runId;
+    extensionState.modelNavSelectedRunId = runId;
+    extensionState.nativeRunsThisSession.add(runId);
     if (trainerSeed.session_id) {
-      currentSessionId = String(trainerSeed.session_id);
+      extensionState.currentSessionId = String(trainerSeed.session_id);
       postCurrentSession();
     }
     post({
@@ -404,7 +155,7 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
       run_id: runId,
       parents: [],
       meta: { display_name: friendly, kind: 'reset' },
-      session_id: currentSessionId || null,
+      session_id: extensionState.currentSessionId || null,
     });
     post({ type: 'modelNav.select', runId });
   }
@@ -415,6 +166,7 @@ async function hardResetSession(context: vscode.ExtensionContext, opts?: { fromU
     vscode.window.setStatusBarMessage('Onthefly: session reset', 2000);
   }
 }
+registerHardResetHandler(hardResetSession);
 
 
 /* ============================ Panel & HTML ============================ */
@@ -429,7 +181,7 @@ function getLocalResourceRoots(context: vscode.ExtensionContext): vscode.Uri[] {
 }
 
 async function openPanel(context: vscode.ExtensionContext) {
-  if (panel) { panel.reveal(vscode.ViewColumn.Active); return; }
+  if (extensionState.panel) { extensionState.panel.reveal(vscode.ViewColumn.Active); return; }
 
   const newPanel = vscode.window.createWebviewPanel(
     'ontheflyDashboard',
@@ -450,16 +202,16 @@ async function revivePanel(context: vscode.ExtensionContext, webviewPanel: vscod
 
 function configurePanel(context: vscode.ExtensionContext, webviewPanel: vscode.WebviewPanel) {
   ensureTrainerServer();
-  panel = webviewPanel;
-  panel.webview.options = {
+  extensionState.panel = webviewPanel;
+  extensionState.panel.webview.options = {
     enableScripts: true,
     localResourceRoots: getLocalResourceRoots(context),
   };
 
   const nonce = getNonce();
-  let webviewVisible = panel.visible;
+  let webviewVisible = extensionState.panel.visible;
 
-  panel.onDidChangeViewState(({ webviewPanel }) => {
+  extensionState.panel.onDidChangeViewState(({ webviewPanel }) => {
     webviewVisible = webviewPanel.visible;
     if (webviewVisible) {
       // when user returns, cheaply re-sync UI (no heavy streams)
@@ -468,16 +220,16 @@ function configurePanel(context: vscode.ExtensionContext, webviewPanel: vscode.W
     }
   });
 
-  panel.onDidDispose(() => {
+  extensionState.panel.onDidDispose(() => {
     // Just drop the reference; let deactivate() handle shutdown.
-    if (panel === webviewPanel) {
-      panel = null;
+    if (extensionState.panel === webviewPanel) {
+      extensionState.panel = null;
     }
   });
 
-  panel.webview.onDidReceiveMessage((m: any) => { onMessage(context, m); });
+  extensionState.panel.webview.onDidReceiveMessage((m: any) => { onMessage(context, m); });
 
-  panel.webview.html = getHtml(context, panel.webview, nonce);
+  extensionState.panel.webview.html = getHtml(context, extensionState.panel.webview, nonce);
 }
 
 function getHtml(context: vscode.ExtensionContext, webview: vscode.Webview, nonce: string) {
@@ -661,77 +413,7 @@ function getNonce() {
 
 /* ============================ Utilities ============================ */
 
-function post(msg: any) {
-  
-  try { panel?.webview.postMessage(msg); } catch (e) { console.log('[EXT->WEB] post threw:', e); }
-}
-function postErr(e: any) { post({ type: 'error', text: String(e?.message || e) }); }
-
-function postStatus(connected: boolean) {
-  const activity = runActivityState;
-  const running = connected && activity === 'running';
-  const paused  = connected && activity === 'paused';
-
-  post({
-    type: 'status',
-    connected,
-    running,   // "is actively training"
-    paused,    // "trainer attached but paused"
-    run_id: currentRunId || null,
-  });
-}
-
-function setRunActivity(state: RunActivityState) {
-  runActivityState = state;
-  postStatus(trainerActive());
-}
-
-async function resumeTrainerOn(target: string): Promise<void> {
-  if (resumeInFlight) {
-    return;
-  }
-  resumeInFlight = true;
-  try {
-    await ensureTrainerOnRun(target);
-    sendCtl({ cmd: 'resume' });
-    setRunActivity('running');
-  } catch (e: any) {
-    postErr(e);
-    postStatus(false);
-  } finally {
-    resumeInFlight = false;
-  }
-}
-
-async function resumeAfterReset(): Promise<void> {
-  if (resumeInFlight) {
-    return;
-  }
-  resumeInFlight = true;
-  pendingResumeAwaitingFirstRun = true;
-  try {
-    await startRun();
-    pendingResumeAwaitingFirstRun = false;
-    if (!trainerSocket || trainerSocket.destroyed) {
-      throw new Error('Trainer disconnected before resume.');
-    }
-    sendCtl({ cmd: 'resume' });
-    setRunActivity('running');
-  } catch (e: any) {
-    postErr(e);
-    throw e;
-  } finally {
-    pendingResumeAwaitingFirstRun = false;
-    resumeInFlight = false;
-  }
-}
-
-function postCurrentSession() {
-  if (currentSessionId) post({ type: 'fs.session.current', id: currentSessionId });
-}
-
 const TEST_NOW_TIMEOUT_MS = 10 * 60 * 1000;
-const LAST_EXPORT_DIR_KEY = 'onthefly.lastExportDir';
 
 function ensurePng(name: string) {
   return name.toLowerCase().endsWith('.png') ? name : `${name}.png`;
@@ -774,60 +456,6 @@ function timestampSlug() {
   return new Date().toISOString().replace(/[:.]/g, '-');
 }
 
-type UiLogLike = { text?: string; step?: number | null; ts?: number | null };
-
-function isUiLogLike(v: unknown): v is UiLogLike & Record<string, any> {
-  return !!v && typeof v === 'object';
-}
-// clean up `ts` logs -- python needs more explicit logs but user doesn't
-export function stripUiOnlyFields(rows: unknown): unknown {
-  const cleanOne = (r: unknown): unknown => {
-    if (!isUiLogLike(r)) return r;
-    const { ts, ...rest } = r; // drop ts
-
-    if (typeof rest.text === 'string') {
-      const mentionsStep = /\bstep\b\s*(?:[:#]\s*)?\d+(?:\s*[:#])?/i.test(rest.text);
-      if (mentionsStep) delete (rest as any).step; // drop step to suppress [s:N]
-    }
-    return rest;
-  };
-
-  return Array.isArray(rows) ? rows.map(cleanOne) : cleanOne(rows);
-}
-
-function computeForkMergeCounters(): { forkMax: number; mergeMax: number } {
-  let forkMax = 0;
-  let mergeMax = 0;
-
-  try {
-    const runs = listRuns() as Array<{ run_id: string; name?: string }>;
-    const reFork = /^fork(\d+)$/i;
-    const reMerge = /^merge(\d+)$/i;
-
-    for (const r of runs) {
-      for (const v of [r.name, r.run_id]) {
-        if (!v) continue;
-        const s = String(v).trim();
-        let m = reFork.exec(s);
-        if (m) {
-          const n = parseInt(m[1], 10);
-          if (Number.isFinite(n) && n > forkMax) forkMax = n;
-        }
-        m = reMerge.exec(s);
-        if (m) {
-          const n = parseInt(m[1], 10);
-          if (Number.isFinite(n) && n > mergeMax) mergeMax = n;
-        }
-      }
-    }
-  } catch (e) {
-    console.warn('[onthefly] computeForkMergeCounters failed:', e);
-  }
-
-  return { forkMax, mergeMax };
-}
-
-
 /* ============================ Message handling ============================ */
 
 async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
@@ -864,7 +492,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
     case 'exportSubset': {
       try {
-        const runId = (m as any).runId || currentRunId;
+        const runId = (m as any).runId || extensionState.currentRunId;
         if (!runId) { vscode.window.showWarningMessage('No run selected.'); break; }
 
         const trace = (m as any)._trace || 'no-trace';
@@ -929,7 +557,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'modelNav.select': {
       const id = String((m as any).runId || '').trim();
       if (id) {
-        modelNavSelectedRunId = id;
+        extensionState.modelNavSelectedRunId = id;
 
         post({ type: 'log', text: `[modelNav] selected: ${id}` });
         post({ type: 'modelNav.select', runId: id }); // echo to webview so it knows which run is selected
@@ -948,13 +576,13 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       try {
         const phase = (m as any).phase;
         const requested = String((m as any).runId || '').trim();
-        const selected = modelNavSelectedRunId && modelNavSelectedRunId.trim();
-        const active   = currentRunId && currentRunId.trim();
+        const selected = extensionState.modelNavSelectedRunId && extensionState.modelNavSelectedRunId.trim();
+        const active   = extensionState.currentRunId && extensionState.currentRunId.trim();
 
         const rid = requested || selected || active || '';
         let rows = rid ? getLogs(rid, phase) : [];
-        if ((!rows || rows.length === 0) && currentSessionId) {
-          rows = getLogsBySession(currentSessionId, phase);
+        if ((!rows || rows.length === 0) && extensionState.currentSessionId) {
+          rows = getLogsBySession(extensionState.currentSessionId, phase);
         }
         post({ type: 'logs', run_id: rid || null, rows: stripUiOnlyFields(rows) });
       } catch (e:any) { postErr(e); }
@@ -970,22 +598,22 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     }
 
     case 'pause': {
-      if (pauseInFlight) {
+      if (extensionState.pauseInFlight) {
         post({ type: 'log', text: '[pause] Request already in progress.' });
         break;
       }
-      if (runActivityState === 'paused') {
+      if (extensionState.runActivityState === 'paused') {
         break;
       }
-      pauseInFlight = true;
+      extensionState.pauseInFlight = true;
       try {
         // 1) Ask the backend to pause (finish current step, flush state, etc.)
         const pauseInfo = await requestBackendPause(30_000); // backend will do its own checkpointing if it wants
 
         // 2) Figure out which run this pause applies to
         const runId =
-          (modelNavSelectedRunId && modelNavSelectedRunId.trim()) ||
-          (currentRunId && currentRunId.trim()) ||
+          (extensionState.modelNavSelectedRunId && extensionState.modelNavSelectedRunId.trim()) ||
+          (extensionState.currentRunId && extensionState.currentRunId.trim()) ||
           null;
 
         if (!runId) {
@@ -1038,29 +666,29 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
       } catch (e: any) {
         postErr(e);
       } finally {
-        pauseInFlight = false;
+        extensionState.pauseInFlight = false;
       }
       break;
     }
     case 'resume': {
-      if (resumeInFlight) { post({ type: 'log', text: '[resume] Request already in progress.' }); break; }
+      if (extensionState.resumeInFlight) { post({ type: 'log', text: '[resume] Request already in progress.' }); break; }
 
       const requested = String((m as any).runId || '').trim();
-      if (requested) modelNavSelectedRunId = requested;
-      const target = requested || modelNavSelectedRunId || currentRunId || null;
+      if (requested) extensionState.modelNavSelectedRunId = requested;
+      const target = requested || extensionState.modelNavSelectedRunId || extensionState.currentRunId || null;
 
       if (!target) {
         try {
           const rows = listRuns();
           if (!rows.length) {
-            pendingResumeAwaitingFirstRun = true;
+            extensionState.pendingResumeAwaitingFirstRun = true;
             post({ type: 'log', text: '[resume] No runs exist yet. Waiting for a fresh trainer session…' });
             await resumeAfterReset();
           } else {
             post({ type: 'error', text: '[resume] No run selected.' });
           }
         } catch (e: any) {
-          pendingResumeAwaitingFirstRun = false;
+          extensionState.pendingResumeAwaitingFirstRun = false;
           postErr(e);
         }
         break;
@@ -1074,8 +702,8 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
     case 'testNow': {
       const requested = (m as any).runId as string | undefined;
       const candidate = (requested && requested.trim())
-        || (modelNavSelectedRunId && modelNavSelectedRunId.trim())
-        || (currentRunId && currentRunId.trim())
+        || (extensionState.modelNavSelectedRunId && extensionState.modelNavSelectedRunId.trim())
+        || (extensionState.currentRunId && extensionState.currentRunId.trim())
         || null;
       try {
         if (!candidate) {
@@ -1107,7 +735,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         post({ type: 'testNow', status: 'pending', run_id: target });
         const data = await sendReq('test_now', { label: 'final' }, TEST_NOW_TIMEOUT_MS);
         const normalizedLoss = Number.isFinite(Number(data?.avg_loss)) ? Number(data.avg_loss) : null;
-        const sessionIdRaw = (data?.session_id && String(data.session_id)) || currentSessionId || '';
+        const sessionIdRaw = (data?.session_id && String(data.session_id)) || extensionState.currentSessionId || '';
         const sessionId = (sessionIdRaw && sessionIdRaw.trim()) || `session-${target}`;
         const ckptPath = data?.ckpt_path ? String(data.ckpt_path) : '';
         if (sessionId && ckptPath) {
@@ -1130,7 +758,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           data: { ...data, avg_loss: normalizedLoss, ckpt_path: ckptPath },
         });
       } catch (e: any) {
-        const fallback = candidate || modelNavSelectedRunId || currentRunId || null;
+        const fallback = candidate || extensionState.modelNavSelectedRunId || extensionState.currentRunId || null;
         post({ type: 'testNow', status: 'error', run_id: fallback, error: String(e?.message || e) });
         postErr(e);
       }
@@ -1157,8 +785,8 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
         const target =
           hinted ||
-          modelNavSelectedRunId ||
-          currentRunId ||
+          extensionState.modelNavSelectedRunId ||
+          extensionState.currentRunId ||
           pickAnchorRunForAction(payloadIn) ||
           '';
 
@@ -1182,9 +810,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
         const child = String(data?.new_run || data?.child_id || data?.run_id || '').trim();
         if (child) {
-          currentRunId = child;
-          modelNavSelectedRunId = child;
-          nativeRunsThisSession.add(child);
+          extensionState.currentRunId = child;
+          extensionState.modelNavSelectedRunId = child;
+          extensionState.nativeRunsThisSession.add(child);
           post({ type: 'modelNav.select', runId: child });
           if (Array.isArray(data?.subset_indices)) {
             try { setRunSubset(child, data.subset_indices.map((n: any) => Number(n) | 0)); } catch {}
@@ -1230,9 +858,9 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           ).trim();
 
         if (child) {
-          currentRunId = child;
-          modelNavSelectedRunId = child;
-          nativeRunsThisSession.add(child);
+          extensionState.currentRunId = child;
+          extensionState.modelNavSelectedRunId = child;
+          extensionState.nativeRunsThisSession.add(child);
           post({ type: 'modelNav.select', runId: child });
 
           // If backend provided a subset, persist it like we do on fork.
@@ -1260,7 +888,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         const target = await requireActiveRun(rid);
         if (!target) break;
         await ensureTrainerOnRun(target);
-        modelNavSelectedRunId = target;
+        extensionState.modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('dist_health', { require_all_ranks: false, sample_weights: 0 }, 'distHealth', 30_000, target);
       } catch (e:any) { postErr(e); }
@@ -1273,7 +901,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         const target = await requireActiveRun(rid);
         if (!target) break;
         await ensureTrainerOnRun(target);
-        modelNavSelectedRunId = target;
+        extensionState.modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('throughput_health', { budget_steps: 2, micro_backward: false }, 'throughputHealth', 45_000, target);
       } catch (e:any) { postErr(e); }
@@ -1286,7 +914,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         const target = await requireActiveRun(rid);
         if (!target) break;
         await ensureTrainerOnRun(target);
-        modelNavSelectedRunId = target;
+        extensionState.modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('activations_health', { budget_steps: 2, topk: 12, eps: 1e-3 }, 'activationsHealth', 60_000, target);
       } catch (e:any) { postErr(e); }
@@ -1299,7 +927,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         const target = await requireActiveRun(rid);
         if (!target) break;
         await ensureTrainerOnRun(target);
-        modelNavSelectedRunId = target;
+        extensionState.modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('numerics_health', { sample_layers: 25 }, 'numericsHealth', 30_000, target);
       } catch (e:any) { postErr(e); }
@@ -1312,7 +940,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         const target = await requireActiveRun(rid);
         if (!target) break;
         await ensureTrainerOnRun(target);
-        modelNavSelectedRunId = target;
+        extensionState.modelNavSelectedRunId = target;
         post({ type: 'modelNav.select', runId: target });
         await runHealth('determinism_health', {}, 'determinismHealth', 20_000, target);
       } catch (e:any) { postErr(e); }
@@ -1332,7 +960,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
         const target = await requireActiveRun(runId);
         if (!target) break;
         runId = target;
-        modelNavSelectedRunId = runId;
+        extensionState.modelNavSelectedRunId = runId;
         post({ type: 'modelNav.select', runId });
         await requestBackendPause(30_000);
 
@@ -1344,7 +972,7 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
           subset_indices: subset.length ? subset : undefined,
           subset_on,
           reqId: (m as any).reqId
-        });
+        }, 10 * 60 * 1000);
 
         const losses: number[] = Array.isArray(data?.losses)
           ? data.losses.map(Number).filter(Number.isFinite)
@@ -1614,85 +1242,6 @@ async function onMessage(context: vscode.ExtensionContext, m: WebMsg) {
 
 /* ============================ Python process (training) ============================ */
 
-async function startRun() {
-  ensureTrainerServer();
-  if (trainerSocket && !trainerSocket.destroyed) {
-    postStatus(true);
-    return;
-  }
-
-  await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Waiting for OnTheFly Trainer connection…' },
-    async () => {
-      try {
-        await waitForTrainerConnection(60000);
-        postStatus(true);
-      } catch (e) {
-        throw new Error('No Trainer connected. Run your training script in a terminal and instantiate OnTheFlyTrainer.');
-      }
-    }
-  );
-}
-
-async function waitForTrainerConnection(timeoutMs = 0): Promise<void> {
-  const start = Date.now();
-  while (true) {
-    if (trainerSocket && !trainerSocket.destroyed) return;
-    if (timeoutMs && Date.now() - start > timeoutMs) {
-      throw new Error('Timed out waiting for Trainer connection.');
-    }
-    await new Promise((res) => setTimeout(res, 250));
-  }
-}
-
-function sendCtl(cmd: Ctl) {
-  if (!trainerSocket || trainerSocket.destroyed) {
-    post({ type: 'error', text: 'No Trainer connected. Run your script first.' });
-    return;
-  }
-  try {
-    trainerSocket.write(JSON.stringify(cmd) + '\n');
-    const t = (cmd as any).cmd;
-    if (t === 'resume') setRunActivity('running');
-    if (t && optimisticEcho[t]) post({ type: optimisticEcho[t], payload: cmd });
-  } catch (e: any) {
-    postErr(e);
-  }
-}
-
-async function requestBackendPause(timeoutMs = 30_000): Promise<any> {
-  const data = await sendReq('pause', {}, timeoutMs);
-  setRunActivity('paused');
-  return data;
-}
-
-async function runHealth(
-  cmd: string,
-  payload: any,
-  eventType: string,
-  timeoutMs = 60_000,
-  forRunId?: string
-) {
-  const run_id = forRunId || modelNavSelectedRunId || currentRunId || null;
-
-  try {
-    // tell the webview to show a loading placeholder
-    post({ type: eventType, run_id, pending: true });
-
-    try { await requestBackendPause(30_000); } catch {}
-
-    const data = await sendReq(cmd, payload, timeoutMs);
-
-    // normal success event (what your webview already handles)
-    post({ type: eventType, cmd, payload, data, run_id });
-  } catch (e:any) {
-    // let the UI show an error if needed
-    post({ type: eventType, run_id, error: String(e?.message || e) });
-    postErr(e);
-  }
-}
-
-
 function pickAnchorRunForAction(hint?: { parents?: string[]; runId?: string } | any): string | null {
   const fromRunId =
     typeof hint?.runId === 'string' && hint.runId.trim() ? String(hint.runId).trim() : null;
@@ -1702,8 +1251,8 @@ function pickAnchorRunForAction(hint?: { parents?: string[]; runId?: string } | 
 
   if (fromRunId) return fromRunId;
   if (fromParents) return fromParents;
-  if (modelNavSelectedRunId?.trim()) return modelNavSelectedRunId.trim();
-  if (currentRunId?.trim()) return currentRunId.trim();
+  if (extensionState.modelNavSelectedRunId?.trim()) return extensionState.modelNavSelectedRunId.trim();
+  if (extensionState.currentRunId?.trim()) return extensionState.currentRunId.trim();
 
   try {
     const first = (listRuns() as Array<{ run_id: string }>)[0]?.run_id;
@@ -1714,391 +1263,8 @@ function pickAnchorRunForAction(hint?: { parents?: string[]; runId?: string } | 
 }
 
 async function requireActiveRun(requestedRunId?: string): Promise<string | null> {
-  const target = String(requestedRunId || modelNavSelectedRunId || currentRunId || '').trim();
+  const target = String(requestedRunId || extensionState.modelNavSelectedRunId || extensionState.currentRunId || '').trim();
   if (!target) return null;
   await ensureTrainerOnRun(target);
   return target;
-}
-
-function normalizeParents(from: any): string[] {
-  const raw = (from && (from.parents ?? from.parent)) ?? [];
-  if (Array.isArray(raw)) return raw.filter(Boolean).map((s) => String(s));
-  if (raw == null || raw === '') return [];
-  return [String(raw)];
-}
-
-
-/* ============================ Line handler ============================ */
-
-function handleLine(line: string) {
-  let obj: any = null;
-
-  try { obj = JSON.parse(line); }
-  catch { post({ type: 'log', text: line }); return; }
-
-  if (obj && obj.event && !obj.type) { obj.type = obj.event; delete obj.event; }
-
-  // ==== RPC responses (leave as-is) ====
-  if (obj && obj.id && (obj.ok === true || obj.ok === false)) {
-    const p = pending.get(obj.id);
-    if (p) {
-      clearTimeout(p.timer);
-      pending.delete(obj.id);
-      obj.ok ? p.resolve(obj.data) : p.reject(new Error(obj.error || 'python error'));
-    }
-    return;
-  }
-
-  if (obj && obj.type === 'testStep') {
-    const run_id = obj.run_id || currentRunId || 'live';
-    const step = Number(obj.step) || 0;
-    const loss = Number(obj.loss);
-    post({ type: 'testStep', run_id, step, loss: Number.isFinite(loss) ? loss : null, ts: Date.now() });
-    try { insertTestMetric(run_id, step, Number.isFinite(loss) ? loss : null); } catch {}
-    return;
-  }
-
-  if (obj?.type === 'paused') {
-    setRunActivity('paused');
-    pauseInFlight = false;
-  } else if (obj?.type === 'resumed') {
-    setRunActivity('running');
-    resumeInFlight = false;
-  } else if (obj?.type === 'trainingFinished') {
-    setRunActivity(null);
-    pauseInFlight = false;
-    resumeInFlight = false;
-  }
-
-  if (obj?.type === 'log') {
-    const run_id = obj.run_id || currentRunId || 'live';
-    // Prefer explicit, then fallback to sticky session
-    const session_id = obj.session_id || obj.sessionId || currentSessionId || null;
-    if (run_id && session_id && currentSessionId && session_id === currentSessionId) {
-      nativeRunsThisSession.add(String(run_id));
-    }
-    const level = obj.level || 'info';
-    const text: string = String(obj.text || '');
-
-    // 1) honor explicit phase if provided by backend
-    const pRaw = (obj.phase && String(obj.phase).toLowerCase()) || null;
-    let phase: 'train'|'test'|'info' =
-      (pRaw === 'train' || pRaw === 'test' || pRaw === 'info') ? (pRaw as any) : 'info';
-
-    // parse a few common patterns to enrich rows (prefer TEST first)
-    let step: number | null = null;
-    let epoch: number | null = null;
-
-    const mEpoch = text.match(/^\s*epoch\s+(\d+)\s*$/i);
-    if (mEpoch && phase === 'info') { epoch = Number(mEpoch[1]); phase = 'train'; }
-
-    // ---- TEST first (looser match) ----
-    const mTest = text.match(/step\s+(\d+)\s*:\s*test[_\s]*loss\s*=\s*([0-9.eE+\-]+)/i);
-    if (mTest && phase === 'info') { step = Number(mTest[1]); phase = 'test'; }
-    if (/\btesting\b/i.test(text) && phase === 'info') phase = 'test';
-    if (/\b(?:eval|evaluation)\b/i.test(text) && /\b(loss|acc|metric)\b/i.test(text) && phase === 'info') phase = 'test';
-
-    // ---- TRAIN (slightly looser too) ----
-    const mTrain = text.match(/step\s+(\d+)\s*:\s*train[_\s]*loss\s*=\s*([0-9.eE+\-]+).*?val[_\s]*loss\s*=\s*([0-9.eE+\-]+|None)/i);
-    if (mTrain && phase === 'info') { step = Number(mTrain[1]); phase = 'train'; }
-    if ((/\btrain[_\s]*loss\b/i.test(text) || /\bval[_\s]*loss\b/i.test(text)) && phase === 'info') {
-      phase = 'train';
-    }
-
-    const tsMs = (Number(obj.ts) > 0 ? Math.round(Number(obj.ts) * 1000) : Date.now());
-
-    // If the raw text already includes "step N", don't also render the UI "s: N" badge.
-    const hasStepInText = /\bstep\b\s*(?:[:#]\s*)?\d+(?:\s*[:#])?/i.test(text);
-    const stepForUI = hasStepInText ? null : step;
-
-    try {
-      // keep full fidelity in storage
-      insertLog({ run_id, session_id, level, text, phase, step, epoch, ts: tsMs });
-    } catch {}
-
-    // suppress redundant "s:" in the webview
-    post({ type: 'log', run_id, session_id, level, text, phase, step: stepForUI, epoch });
-    return;
-  }
-
-
-  // swallow unsolicited reportData (RPC handles reply)
-  if (obj?.type === 'reportData') {
-    return;
-  }
-
-  if (obj?.type === 'merge_gating') {
-    post({
-      type: 'merge_gating',
-      reason: obj.reason || 'unknown',
-      parents: Array.isArray(obj.parents) ? obj.parents.map(String) : [],
-      step: Number(obj.step) || null,
-      run_id: obj.run_id || currentRunId || null,
-      // pass through any other fields (e.g., have_parent_ckpt, have_child_ckpt, child_id, etc.)
-      ...obj
-    });
-    return;
-  }
-
-  // ==== streaming steps ====
-  if (obj && obj.type === 'trainStep') {
-    const run_id = obj.run_id || currentRunId || 'live';
-    const num = (value: any) => (Number.isFinite(value) ? Number(value) : null);
-
-    //keep extension-side notion of "current run" in sync with the stream
-    currentRunId = run_id;
-    if (!modelNavSelectedRunId) {
-      modelNavSelectedRunId = run_id;
-    }
-
-    const row: StepRow = {
-      run_id,
-      step: Number(obj.step) || 0,
-      epoch: num(obj.epoch),
-      loss: num(obj.loss),
-      val_loss: num(obj.val_loss),
-      accuracy: num(obj.accuracy),
-      lr: num(obj.lr),
-      grad_norm: num(obj.grad_norm),
-      weight_norm: num(obj.weight_norm),
-      activation_zero_frac: num(obj.activation_zero_frac),
-      throughput: num(obj.throughput),
-      mem_vram: num(obj.mem_vram),
-      gpu_util: num(obj.gpu_util),
-      ts: Number(obj.ts) || Date.now(),
-    };
-
-    const lastVal = (obj.val_loss == null ? 'None' : String(obj.val_loss));
-    post({ type: 'trainStep', ...row });
-    const logLine = `step ${row.step}: train_loss = ${row.loss ?? 'None'}, val_loss = ${lastVal}`;
-    if (runActivityState !== 'running') {
-      setRunActivity('running');   // this will now call postStatus(true) with run_id
-    }
-    post({ type: 'log', level: 'info', phase: 'train', text: logLine });
-    try {
-      insertMetric(run_id, row);
-    } catch (e) {
-      console.warn('[onthefly] metric persist error:', e);
-    }
-    return;
-  }
-
-
-  if (obj?.type === 'log' && obj.text && /model\s+session_id/i.test(obj.text)) {
-    const m = String(obj.text).match(/session_id\s*=\s*([^\s]+)/i);
-    if (m && m[1]) { currentSessionId = m[1]; postCurrentSession(); }
-  }
-
-  // ==== canonical run creation ====
-  if (obj && obj.type === 'newRun') {
-    const id = String(obj.run_id || '').trim();
-    if (id) nativeRunsThisSession.add(id);
-    if (!id) return;
-
-    // If backend includes a session id on newRun, remember it
-    if (obj.session_id || obj.sessionId) {
-      currentSessionId = String(obj.session_id || obj.sessionId);
-      postCurrentSession();
-    }
-
-    const parents = normalizeParents(obj);
-    const project = obj.project || 'default';
-    const name = obj.run_name || id;
-
-    if (!seenRuns.has(id)) {
-      seenRuns.add(id);
-      currentRunId = id;
-      
-      // If storage only supports single parent, store the first (primary)
-      const primaryParent = (parents && parents[0]) ?? null;
-      const existingRuns = listRuns() as Array<{ run_id: string }>;
-      const existsInDb = existingRuns.some(r => r.run_id === id);
-  
-      if (!existsInDb) {
-        insertRun(id, project, name, primaryParent);
-      }
-    } else {
-      currentRunId = id;
-    }
-
-    // include meta so webview can gate auto/manual UI
-    post({
-      type: 'newRun',
-      run_id: id,
-      parents,
-      meta: obj.meta,
-      session_id: currentSessionId || null,
-    });
-    post({ type: 'runs', rows: listRuns() });
-    return;
-    }
-
-  if (obj?.type === 'auto_test_complete') {
-    const runId = String(obj.run_id || currentRunId || '').trim();
-    const ckptPath = obj.ckpt_path ? String(obj.ckpt_path) : '';
-    const step = Number(obj.step) || 0;
-
-    if (runId && ckptPath) {
-      try {
-        const ckptId = `${runId}:${step}:${Date.now()}`;
-        insertCheckpoint(ckptId, runId, step, ckptPath);
-        post({
-          type: 'log',
-          level: 'info',
-          text: `[auto-test] checkpoint recorded for run ${runId} at step ${step}`,
-        });
-      } catch (e) {
-        console.warn('[onthefly] failed to persist auto-test checkpoint', e);
-        post({
-          type: 'log',
-          level: 'warn',
-          text: `[auto-test] failed to persist checkpoint for run ${runId}: ${String(
-            (e as any)?.message || e,
-          )}`,
-        });
-      }
-    } else {
-      post({
-        type: 'log',
-        level: 'warn',
-        text: '[auto-test] auto_test_complete event missing run_id or ckpt_path; not recorded.',
-      });
-    }
-
-    // We already emitted a generic test_complete earlier, and that fell
-    // through to the default `post(obj)` below. This extra event is
-    // extension-only plumbing; no need to forward it again.
-    return;
-  }
-
-  // Default: forward to webview, then extra persistence for other events
-  post(obj);
-
-  try {
-    switch (obj?.type) {
-      case 'session_started': {
-        currentRunId = obj.run_id || currentRunId;
-        if (obj.session_id || obj.sessionId) {
-          currentSessionId = String(obj.session_id || obj.sessionId);
-          postCurrentSession();
-        }
-
-        if (needDiskCleanOnNextTrainer && trainerActive()) {
-          needDiskCleanOnNextTrainer = false;
-          (async () => {
-            try {
-              const res = await sendReq('clean_disk', { scope: 'all' }, 60_000);
-              post({
-                type: 'log',
-                level: res?.ok ? 'info' : 'warn',
-                text: res?.ok
-                  ? '[startup] clean_disk: removed old runs from save_dir'
-                  : `[startup] clean_disk reported an issue: ${res?.error ?? 'unknown error'}`,
-              });
-            } catch (e: any) {
-              post({
-                type: 'log',
-                level: 'warn',
-                text: `[startup] clean_disk failed (will continue anyway): ${e?.message || String(e)}`,
-              });
-            }
-          })();
-        }
-        
-        break;
-      }
-
-      case 'checkpoint_saved': {
-        const ckptId = `${obj.run_id}:${obj.step}:${Date.now()}`;
-        insertCheckpoint(ckptId, obj.run_id, Number(obj.step) || 0, obj.path || '');
-        break;
-      }
-      case 'epoch_end': {
-        if (Number.isFinite(obj.val_loss)) {
-          upsertSummary(obj.run_id, null, obj.val_loss);
-        }
-        break;
-      }
-      default:
-        break;
-    }
-  } catch (e) {
-    console.warn('[onthefly] sqlite persist error:', e);
-  }
-}
-
-
-//helpers
-
-function latestResumeHints(runId: string | null) {
-  if (!runId) return null;
-  const ck = latestCheckpointForRun(runId);
-  return ck ? { init_ckpt: ck.path, init_step: Number(ck.step) || 0 } : null;
-}
-
-async function seedTrainerForRun(targetRunId: string): Promise<void> {
-  const { forkMax, mergeMax } = computeForkMergeCounters();
-  const hints = latestResumeHints(targetRunId) || {};
-
-  // Use attach_context only when we really need to bind/attach:
-  if (!currentRunId || currentRunId !== targetRunId) {
-    await sendReq('attach_context', {
-      run_id: targetRunId,
-      ...hints,
-      fork_counter_init: forkMax || 0,
-      merge_counter_init: mergeMax || 0,
-    }, 30_000);
-  } else {
-    // Already on this run – just send counter seeds if you care:
-    await sendReq('set_counter_seeds', {
-      fork_counter_init: forkMax || 0,
-      merge_counter_init: mergeMax || 0,
-    }, 30_000);
-  }
-}
-
-
-/** Try to attach the connected Trainer to a specific run, creating resume wiring. */
-async function ensureTrainerOnRun(targetRunId: string): Promise<void> {
-  if (!targetRunId) throw new Error('No target run.');
-  await startRun();                    // wait for socket
-  if (!requireTrainerConnection()) return;
-
-  const alreadyOn = currentRunId && currentRunId === targetRunId;
-
-  // If Trainer is already on this run, do nothing.
-  // No attach_context, no _bind_to_run, no ckpt reload.
-  if (alreadyOn) {
-    return;
-  }
-
-  // We are switching runs -> use switch_run + init hints.
-  const hints = latestResumeHints(targetRunId) || {};
-  const { forkMax, mergeMax } = computeForkMergeCounters();
-
-  await sendReq('switch_run', {
-    run_id: targetRunId,
-    ...hints,
-    fork_counter_init: forkMax || 0,
-    merge_counter_init: mergeMax || 0,
-  }, 30_000);
-
-  currentRunId = targetRunId;
-  modelNavSelectedRunId = targetRunId;
-  post({ type: 'modelNav.select', runId: targetRunId });
-}
-
-
-async function getSelectedRegionIndices(runId: string, minLoss: number, maxLoss: number): Promise<number[]> {
-  const data = await sendReq('get_selected_region_indices', {
-    run_id: String(runId),
-    min_loss: Number(minLoss),
-    max_loss: Number(maxLoss),
-  }, 60_000);
-  const arr = Array.isArray(data?.indices) ? data.indices : [];
-  // normalize to ints
-  return arr
-    .map((n: number) => Number(n) | 0)
-    .filter((n: number) => Number.isFinite(n) && n >= 0);
-
 }

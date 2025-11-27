@@ -148,7 +148,7 @@ def _vectorize_with_vmap(loss_fn: Callable, pred: torch.Tensor, target: Any) -> 
         return _reduce_per_sample_like_training(out, tg_b if isinstance(tg_b, torch.Tensor) else tg_i, loss_fn)
 
     in_axes = (0, 0) if target_has_batch else (0, None)
-    losses = vmap(_single, in_axes=in_axes)(pred, target)
+    losses = vmap(_single, in_dims=in_axes)(pred, target)
     return losses.reshape(-1)
 
 

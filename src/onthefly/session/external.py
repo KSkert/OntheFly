@@ -227,6 +227,8 @@ class OnTheFlyExternalSession(OnTheFlySessionBase):
                 def forward(self, *args, **kwargs):
                     return self._fn(*args, **kwargs)
             loss_fn = _WrappedCriterion(loss_fn)
+            loss_fn._otf_uses_batch = True
+            loss_fn._otf_batch_call_cfg = ("loss_fn(model, batch)", True, False)
         self.raw_loss_fn = loss_fn
         self.loss_fn = loss_fn
 
@@ -408,7 +410,8 @@ class OnTheFlyExternalSession(OnTheFlySessionBase):
         step: int,
         epoch: int,
     ) -> None:
-        self.step = int(step)
+        raw_step = int(step)
+        self.step = self._normalize_backend_step(raw_step)
         self.epoch = int(epoch)
 
         snapshot = runtime_snapshot(
@@ -497,6 +500,7 @@ class OnTheFlyExternalSession(OnTheFlySessionBase):
             or "baseline"
         )
         new_name = self._dedupe_run_name(base) if dedupe else base
+        self._mark_backend_step_reset(raw_step=self.step)
         restored = self._restore_baseline_state()
         self.step = 0
         self.epoch = 0

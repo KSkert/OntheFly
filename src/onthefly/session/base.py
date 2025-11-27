@@ -7,6 +7,7 @@ from functools import partial
 from typing import Any, Callable, Dict, Optional
 
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from ..config import SessionConfig
@@ -21,6 +22,14 @@ from ..mixins.run_management_mixin import RunManagementMixin
 from ..device_utils import _resolve_device
 from ..sampler_utils import EpochSeededRandomSampler
 from ..utils import _seed_worker
+from ..data_explorer import (
+    model_input_candidates,
+    ensure_tensor_output,
+    should_retry_model_input,
+    _call_batch_loss,
+    _apply_loss_with_warning_guard,
+    _extract_loss_value,
+)
 
 
 class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
@@ -82,6 +91,7 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
         self._deterministic_pauses = True
         self._data_order_policy = "user"
         self._enforce_sampler_state = True
+        self._reset_backend_step_tracking()
 
         # IO/control plumbing
         self._bus = ControlBus()
@@ -432,13 +442,33 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
     # ------------------------------------------------------------------ evaluation helpers
 
     def _run_test(self) -> float:
+        import traceback
+
+        print("[otf] _run_test ENTER (patched debug + candidates + batch-aware detection)", flush=True)
+
         loader = self._ensure_test_loader()
         if loader is None:
+            print("[otf] _run_test ERROR: test_loader is not configured", flush=True)
             raise RuntimeError("test_loader is not configured; cannot run test.")
         if getattr(self, "loss_fn", None) is None:
+            print("[otf] _run_test ERROR: loss_fn is not configured", flush=True)
             raise RuntimeError("loss_fn/model not configured; cannot run test.")
         if getattr(self, "model", None) is None:
+            print("[otf] _run_test ERROR: model is not bound", flush=True)
             raise RuntimeError("model is not bound; cannot run test.")
+
+        def _desc(obj: Any) -> str:
+            try:
+                if torch.is_tensor(obj):
+                    return f"Tensor(shape={tuple(obj.shape)}, dtype={obj.dtype}, device={obj.device})"
+                if isinstance(obj, dict):
+                    keys = list(obj.keys())
+                    return f"dict(keys={keys[:10]}{'...' if len(keys) > 10 else ''})"
+                if isinstance(obj, (list, tuple)):
+                    return f"{type(obj).__name__}(len={len(obj)})"
+                return f"{type(obj).__name__}"
+            except Exception as e:
+                return f"{type(obj).__name__}(desc_error={e})"
 
         model = self.model
         torch_device = _resolve_device(
@@ -447,28 +477,193 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
             fallback="cpu",
         )
         device_hint = str(torch_device)
+        print(f"[otf] _run_test: resolved device => {torch_device} (hint={device_hint})", flush=True)
+
+        loss_fn = self.loss_fn
+        print(f"[otf] _run_test: loss_fn={loss_fn} type={type(loss_fn)}", flush=True)
+
+        # Static hint from attribute + type (same as compute_per_sample_losses)
+        is_batch_aware_flag = bool(getattr(loss_fn, "_otf_uses_batch", False))
+        print(f"[otf] _run_test: initial is_batch_aware_flag={is_batch_aware_flag} (by attr/type)", flush=True)
 
         was_training = bool(getattr(model, "training", True))
+        print(f"[otf] _run_test: model.training(before)={was_training}", flush=True)
+
         model.eval()
+        print("[otf] _run_test: model.eval() called", flush=True)
+
         try:
             losses: list[float] = []
             self._event(
                 {"type": "log", "level": "info", "phase": "test", "text": "[test] starting evaluation pass"}
             )
+
+            print("[otf] _run_test: entering no_grad() context", flush=True)
             with torch.no_grad():
                 for tstep, batch in enumerate(loader, start=1):
-                    if not isinstance(batch, (list, tuple)) or len(batch) < 2:
-                        raise RuntimeError("Unexpected batch format; expected (inputs, targets, *...).")
-                    x = self._move_to_device(batch[0], torch_device)
-                    y = self._move_to_device(batch[1], torch_device)
-                    logits = model(x)
-                    loss_tensor = self.loss_fn(logits, y)
+                    print(f"[otf] _run_test: --- TEST STEP {tstep} START ---", flush=True)
+                    print(f"[otf] _run_test: raw batch type={type(batch).__name__} desc={_desc(batch)}", flush=True)
+
+                    # Move everything to device
                     try:
-                        scalar = _to_scalar_loss(loss_tensor, device=device_hint)
-                        value = float(scalar.detach().cpu().item())
-                    except Exception:
+                        batch = self._move_to_device(batch, torch_device)
+                        print(f"[otf] _run_test: batch moved to device => {torch_device}, desc={_desc(batch)}", flush=True)
+                    except Exception as exc:
+                        print(f"[otf] _run_test: EXCEPTION moving batch to device: {type(exc).__name__}: {exc}", flush=True)
+                        print("[otf] _run_test: traceback:\n" + traceback.format_exc(), flush=True)
+                        raise
+
+                    if not isinstance(batch, (list, tuple)) or len(batch) < 2:
+                        print(f"[otf] _run_test: BAD BATCH FORMAT: type={type(batch).__name__} desc={_desc(batch)}", flush=True)
+                        raise RuntimeError("Unexpected batch format; expected (inputs, targets, *...).")
+
+                    # Unpack for generic path + candidate builder
+                    first = batch[0]
+                    y = batch[1]
+                    rest = list(batch[2:])
+                    print(f"[otf] _run_test: first (candidate base) desc={_desc(first)}", flush=True)
+                    print(f"[otf] _run_test: y (targets) desc={_desc(y)}", flush=True)
+                    print(f"[otf] _run_test: rest len={len(rest)}", flush=True)
+
+                    # ----------------------------
+                    # Batch-aware detection (like compute_per_sample_losses)
+                    # ----------------------------
+                    uses_batch = is_batch_aware_flag
+                    batch_loss_probe = None
+
+                    if callable(loss_fn) and not uses_batch:
+                        print("[otf] _run_test: attempting batch-aware auto-detect via _call_batch_loss(loss_fn, model, batch)", flush=True)
+                        try:
+                            batch_loss_probe = _apply_loss_with_warning_guard(
+                                lambda: _call_batch_loss(loss_fn, model, batch)
+                            )
+                            print(f"[otf] _run_test: batch-aware auto-detect PROBE SUCCESS => {_desc(batch_loss_probe)}", flush=True)
+                            uses_batch = True
+                            if not is_batch_aware_flag:
+                                print("[otf] _run_test: promoting loss_fn to batch-aware (caching _otf_uses_batch=True)", flush=True)
+                                try:
+                                    setattr(loss_fn, "_otf_uses_batch", True)
+                                except Exception as exc:
+                                    print(f"[otf] _run_test: WARNING could not set _otf_uses_batch: {type(exc).__name__}: {exc}", flush=True)
+                                is_batch_aware_flag = True
+                        except TypeError as exc:
+                            print(f"[otf] _run_test: batch-aware auto-detect PROBE TypeError => treating as non-batch-aware: {exc}", flush=True)
+                            batch_loss_probe = None
+                        except Exception as exc:
+                            # Probe failed at runtime; don't misclassify and don't crash the whole test.
+                            print(f"[otf] _run_test: batch-aware auto-detect PROBE runtime failure => falling back to generic path: {type(exc).__name__}: {exc}", flush=True)
+                            batch_loss_probe = None
+                            uses_batch = False
+
+                    print(f"[otf] _run_test: uses_batch(final)={uses_batch}", flush=True)
+
+                    # ----------------------------
+                    # BATCH-AWARE PATH
+                    # ----------------------------
+                    if uses_batch:
+                        print("[otf] _run_test: USING BATCH-AWARE PATH (_call_batch_loss)", flush=True)
+                        try:
+                            if batch_loss_probe is not None:
+                                raw_loss = batch_loss_probe
+                                print("[otf] _run_test: batch-aware path using batch_loss_probe (no re-call)", flush=True)
+                            else:
+                                print("[otf] _run_test: batch-aware path calling _call_batch_loss(loss_fn, model, batch)", flush=True)
+                                raw_loss = _apply_loss_with_warning_guard(
+                                    lambda: _call_batch_loss(loss_fn, model, batch)
+                                )
+                            print(f"[otf] _run_test: batch-aware raw_loss => {_desc(raw_loss)}", flush=True)
+                        except Exception as exc:
+                            print(f"[otf] _run_test: EXCEPTION in batch-aware loss call: {type(exc).__name__}: {exc}", flush=True)
+                            print("[otf] _run_test: traceback:\n" + traceback.format_exc(), flush=True)
+                            raise
+
+                    # ----------------------------
+                    # GENERIC (NON-BATCH-AWARE) PATH
+                    # ----------------------------
+                    else:
+                        print("[otf] _run_test: USING GENERIC PATH WITH CANDIDATES (logits, y)", flush=True)
+
+                        # Build candidate inputs for model: embedding variants, (x, y), (x, *rest), etc.
+                        try:
+                            candidates = model_input_candidates(model, first, rest)
+                            print(f"[otf] _run_test: model_input_candidates => {len(candidates)} candidates", flush=True)
+                            for ci, cand in enumerate(candidates[:10]):
+                                print(f"[otf] _run_test: cand[{ci}] desc={_desc(cand)}", flush=True)
+                            if len(candidates) > 10:
+                                print(f"[otf] _run_test: (candidates truncated in log; total={len(candidates)})", flush=True)
+                        except Exception as exc:
+                            print(f"[otf] _run_test: EXCEPTION building model_input_candidates: {type(exc).__name__}: {exc}", flush=True)
+                            print("[otf] _run_test: traceback:\n" + traceback.format_exc(), flush=True)
+                            raise
+
+                        logits = None
+                        last_exc: Exception | None = None
+
+                        # Try each candidate in order, with retry heuristics for unpack/shape errors.
+                        for ci, cand in enumerate(candidates):
+                            print(f"[otf] _run_test: --- CANDIDATE {ci} START ---", flush=True)
+                            print(f"[otf] _run_test: candidate[{ci}] value desc={_desc(cand)}", flush=True)
+                            try:
+                                print("[otf] _run_test: calling model(cand)", flush=True)
+                                out = model(cand)
+                                print(f"[otf] _run_test: model(cand) returned => { _desc(out) }", flush=True)
+                                logits = ensure_tensor_output(out)
+                                print(f"[otf] _run_test: ensure_tensor_output(out) => { _desc(logits) }", flush=True)
+                                print(f"[otf] _run_test: CANDIDATE {ci} SUCCESS", flush=True)
+                                break
+                            except Exception as exc:
+                                print(f"[otf] _run_test: EXCEPTION in model(cand) for candidate {ci}: {type(exc).__name__}: {exc}", flush=True)
+                                print("[otf] _run_test: traceback:\n" + traceback.format_exc(), flush=True)
+                                if should_retry_model_input(exc):
+                                    print("[otf] _run_test: should_retry_model_input=True -> trying next candidate", flush=True)
+                                    last_exc = exc
+                                    continue
+                                print("[otf] _run_test: should_retry_model_input=False -> re-raise", flush=True)
+                                raise
+
+                        if logits is None:
+                            print("[otf] _run_test: logits is None after trying all candidates", flush=True)
+                            if last_exc is not None:
+                                print(f"[otf] _run_test: re-raising last_exc type={type(last_exc).__name__}: {last_exc}", flush=True)
+                                raise last_exc
+                            raise RuntimeError("Could not prepare inputs for model in _run_test.")
+
+                        # Now compute loss on the chosen logits and fixed y (classic API).
+                        try:
+                            print("[otf] _run_test: calling loss_fn(logits, y)", flush=True)
+                            raw_loss = loss_fn(logits, y)
+                            print(f"[otf] _run_test: loss_fn(logits, y) returned => { _desc(raw_loss) }", flush=True)
+                        except Exception as exc:
+                            print(f"[otf] _run_test: EXCEPTION in loss_fn(logits, y): {type(exc).__name__}: {exc}", flush=True)
+                            print("[otf] _run_test: traceback:\n" + traceback.format_exc(), flush=True)
+                            raise
+
+                    # ----------------------------
+                    # Convert raw_loss to scalar
+                    # ----------------------------
+                    try:
+                        print(f"[otf] _run_test: extracting scalar-like loss via _extract_loss_value", flush=True)
+                        loss_tensor_candidate = _extract_loss_value(raw_loss)
+                        print(f"[otf] _run_test: _extract_loss_value => {_desc(loss_tensor_candidate)}", flush=True)
+
+                        print(f"[otf] _run_test: converting loss to scalar via _to_scalar_loss, device_hint={device_hint}", flush=True)
+                        scalar = _to_scalar_loss(loss_tensor_candidate, device=device_hint)
+                        print(f"[otf] _run_test: _to_scalar_loss returned => { _desc(scalar) }", flush=True)
+
+                        if torch.is_tensor(scalar):
+                            value = float(scalar.detach().cpu().item())
+                        else:
+                            value = float(scalar)
+                        print(f"[otf] _run_test: scalar value={value}", flush=True)
+                    except Exception as exc:
+                        print(f"[otf] _run_test: EXCEPTION while converting loss to scalar: {type(exc).__name__}: {exc}", flush=True)
+                        print("[otf] _run_test: traceback:\n" + traceback.format_exc(), flush=True)
                         value = float("nan")
+                        print("[otf] _run_test: using NaN for this step loss", flush=True)
+
                     losses.append(value)
+                    print(f"[otf] _run_test: appended loss; len(losses)={len(losses)}", flush=True)
+
                     self._event({"type": "testStep", "step": tstep, "loss": value})
                     self._event(
                         {
@@ -478,15 +673,30 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
                             "text": f"step {tstep}: test_loss = {value:.6f}",
                         }
                     )
+
+                    print(f"[otf] _run_test: --- TEST STEP {tstep} END ---", flush=True)
+
+            if len(losses) == 0:
+                print("[otf] _run_test: WARNING no losses collected; avg will be NaN", flush=True)
+
             avg = sum(losses) / max(1, len(losses))
+            print(f"[otf] _run_test: average test loss={avg} over {len(losses)} steps", flush=True)
+
             self._event({"type": "log", "level": "info", "phase": "test", "text": f"test_avg_loss = {avg:.6f}"})
             self._event({"type": "log", "level": "info", "phase": "test", "text": "[test] evaluation pass complete"})
+
+            print("[otf] _run_test RETURN", flush=True)
             return float(avg)
+
         finally:
+            print(f"[otf] _run_test FINALLY: restoring model mode (was_training={was_training})", flush=True)
             if was_training:
                 model.train()
+                print("[otf] _run_test FINALLY: model.train() called", flush=True)
             else:
                 model.eval()
+                print("[otf] _run_test FINALLY: model.eval() called", flush=True)
+            print("[otf] _run_test EXIT", flush=True)
 
     def _move_to_device(self, obj: Any, device: torch.device):
         if torch.is_tensor(obj):
@@ -500,14 +710,11 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
         return obj
 
     def _run_labeled_test_and_ckpt(self, *, label: str = "final", source: str = "manual") -> Dict[str, Any]:
-        print("[otf] now we are actually inside of _run_labeled_test_and_ckpt")
         loader = self._ensure_test_loader()
         if loader is None:
-            print("[otf] loader is None")
             raise RuntimeError("test_loader is not configured; cannot run test.")
 
         if getattr(self, "_test_inflight", False):
-            print("[otf] condition passed: if getattr(self, '_test_inflight', False)")
             return {
                 "status": "busy",
                 "run_id": self.cfg.run_name,
@@ -518,7 +725,6 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
 
         self._test_inflight = True
         try:
-            print("[otf] we have entered the try block in _run_labeled_test_and_ckpt")
             self._event(
                 {
                     "type": "log",
@@ -527,9 +733,7 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
                     "text": f"[test] requested evaluation for label '{label}' (source={source})",
                 }
             )
-            print("[otf] about to do _run_test")
             avg = float(self._run_test())
-            print("[otf] just did _run_test")
             ckpt_path = self._save_ring_checkpoint(force=True)
 
             if ckpt_path is not None:
@@ -562,7 +766,6 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
                 "label": label,
                 "ckpt_path": ckpt_path,
             }
-            print(f"[otf] we now have a result: ", result)
 
             event = dict(result)
             event["type"] = "test_complete"
@@ -570,12 +773,10 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
             self._event(event)
 
             if source == "auto":
-                print("[otf] source was auto")
                 auto_evt = dict(result)
                 auto_evt["type"] = "auto_test_complete"
                 auto_evt["source"] = "auto"
                 self._event(auto_evt)
-            print("[otf] returning the result")
             return result
         finally:
             self._test_inflight = False

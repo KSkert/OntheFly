@@ -23,6 +23,52 @@ from ..data_explorer import (
 class RunManagementMixin:
     """Provides fork/merge helpers and feature construction for manual workflows."""
 
+    def _ensure_backend_step_tracker(self):
+        if not hasattr(self, "_backend_step_offset"):
+            self._backend_step_offset = 0
+        if not hasattr(self, "_backend_step_pending_anchor"):
+            self._backend_step_pending_anchor: Optional[int] = None
+        if not hasattr(self, "_last_backend_raw_step"):
+            self._last_backend_raw_step = 0
+
+    def _reset_backend_step_tracking(self):
+        self._ensure_backend_step_tracker()
+        self._backend_step_offset = 0
+        self._backend_step_pending_anchor = None
+        self._last_backend_raw_step = 0
+
+    def _mark_backend_step_reset(self, *, raw_step: Optional[int] = None):
+        """
+        Remember the raw backend step at the moment a reset command is processed.
+        On the next trainStep event we can decide whether the underlying trainer
+        actually reset its counter or if we need to offset it ourselves.
+        """
+        self._ensure_backend_step_tracker()
+        anchor = self._last_backend_raw_step if raw_step is None else int(raw_step)
+        self._backend_step_pending_anchor = anchor
+        self._backend_step_offset = anchor
+
+    def _normalize_backend_step(self, raw_step: int) -> int:
+        """
+        Normalize raw backend steps so the UI always sees a logical counter that
+        restarts from zero after a reset command.
+        """
+        self._ensure_backend_step_tracker()
+        raw = int(raw_step)
+        self._last_backend_raw_step = raw
+        pending = self._backend_step_pending_anchor
+        if pending is not None:
+            if raw <= pending:
+                self._backend_step_offset = 0
+            else:
+                self._backend_step_offset = pending
+            self._backend_step_pending_anchor = None
+        offset = int(getattr(self, "_backend_step_offset", 0) or 0)
+        logical = raw - offset
+        if logical < 0:
+            logical = 0
+        return logical
+
     # ---- simple run naming, deriving max values (e.g. max_fork=4 for next run being fork5) from session environemnt
     def _next_run_name(self, kind: str) -> str:
         """
@@ -215,6 +261,7 @@ class RunManagementMixin:
         self._ckpts.clear()
         self.epoch = 0
         self.step = 0
+        self._reset_backend_step_tracking()
 
         # clear volatile state
         self._last_val_loss = None
@@ -224,21 +271,16 @@ class RunManagementMixin:
             parents,
             {**(meta or {}), "display_name": display_name, "run_gen": self._run_gen},
         )
-        print("[otf] reached end of start_new_run")
-        print("[otf][test] model device:",
-            next(self.model.parameters()).device,
-            "session.device:", getattr(self, "device", None))
+
         return fs_id
 
     # -------------------- Fork execution (feature-aware) --------------------
     def _do_fork(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        print(["[otf] entered _do_fork and will see where we go from here."])
         mode = str(payload.get("mode", "manual")).lower()
         allow_when_paused = bool(payload.get("allow_when_paused", mode == "manual"))
         if (self._paused or self._halt_evt.is_set()) and not allow_when_paused:
             self._event({"type": "log", "level": "info", "text": "Fork skipped: session is paused."})
             return {"new_run": None, "subset_indices": []}
-        print("[otf] gone further than stop condition:  self._paused or self._halt_evt.is_set()) and not allow_when_paused")
         hparams = payload.get("hparams", {})
         selection = payload.get("selection")
         region = payload.get("region") or {}
@@ -263,17 +305,14 @@ class RunManagementMixin:
                         "text": f"No checkpoint found for parent '{parent}'. Forking with current weights.",
                     }
                 )
-        print("[otf] gone further than if elif if else")
         if payload.get("run_name"):
             # Manual override still allowed
             new_id = str(payload["run_name"])
         else:
             # Auto: fork1, fork2, fork3, ...
             new_id = self._next_run_name("fork")
-        print("[otf] gone further than payload.get run_name")
         sel_indices: List[int] = []
         if (selection or region) and self._train_root_ds is not None:
-            print("[otf] inside condition (selection or region) and self._train_root_ds is not None")
             ds = self._train_root_ds
             cancel = (lambda: (not self._running)) if allow_when_paused else (
                 lambda: (not self._running) or self._paused or self._halt_evt.is_set()
@@ -288,10 +327,7 @@ class RunManagementMixin:
                 amp_enabled=bool(self.cfg.amp and "cuda" in str(self.device)),
                 should_stop=cancel,
             )
-            print("[otf][test] model device:",
-                next(self.model.parameters()).device,
-                "session.device:", getattr(self, "device", None))
-            print("[otf] just passed compute_per_sample_losses")
+
             if not tr_losses and (not self._running):
                 self._event({"type": "log", "level": "warn", "text": "Fork cancelled during loss scan."})
                 return {"new_run": None, "subset_indices": []}
@@ -338,10 +374,7 @@ class RunManagementMixin:
                     for i, L in enumerate(tr_losses)
                     if (L is not None and lo <= float(L) <= hi)
                 ]
-        print("[otf][test] model device:",
-            next(self.model.parameters()).device,
-            "session.device:", getattr(self, "device", None))
-        print("[otf] reached just before _switch_to_new_run")
+
         child_id = self._switch_to_new_run(
             new_id,
             parents=[parent],
@@ -448,6 +481,17 @@ class RunManagementMixin:
             labels = cl["labels"]
             if not targets:
                 import numpy as np
+                # --- debug: sizes before numpy materialization ---
+                try:
+                    lbl_len = len(labels)
+                except Exception:
+                    lbl_len = None
+                try:
+                    loss_len = len(losses)
+                except Exception:
+                    loss_len = None
+                print(f"[otf][debug] labels: type={type(labels)} len={lbl_len} shape={getattr(labels, 'shape', None)}")
+                print(f"[otf][debug] losses: type={type(losses)} len={loss_len} shape={getattr(losses, 'shape', None)}")
 
                 labels_np = np.asarray(labels, dtype=int)
                 losses_np = np.asarray(losses, dtype=float)

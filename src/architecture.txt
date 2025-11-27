@@ -3,129 +3,250 @@ Architecture Overview
 
 OnTheFly is organized around **sessions**—long-lived controllers that keep track of
 training state, handle dashboard commands, and coordinate checkpoints, telemetry,
-and forks/merges. The project is intentionally layered so the core control plane,
-framework adapters, and support utilities evolve independently.
+and forks/merges. The core is a framework-neutral control plane that can be driven
+either by OnTheFly’s native trainer loop or by external runtimes (e.g., Lightning)
+through a delegate adapter.
 
-Layered Layout
---------------
-- **Control + Command Layer** (`onthefly/control.py`, `socket_channel.py`) drives
-  the command bus, pause/resume logic, and telemetry channel shared by every session.
-- **Session Layer** (`onthefly/session/…`) hosts the long-lived objects that own
-  training state and compose mixins for cross-cutting concerns.
-- **Execution Delegates** (`trainer.py`, `wrappers/lightning.py`) expose a user API
-  and translate framework-specific hooks into session commands.
-- **Telemetry, Data, and Checkpoint Utilities** (`onthefly/runtime_metrics.py`,
-  `data_explorer.py`, etc.) provide pluggable helpers consumed by the layers above.
+This document focuses on the architecture and responsibilities of the key runtime
+files discussed here:
 
-Sessions (`src/onthefly/session`)
----------------------------------
-- `base.py` defines `OnTheFlySessionBase`, the shared foundation that stitches
-  together event emission, deterministic dataloaders, checkpoint IO, command bus
-  wiring, and run lifecycle management. It is intentionally framework-neutral and
-  composes most functionality through mixins.
-- `native.py` builds `OnTheFlySession`, the PyTorch-first implementation. It mixes
-  in `TrainMixin`, reset helpers, AMP/optimizer wiring, and validation/test helpers
-  that operate directly on user models.
-- `external.py` implements `OnTheFlyExternalSession`, a façade for third-party
-  trainers (Lightning, Accelerate, etc.). It reuses the base control plane but
-  delegates batch execution to a `FrameworkDelegate` so external runtimes can drive
-  the loop while still benefiting from dashboards, forks, and checkpoints.
-- `__init__.py` provides ergonomic exports (`OnTheFlySession`,
-  `OnTheFlyExternalSession`, `OnTheFlySessionBase`) for callers who just need an
-  implementation without digging through modules.
+- `src/onthefly/session/base.py`
+- `src/onthefly/session/external.py`
+- `src/onthefly/data_explorer.py`
 
-Mixins (`src/onthefly/mixins`)
-------------------------------
-Mixins isolate orthogonal capabilities so sessions can opt into only what they need:
 
-- **CheckpointMixin** – streaming checkpoint save/load, rotation policies, and
-  artifact registration with the dashboard.
-- **CommandMixin** – routing logic for pause/resume/fork/merge/reset, plus
-  translation between dashboard payloads and internal handlers.
-- **DeterminismMixin** – reproducible dataloader seeds, deterministic sampler setup,
-  and replay helpers when resuming from checkpoints.
-- **RunManagementMixin** – fork, branch, and merge orchestration, including SWA and
-  Fisher merges implemented in `merging.py`/`ckpt_utils.py`.
-- **LossInspectionMixin** – per-sample loss aggregation, embeddings, and exports
-  powering the data explorer workflows.
+Sessions: Core Runtime (`src/onthefly/session/base.py`)
+-------------------------------------------------------
 
-Control Plane (`src/onthefly/control.py` and friends)
-----------------------------------------------------
-- `OnTheFlyTrainerDelegate` supplies the interface the native trainer uses to
-  report progress, respond to pause signals, and emit lifecycle events.
-- `ConsoleGate`, `CommandBus`, and `SocketChannel` coordinate user commands from
-  VS Code, ensuring that sessions can process requests while training continues.
-- The control plane exposes a small API (`emit`, `pause`, `resume`, `request_test`)
-  so mixins and sessions do not need to know anything about transport details.
+`base.py` defines `OnTheFlySessionBase`, the shared foundation used by all session
+implementations. It is framework-neutral and composes behavior through mixins.
 
-Delegates, Wrappers, and Public APIs
-------------------------------------
-- `trainer.py` offers a Lightning-inspired API. `Trainer.fit(...)` spins up a
-  native session, wires the `OnTheFlyTrainerDelegate`, streams metrics to the
-  dashboard, and invokes training/test loops via the session methods.
-- `wrappers/lightning.py` installs an `attach_lightning` helper. It creates an
-  `OnTheFlyExternalSession`, attaches a `FrameworkDelegate` that proxies
-  Lightning’s hooks, and pauses after auto-tests so the dashboard can request
-  forks, merges, or artifact inspection before resuming.
-- Future wrappers follow the same template: implement a delegate that translates
-  framework callbacks into session methods while leaving control/telemetry intact.
+Key responsibilities:
 
-Telemetry, Data, and Utility Modules
-------------------------------------
-- `runtime_metrics.py`, `metrics_utils.py`, `device_utils.py` maintain device
-  placement, AMP/scaler coordination, and normalized metrics for display.
-- `data_explorer.py` plus the loss mixin produce embeddings, selections, and
-  exports consumed by fork workflows.
-- `sampler_utils.py`, `ckpt_utils.py`, and `merging.py` provide shared building
-  blocks for deterministic sampling, checkpoint surgery, and model merging.
+1) Lifecycle & Event Emission
+   - Owns the session lifecycle (`before_training`, `after_training`) and emits the
+     canonical event stream (`session_started`, `trainStep`, `epoch_end`,
+     `trainingFinished`, log events).
+   - Maintains stable run identifiers (`session_id`, `cfg.run_name`) and run
+     bookkeeping (`step`, `epoch`, last validation loss, runtime LR).
 
-Flow of a Training Run
-----------------------
-1. **Bootstrap** – User code creates either `Trainer` (native) or calls
-   `attach_lightning` (external). Both paths create a `SessionConfig`, bind a
-   `SocketChannel`, and construct the appropriate session implementation.
-2. **Main Loop** – The session owns the primary loop (`train_epoch`,
-   `_run_test`, etc.), emitting events such as `trainStep`, `epochEnd`, and
-   `testMetrics` through the control layer while honoring pause requests.
-3. **Command Handling** – Incoming dashboard commands travel through the bus to
-   the relevant mixin handler (fork, merge, reset, sample inspection). Commands
-   can interrupt training, but the console gate enforces safe boundaries (e.g.,
-   finish the current batch before applying a fork).
-4. **Checkpointing & Telemetry** – Checkpoint mixins capture weights/optimizer
-   state, register artifacts, and maintain rotation policies. Metrics utilities
-   normalize scalar/tensor outputs before shipping them off to the dashboard.
-5. **Completion** – Sessions either terminate after `fit` or remain alive for
-   follow-up commands (e.g., further forks). External sessions hand control back
-   to the framework once the delegate signals completion.
+2) Command Bus + Pause Gate Integration
+   - Wires the command bus (`ControlBus`) and router (`CommandRouter`) plus the
+     pause/resume boundary gate (`PauseGate`).
+   - Runs a lightweight command-drain loop in a background thread so sessions can
+     respond to dashboard commands while training continues.
+   - Implements `tick()` for external runtimes: the delegate calls this at safe
+     points (typically batch boundaries) so pause requests take effect without a
+     mid-batch interrupt.
 
-Fork/Merge Lifecycle
---------------------
-1. `RunManagementMixin` receives a fork request with filters (dataset subset,
-   metric thresholds, etc.).
-2. The mixin asks `CheckpointMixin` for the latest state, optionally runs SWA or
-   Fisher merging to blend parent/child weights, and spawns a new run ID without
-   restarting the Python process.
-3. The deterministic sampler utilities ensure the new run can replay the same
-   batches or adopt a new sampling policy depending on the command payload.
-4. When a merge is requested, the mixin resolves target checkpoints, performs the
-   combination strategy, and updates the active session before resuming training.
-5. Session code already understands loss-driven selection payloads (e.g.,
-   “quantile” requests for the hardest 15% of samples or k-means clusters),
-   although the current dashboard webview does not expose UI controls for those
-   filters yet.
+3) Deterministic Dataloader Policies
+   - Supports reproducible sampling and pause/resume semantics by cloning loaders
+     with seeded generators and/or wrapping loaders with a sampler driven by
+     session epoch.
+   - Offers two strategies:
+       * "user" policy: preserve the user loader’s order, avoid sampler surgery.
+       * managed policies: enforce stateful replay via a seeded sampler and/or
+         worker seeding.
+   - Reapplies determinism when loaders are swapped.
 
-Extending the System
---------------------
-- **New Frameworks** – Implement a `FrameworkDelegate` that mirrors the hooks of
-  the target framework, then wrap it in a helper like `attach_lightning` to spin
-  up an `OnTheFlyExternalSession`.
-- **New Telemetry or Commands** – Add a mixin that registers command handlers or
-  telemetry emitters, plug it into `OnTheFlySessionBase`, and expose the result
-  through the dashboard schema.
-- **Custom Checkpoint Policies** – Extend `CheckpointMixin` or provide a new
-  strategy in `ckpt_utils.py`/`merging.py`; all sessions will immediately benefit
-  thanks to the shared base class.
+4) Evaluation: `_run_test`
+   - Runs a minimal evaluation loop over `test_loader`:
+       * resolves device from model/session hints
+       * moves the batch to device
+       * supports both "generic" loss application and "batch-aware" loss functions
+         via a best-effort detection path
+       * emits per-step `testStep` events and averaged test loss logs
+       * preserves and restores the model’s training/eval mode around evaluation
+   - Uses utilities from `data_explorer.py` to:
+       * generate candidate model inputs (`model_input_candidates`)
+       * normalize model output to a tensor (`ensure_tensor_output`)
+       * call losses that may operate on the batch object (`_call_batch_loss`)
+       * treat certain warnings as failures (`_apply_loss_with_warning_guard`)
+       * extract a usable loss value from various loss return shapes (`_extract_loss_value`)
 
-This compartmentalized layout keeps the data/control plane stable while enabling
-multiple front-ends (native PyTorch loops, Lightning, future frameworks) to share
-telemetry, checkpoints, and interactive workflows without reinventing the core.
+5) Checkpoint Load Fallback (External-Friendly)
+   - `_load_checkpoint_into_state` attempts a safe load of session-owned state.
+     External sessions can override or fall back to a framework delegate loader
+     when needed.
+
+
+External Runtime Session (`src/onthefly/session/external.py`)
+------------------------------------------------------------
+
+`external.py` defines `OnTheFlyExternalSession`, a session variant designed for
+third-party training frameworks (Lightning, Accelerate, etc.). The external runtime
+owns the training loop; the session remains responsible for control-plane behavior
+and dashboard fidelity.
+
+Key components:
+
+1) `_LightningControlDelegate`
+   - A `ControlDelegate` implementation used by the command router. It translates
+     dashboard commands into session actions or framework delegate requests.
+   - Handles:
+       * pause: sets session paused flag and calls `delegate.request_pause(...)`
+       * resume: clears paused flag and calls `delegate.request_resume()`
+       * fork / merge: coordinates with the session run-management helpers
+       * test: triggers session-run evaluation + checkpointing pipelines
+
+2) `OnTheFlyExternalSession` Wiring & Runtime Bindings
+   - Maintains references that mirror what a framework loop already owns:
+       * `model`, `optimizer`, `scheduler`, and inferred `device`
+       * optional datamodule slot for Lightning-style loader provisioning
+   - `bind_runtime(...)` updates the runtime objects, resolves device, and
+     instantiates device/activation telemetry monitors.
+
+3) Framework Delegate Attachment
+   - `attach_framework(delegate: FrameworkDelegate)` installs the external
+     adapter and registers the pause gate as a batch-boundary hook:
+       * `delegate.install_batch_boundary_hook(self.console_gate)`
+   - This keeps pause/resume semantics consistent with native on-the-fly behavior
+     while the framework continuously drives the actual training steps.
+
+4) Dataloader Management + Subset Rebinding
+   - Stores `train_loader`, `val_loader`, `test_loader` and remembers the original
+     training dataset root for later narrowing.
+   - `_rebind_train_loader_to_subset(indices)` rebuilds the training loader to
+     point at a `Subset` of the original dataset, preserving important loader
+     knobs (batch size, collate, drop_last, shuffle).
+   - Calls `delegate.refresh_train_loader()` when the active train loader changes
+     so the external runtime can pick up the new dataset view.
+
+5) Loss Function Configuration for External Loops
+   - `configure_loss_fn(loss_fn)` accepts either a `torch.nn.Module` or a callable.
+   - Callables are wrapped into a small `nn.Module` to standardize invocation and
+     to allow attaching lightweight metadata fields used by inspection tools:
+       * `_otf_uses_batch` (a hint that a loss may consume the batch object)
+       * `_otf_batch_call_cfg` (a cached calling pattern for batch-loss invocation)
+
+6) Test + Checkpoint Integration
+   - Exposes a labeled test entrypoint (`_run_labeled_test_and_ckpt`) that:
+       * runs a test pass (`_run_test`)
+       * forces a ring checkpoint save
+       * emits a structured completion event
+
+
+Data & Loss Inspection Utilities (`src/onthefly/data_explorer.py`)
+-----------------------------------------------------------------
+
+`data_explorer.py` contains the inference-side utilities used for reporting and
+interactive workflows. It is designed to handle diverse user batch structures and
+loss APIs while bounding memory use during large scans.
+
+Key utilities:
+
+1) Model Input Candidate Generation
+   - `model_input_candidates(model, first, rest)` builds an ordered list of input
+     candidates for `model(...)` based on:
+       * the first element of a batch (commonly inputs)
+       * additional batch elements (optional extras)
+       * embedding-adapted variants when models expose an `embedding_model` hook
+   - The result is a pruned, ordered set of candidate inputs to try for robust
+     model invocation in analysis contexts.
+
+2) Model Output Normalization
+   - `ensure_tensor_output(output)` returns a tensor directly if output is already
+     a tensor; otherwise attempts to locate the first tensor nested in lists,
+     tuples, or dicts.
+
+3) Batch-Aware Loss Invocation
+   - `_call_batch_loss(loss_fn, model, batch)` attempts to call loss functions
+     that take the full batch object (and optionally the model).
+   - Supports:
+       * a cached call strategy via `_otf_batch_call_cfg`
+       * a best-effort search across supported call patterns when no cache exists
+   - On successful invocation, caches the discovered pattern to avoid repeated
+     signature probing.
+
+4) Warning Guard for Loss Computation
+   - `_apply_loss_with_warning_guard(fn)` runs a callable while converting common
+     tensor shape/broadcast warnings into hard errors. This prevents silently
+     accepting mismatched targets or unintended broadcasting during analysis.
+
+5) Loss Value Extraction and Coercion
+   - `_extract_loss_value(val)` pulls a usable loss tensor/value out of common
+     return structures:
+       * raw tensor
+       * dicts containing loss keys
+       * tuples/lists containing tensors
+   - `_coerce_to_per_sample(val, batch_size, device)` converts scalar or vector
+     loss forms into a per-sample tensor of length `batch_size`, when possible.
+
+6) Disk-Backed Spooling for Large Scans
+   - `ChunkedArraySpool` streams numeric values to a temporary file in chunks.
+     It provides:
+       * `append()` / `extend()` for incremental writing
+       * `iter_values()` for streaming reads
+       * `finish()` to materialize a Python list and clean up temp files
+   - This keeps memory bounded during per-sample loss or embedding sweeps.
+
+7) Per-Sample Loss Computation
+   - `compute_per_sample_losses(...)` executes an analysis pass over a dataset or
+     provided `DataLoader` to produce per-sample losses and sample indices.
+   - Capabilities include:
+       * optional subset selection via `indices`
+       * reusing an existing loader to preserve user sampler ordering when possible
+       * optional train-like semantics (`mirror_train_semantics`) for dropout/BN
+       * AMP control hooks for CUDA contexts
+       * returning either materialized Python lists or spools (`materialize=False`)
+   - Uses the model-input candidate system and loss warning guard to robustly
+     handle diverse batch formats and loss behaviors.
+
+8) Embeddings and Clustering Helpers
+   - `compute_embeddings(...)` performs a forward pass over batches to gather
+     embeddings, optionally using a user-provided hook.
+   - `cluster_embeddings(...)` clusters embeddings with MiniBatchKMeans when
+     available, with safe fallbacks.
+   - `select_hard_clusters(...)` ranks clusters by mean loss for “hard example”
+     selection workflows.
+
+9) Subset Export
+   - `export_subset_table(...)` writes a compact table for selected indices
+     (Parquet/Feather/CSV), with a default adapter that captures sample IDs and
+     labels when present.
+
+
+End-to-End Runtime Flow (Relevant Portions)
+-------------------------------------------
+
+1) External runtime binds objects
+   - External frameworks call `OnTheFlyExternalSession.bind_runtime(...)` to
+     provide model/optimizer/scheduler/device hints and to initialize monitors.
+
+2) Dataloaders are configured
+   - External sessions accept explicit loaders or pull them from a datamodule/model.
+   - Determinism policies are re-applied when loaders change.
+
+3) Training loop proceeds in the framework
+   - The framework drives forward/backward/optimizer steps.
+   - At safe boundaries, the framework delegate triggers the pause gate hook and/or
+     calls `session.tick()` to honor pause/resume.
+
+4) Test and reporting pathways
+   - `OnTheFlySessionBase._run_test` runs a standalone evaluation pass over the
+     `test_loader`, using data_explorer helpers to interpret batches and compute loss.
+   - Per-sample scans and report generation use `compute_per_sample_losses` and
+     spooling to remain memory-stable on large datasets.
+
+5) Fork/merge workflows
+   - External sessions can rebuild train loaders against subsets via
+     `_rebind_train_loader_to_subset(...)` and notify the framework delegate to
+     refresh the loader view.
+
+
+Where to Look When Debugging
+----------------------------
+
+- Test-time loss failures:
+  * `src/onthefly/session/base.py::_run_test`
+  * `src/onthefly/data_explorer.py::_call_batch_loss`
+  * `src/onthefly/data_explorer.py::_apply_loss_with_warning_guard`
+
+- Per-sample report failures:
+  * `src/onthefly/data_explorer.py::compute_per_sample_losses`
+  * candidate generation and tensor extraction utilities in the same file
+
+- External framework integration issues:
+  * `src/onthefly/session/external.py::attach_framework`
+  * `_LightningControlDelegate` pause/resume/test translations
+  * loader rebinding + `delegate.refresh_train_loader()` hooks

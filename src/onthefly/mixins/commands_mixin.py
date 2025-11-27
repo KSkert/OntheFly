@@ -4,12 +4,14 @@ import os, random, time
 import shutil
 from typing import Any, Dict, List, Optional, Tuple, Union
 import contextlib
+import warnings
 
 import torch
+from torch.utils.data import DataLoader, Subset
 
 from ..control import CommandRouter
 from ..ckpt_utils import _parse_step
-from ..data_explorer import export_subset_table
+from ..data_explorer import export_subset_table, ChunkedArraySpool
 
 
 def _device_type_from(device: Union[str, torch.device]) -> str:
@@ -150,6 +152,10 @@ def _pct(x: Optional[float]) -> str:
 
 def _jsonable_list(x):
     """Convert torch/np arrays to plain Python lists for JSON transport."""
+    if x is None:
+        return []
+    if isinstance(x, ChunkedArraySpool):
+        return x.finish()
     try:
         import numpy as _np
     except Exception:
@@ -160,6 +166,76 @@ def _jsonable_list(x):
     if _np is not None and isinstance(x, _np.ndarray):
         return x.reshape(-1).tolist()
     return x  # already list-like or scalar
+
+
+def _coerce_indices(seq: Any, *, max_items: int = 10_000_000) -> Optional[List[int]]:
+    """
+    Safely convert a sampler/Subset indices sequence into a Python list[int].
+    If the sequence is missing or too large, return None so callers can fall back
+    to streaming scans.
+    """
+    if seq is None:
+        return None
+    try:
+        import numpy as _np  # type: ignore
+    except Exception:  # pragma: no cover - numpy optional
+        _np = None
+
+    if torch.is_tensor(seq):
+        values = seq.detach().cpu().reshape(-1).tolist()
+    elif _np is not None and isinstance(seq, _np.ndarray):
+        values = seq.reshape(-1).astype(int).tolist()
+    elif isinstance(seq, range):
+        if len(seq) > max_items:
+            return None
+        return [int(v) for v in seq]
+    else:
+        try:
+            values = list(seq)
+        except Exception:
+            return None
+    if len(values) > max_items:
+        return None
+    return [int(v) for v in values]
+
+
+def _unwrap_loader_dataset(
+    loader: Optional[DataLoader],
+    *,
+    max_items: int = 10_000_000,
+) -> Tuple[Optional[Any], Optional[List[int]]]:
+    """
+    Return (base_dataset, subset_indices) for the loader. If the loader already
+    wraps torch.utils.data.Subset (or a compatible class exposing .dataset/.indices),
+    we recover the base dataset and the composed sample indices so downstream scans
+    only touch the samples training actually consumed.
+    """
+    if loader is None:
+        return None, None
+    ds = getattr(loader, "dataset", None)
+    subset_indices: Optional[List[int]] = None
+    current = ds
+
+    while isinstance(current, Subset):
+        raw_indices = getattr(current, "indices", None)
+        normalized = _coerce_indices(raw_indices, max_items=max_items)
+        if normalized is None:
+            subset_indices = None
+            break
+        if subset_indices is None:
+            subset_indices = normalized
+        else:
+            try:
+                subset_indices = [subset_indices[i] for i in normalized if 0 <= i < len(subset_indices)]
+            except Exception:
+                subset_indices = None
+                break
+        current = getattr(current, "dataset", None)
+        if current is None:
+            break
+
+    base_dataset = current or ds
+    return base_dataset, subset_indices
 
 
 class CommandsMixin:
@@ -371,24 +447,38 @@ class CommandsMixin:
             req_id = _payload.get("reqId")
 
             if subset_on == "train" and self._train_root_ds is not None:
-                ds = self._train_root_ds
-                bs = getattr(self.train_loader, 'batch_size', 256)
-                cf = getattr(self.train_loader, 'collate_fn', None)
+                loader_hint = getattr(self, "train_loader", None)
+                base_ds = self._train_root_ds
                 note = "train subset" if subset else "train split"
             else:
                 if self.val_loader is None:
                     raise RuntimeError("val_loader is not configured; cannot generate validation reports.")
-                ds = self.val_loader.dataset
-                bs = getattr(self.val_loader, 'batch_size', 256)
-                cf = getattr(self.val_loader, 'collate_fn', None)
+                loader_hint = self.val_loader
+                base_ds = getattr(loader_hint, 'dataset', None) or self.val_loader.dataset
                 note = "validation subset" if subset else "validation split"
+
+            loader_base, loader_subset = _unwrap_loader_dataset(loader_hint)
+            if loader_base is not None:
+                base_ds = loader_base
+
+            batch_sz = getattr(loader_hint, 'batch_size', 256)
+            collate_fn = getattr(loader_hint, 'collate_fn', None)
+            requested_indices: Optional[List[int]] = None
+            if subset:
+                try:
+                    requested_indices = [int(i) for i in subset]
+                except Exception:
+                    requested_indices = None
+                    warnings.warn("subset_indices payload could not be coerced to integers; scanning entire dataset.")
+            elif loader_subset is not None:
+                requested_indices = loader_subset
+            ds = base_ds
 
             current_run = self.cfg.run_name
             owner_ckpt = None
             if owner == current_run:
                 if getattr(self, "_pause_ckpt_path", None) and os.path.exists(self._pause_ckpt_path):
                     owner_ckpt = self._pause_ckpt_path
-                    print("[otf] using self._pause_ckpt_path")
                 else:
                     expected = os.path.join(
                         self.cfg.save_dir, f"{self.cfg.project}__{owner}__step{self.step}.pt"
@@ -402,20 +492,21 @@ class CommandsMixin:
             owner_step = _parse_step(owner_ckpt)
 
             report_model = None
+            loss_result = None
+            index_result = None
             try:
                 report_model = self._model_from_checkpoint(owner_ckpt)
-                losses, sample_indices = self._compute_subset_losses(
+                loss_result, index_result = self._compute_subset_losses(
                     model=report_model,
                     dataset=ds,
-                    collate_fn=cf,
-                    batch_size=bs,
-                    indices=(subset or None),
+                    collate_fn=collate_fn,
+                    batch_size=batch_sz,
+                    indices=requested_indices,
                     mirror_train_semantics=False,
                     amp_enabled=_device_type_from(self.device) in {"cuda", "mps"},
                     deterministic_seed=1337,
+                    materialize=False,
                 )
-                losses = _jsonable_list(losses)
-                sample_indices = _jsonable_list(sample_indices)
 
             finally:
                 with contextlib.suppress(Exception):
@@ -424,6 +515,9 @@ class CommandsMixin:
                 if torch.cuda.is_available():
                     with contextlib.suppress(Exception):
                         torch.cuda.empty_cache()
+
+            losses = _jsonable_list(loss_result)
+            sample_indices = _jsonable_list(index_result)
 
             return {
                 "losses": losses,

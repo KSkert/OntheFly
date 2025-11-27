@@ -256,6 +256,60 @@ Provide your Lightning loss module (and optional explicit dataloaders) so OnTheF
 
 The dashboard will stream `trainStep`, epoch logs, pause/resume events, and checkpoint notifications exactly like the native OnTheFly trainer. Generate-report, fork, and merge workflows operate on the Lightning model/dataloaders you supplied, so you can pause from VS Code, inspect losses, fork subsets, merge checkpoints, and resume the Lightning loop without leaving the IDE.
 
+### Model factories & non-picklable attachments
+
+When the dashboard generates a report, forks, or merges runs, it needs to spin up a fresh copy of your model so it can load checkpoints without touching the active trainer. OnTheFly now strips common non-picklable attachments (Lightning trainers, TensorBoard loggers, etc.) before cloning.
+
+Some projects still require explicit constructor arguments (e.g., GANs composed from several modules). Provide a `model_factory` when calling `attach_lightning` so OnTheFly can respawn the module on demand:
+
+```python
+def build_model():
+    generator = EventsModule(hparams, emb_dict=dm.embeddings_dict)
+    return AdversarialEventsModule(hparams, dm.embeddings_dict, generator)
+
+attach_lightning(
+    trainer=trainer,
+    model=model,
+    project="demo",
+    run_name="lightning-baseline",
+    loss_fn=model.loss,
+    train_loader=train_loader,
+    val_loader=val_loader,
+    test_loader=test_loader,
+    model_factory=build_model,
+)
+```
+
+If your model cannot be deep-copied (custom allocators, fabric handles, etc.), the factory is the required escape hatch and keeps the contract surface limited to `attach_lightning(...)`.
+
+`attach_lightning` also accepts structured factories for convenience:
+
+```python
+attach_lightning(
+    ...,
+    model_factory=(
+        AdversarialEventsModule,            # callable or class
+        (hparams, dm.embeddings_dict, generator),  # positional args
+        {"freeze_discriminator": False},    # keyword args
+    ),
+)
+```
+
+or
+
+```python
+attach_lightning(
+    ...,
+    model_factory={
+        "factory": build_model,
+        "args": (hparams, extra_config),
+        "kwargs": {"embedding_dict": dm.embeddings_dict},
+    },
+)
+```
+
+Either form yields a closure that OnTheFly can call whenever it needs to reload a checkpoint, so you don’t have to wrap everything in a lambda manually.
+
 ---
 
 

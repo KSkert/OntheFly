@@ -206,6 +206,7 @@ class OnTheFlySession(OnTheFlySessionBase, TrainMixin):
             except Exception:
                 new_name = base_name
 
+        self._mark_backend_step_reset(raw_step=self.step)
         restored = self._restore_from_reset_snapshot()
         if not restored:
             with contextlib.suppress(Exception):

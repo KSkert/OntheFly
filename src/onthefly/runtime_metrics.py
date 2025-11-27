@@ -6,6 +6,7 @@ import re
 import sys
 import threading
 from typing import Any, Dict, Mapping, Optional, Tuple
+from collections.abc import Mapping as AbcMapping
 
 import torch
 
@@ -107,15 +108,32 @@ def _extract_inputs_targets(batch: Any) -> Tuple[Any, Any]:
     return None, None
 
 
-def _move_like(obj: Any, device: torch.device) -> Any:
+def move_batch_like(obj: Any, device: torch.device) -> Any:
+    """Best-effort device move for nested batch structures."""
     if torch.is_tensor(obj):
         return obj.to(device=device, non_blocking=True)
     if isinstance(obj, dict):
-        return {k: _move_like(v, device) for k, v in obj.items()}
+        return {k: move_batch_like(v, device) for k, v in obj.items()}
+    if isinstance(obj, AbcMapping):
+        try:
+            return obj.__class__({k: move_batch_like(v, device) for k, v in obj.items()})
+        except Exception:
+            return {k: move_batch_like(v, device) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_move_like(v, device) for v in obj]
+        return [move_batch_like(v, device) for v in obj]
     if isinstance(obj, tuple):
-        return tuple(_move_like(v, device) for v in obj)
+        return tuple(move_batch_like(v, device) for v in obj)
+    to_method = getattr(obj, "to", None)
+    if callable(to_method):
+        try:
+            return to_method(device)
+        except TypeError:
+            try:
+                return to_method(device=device)
+            except Exception:
+                pass
+        except Exception:
+            pass
     return obj
 
 
@@ -139,8 +157,8 @@ def _compute_accuracy_from_model(model: Optional[torch.nn.Module], batch: Any) -
     if device is None:
         return None
     try:
-        x = _move_like(inputs, device)
-        y = _move_like(targets, device)
+        x = move_batch_like(inputs, device)
+        y = move_batch_like(targets, device)
         with torch.no_grad():
             logits = model(x)
     except Exception:
