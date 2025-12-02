@@ -1,5 +1,5 @@
 from __future__ import annotations
-import os, json, warnings
+import os, json, warnings, logging
 from typing import Dict, Any, Optional, List
 import torch
 from torch.utils.data import DataLoader, Subset
@@ -18,6 +18,9 @@ from ..data_explorer import (
     cluster_embeddings,
     select_hard_clusters,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 class RunManagementMixin:
@@ -490,8 +493,18 @@ class RunManagementMixin:
                     loss_len = len(losses)
                 except Exception:
                     loss_len = None
-                print(f"[otf][debug] labels: type={type(labels)} len={lbl_len} shape={getattr(labels, 'shape', None)}")
-                print(f"[otf][debug] losses: type={type(losses)} len={loss_len} shape={getattr(losses, 'shape', None)}")
+                logger.debug(
+                    "[otf][debug] labels: type=%s len=%s shape=%s",
+                    type(labels),
+                    lbl_len,
+                    getattr(labels, 'shape', None),
+                )
+                logger.debug(
+                    "[otf][debug] losses: type=%s len=%s shape=%s",
+                    type(losses),
+                    loss_len,
+                    getattr(losses, 'shape', None),
+                )
 
                 labels_np = np.asarray(labels, dtype=int)
                 losses_np = np.asarray(losses, dtype=float)

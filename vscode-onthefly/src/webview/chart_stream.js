@@ -282,6 +282,23 @@
     return null;
   }
 
+  function findNearestStepIndex(stepValue, steps) {
+    if (!Array.isArray(steps) || !steps.length || !Number.isFinite(stepValue)) return -1;
+    let bestIdx = -1;
+    let bestDist = Infinity;
+    for (let i = 0; i < steps.length; i += 1) {
+      const val = Number(steps[i]);
+      if (!Number.isFinite(val)) continue;
+      const dist = Math.abs(val - stepValue);
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestIdx = i;
+        if (dist === 0) break;
+      }
+    }
+    return bestIdx;
+  }
+
   function formatEpochLabel(epoch) {
     if (!Number.isFinite(epoch)) return '';
     return String(Math.round(epoch));
@@ -320,11 +337,18 @@
 
     return function epochTickFormatter(value, index, ticks) {
       const tick = ticks && ticks[index];
-      const labelIndex = tick && typeof tick.value === 'number' ? tick.value : index;
-      const stepVal = (labelIndex >= 0 && labelIndex < steps.length) ? Number(steps[labelIndex]) : Number(value);
+      let stepVal = Number(tick?.value);
+      if (!Number.isFinite(stepVal)) stepVal = Number(value);
+      if (!Number.isFinite(stepVal) && index >= 0 && index < steps.length) {
+        stepVal = Number(steps[index]);
+      }
+      const nearestIndex = findNearestStepIndex(stepVal, steps);
+      if (!Number.isFinite(stepVal) && nearestIndex >= 0) {
+        stepVal = Number(steps[nearestIndex]);
+      }
 
       const inferred = estimateEpochFromStep(stepVal, anchors, stepsPerEpoch);
-      const fallback = findNearestKnownEpoch(labelIndex, stepEpochs);
+      const fallback = findNearestKnownEpoch(nearestIndex >= 0 ? nearestIndex : index, stepEpochs);
       const epoch = Number.isFinite(inferred) ? inferred : fallback;
 
       if (!Number.isFinite(epoch)) return '';
@@ -343,7 +367,12 @@
     if (chart.data) {
       chart.data.labels = labels;
       if (chart.data.datasets?.[0]) {
-        chart.data.datasets[0].data = data;
+        const points = labels.map((step, idx) => {
+          const x = Number(step);
+          const y = data[idx];
+          return Number.isFinite(x) ? { x, y } : { x: idx, y };
+        });
+        chart.data.datasets[0].data = points;
       }
     }
 

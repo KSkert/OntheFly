@@ -85,9 +85,7 @@ class FeatureMixin:
                 f"got {type(model).__name__!s} instead."
             )
         try:
-            print("[otf] do we reach this line?")
             model = model.to(self.device)
-            print("[otf] and this line?")
         except AttributeError as exc:
             raise TypeError(
                 "model_factory returned an object without `.to(...)`; "

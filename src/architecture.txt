@@ -206,6 +206,51 @@ Key utilities:
      labels when present.
 
 
+Run Management Helpers (`src/onthefly/mixins/run_management_mixin.py`)
+---------------------------------------------------------------------
+
+`RunManagementMixin` is composed into session classes to unify fork/merge
+behavior, run naming, and subset workflows. It plugs into session lifecycle
+events so actions initiated from the extension share the same primitives as the
+native trainer loop.
+
+Key responsibilities:
+
+1) Backend step normalization
+   - `_ensure_backend_step_tracker`, `_mark_backend_step_reset`, and
+     `_normalize_backend_step` keep UI step counters continuous even when the
+     underlying framework restarts its own counters after a reset or resume.
+
+2) Run naming + transition records
+   - `_next_run_name` lazily seeds fork/merge counters from environment
+     variables so VS Code can restore numbering when a session reconnects.
+   - `_switch_to_new_run` emits `runTransition`/`finalizeRun` events, writes a
+     `run.json` manifest (parents, spawn metadata, hparams), resets checkpoints,
+     and re-seeds progress-related session fields.
+
+3) Train-loader subset rebinding
+   - `_rebind_train_loader_to_subset` remembers the original training dataset
+     and recreates `DataLoader` instances (preserving batch size, collate
+     function, drop_last, shuffle flags) so forks and manual subsets can operate
+     on stable dataset views.
+
+4) Merge orchestration
+   - `_merged_state_dict_from_checkpoints` loads checkpoints, materializes clone
+     models, and applies SWA/Fisher/adapter merge strategies.
+   - `_merge_from_checkpoints` chooses run names, calls `_switch_to_new_run`, and
+     stores metadata so the dashboard can render merge provenance.
+
+5) Fork + subset selection workflows
+   - `_do_fork` handles parent checkpoint resolution, selection policies (manual
+     lists, quantiles, k-means clusters, loss regions), and early cancellation
+     when pause/stop flags trip.
+   - `_build_features_for_selection` and `_compute_subset_losses`
+     (wrapping `data_explorer.compute_per_sample_losses`) provide per-sample
+     losses/embeddings used by quantile + clustering selectors. Embedding-based
+     selection leverages `_run_kmeans`, `compute_embeddings`, and
+     `select_hard_clusters` to isolate "hard" regions automatically.
+
+
 End-to-End Runtime Flow (Relevant Portions)
 -------------------------------------------
 

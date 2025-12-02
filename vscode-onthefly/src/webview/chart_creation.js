@@ -159,7 +159,12 @@
 
     const opts = commonOpts({ yTitle });
     opts.parsing = true;
-    opts.scales.x = { type: 'category', ticks: { maxTicksLimit: 8 } };
+    opts.scales.x = {
+      type: 'linear',
+      bounds: 'data',
+      offset: false,
+      ticks: { maxTicksLimit: 8 }
+    };
 
     opts.scales.y = opts.scales.y || {};
     opts.scales.y.ticks = opts.scales.y.ticks || {};

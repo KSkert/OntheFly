@@ -42,6 +42,11 @@ OnTheFly is aimed at people who:
 pip install onthefly-ai
 ```
 
+Optional feature installs:
+- Downloads: `pip install "onthefly-ai[explorer]"` turns on the **Data Explorer** download button so any filtered subset can be exported as CSV/Parquet (internally powered by pandas).
+- GPU: `pip install "onthefly-ai[metrics]"` installs NVIDIA's `pynvml`, enabling GPU utilization charts alongside CUDA memory stats in the runtime metrics panel.
+
+
 **Requirements**
 
 * Python ≥ 3.9
