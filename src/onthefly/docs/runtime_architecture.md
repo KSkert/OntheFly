@@ -1,5 +1,4 @@
-Architecture Overview
-=====================
+# Runtime Architecture Overview
 
 OnTheFly is organized around **sessions**—long-lived controllers that keep track of
 training state, handle dashboard commands, and coordinate checkpoints, telemetry,
