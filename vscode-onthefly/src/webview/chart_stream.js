@@ -339,18 +339,9 @@
       const tick = ticks && ticks[index];
       let stepVal = Number(tick?.value);
       if (!Number.isFinite(stepVal)) stepVal = Number(value);
-      if (!Number.isFinite(stepVal) && index >= 0 && index < steps.length) {
-        stepVal = Number(steps[index]);
-      }
-      const nearestIndex = findNearestStepIndex(stepVal, steps);
-      if (!Number.isFinite(stepVal) && nearestIndex >= 0) {
-        stepVal = Number(steps[nearestIndex]);
-      }
+      if (!Number.isFinite(stepVal)) return '';
 
-      const inferred = estimateEpochFromStep(stepVal, anchors, stepsPerEpoch);
-      const fallback = findNearestKnownEpoch(nearestIndex >= 0 ? nearestIndex : index, stepEpochs);
-      const epoch = Number.isFinite(inferred) ? inferred : fallback;
-
+      const epoch = estimateEpochFromStep(stepVal, anchors, stepsPerEpoch);
       if (!Number.isFinite(epoch)) return '';
       return formatEpochLabel(epoch);
     };

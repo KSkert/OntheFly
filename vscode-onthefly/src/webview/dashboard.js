@@ -57,6 +57,7 @@ const {
 const byId = (id) => document.getElementById(id);
 const on = (el, evt, fn) => { if (el) el.addEventListener(evt, fn); };
 const nf = v => (Number.isFinite(v) ? v : NaN);
+let lastAppliedRunKey = '';
 
 // ===== DEBUG SHIM =====
 window.DEBUG_NAV = false;
@@ -268,11 +269,21 @@ function currentPageRunId() {
   return RunState.currentPageRunId() || RunState.getLiveRun() || null;
 }
 
-function applyRunSelection(runId) {
+function applyRunSelection(runId, opts = {}) {
   if (!runId) {
+    lastAppliedRunKey = '';
     updateModelNavUI();
     return;
   }
+
+  const normalized = keyOf(runId);
+  const force = !!opts.force;
+  if (!force && normalized && normalized === lastAppliedRunKey) {
+    if (runSel) runSel.value = runId;
+    updateModelNavUI();
+    return;
+  }
+  lastAppliedRunKey = normalized;
 
   if (runSel) runSel.value = runId;
   notifyModelNavSelected(runId);
@@ -1120,6 +1131,7 @@ window.addEventListener('message', (e) => {
       let msgRunId = keyOf(m.run_id);
       const pageRun = keyOf(currentPageRunId());
       let liveRun = keyOf(storeGetLiveRun());
+      const targetRun = keyOf(streamTargetRunId());
 
       // If trainer sends no run_id or a generic one (e.g. "live"),
       // treat the step as belonging to the currently selected run.
@@ -1138,6 +1150,10 @@ window.addEventListener('message', (e) => {
 
       // If we have a live run set, only accept messages from it
       if (liveRun && msgRunId !== liveRun) break;
+
+      // Respect manual run navigation: when follow-live is off, drop
+      // streaming rows for other runs so their data doesn't leak in.
+      if (targetRun && targetRun !== msgRunId) break;
 
       // ---- Epoch handling: only act when a real epoch comes in ----
       let msgEpoch = null;

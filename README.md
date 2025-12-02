@@ -157,8 +157,7 @@ def main():
 
     # ----------------------------------------------
     # IMPORTANT CONTRACT for attach_lightning:
-    #   - loss function be callable as loss_fn(logits, targets)
-    #     (this is what auto-test uses)
+    # loss function be callable as loss_fn(logits, targets)
     # ----------------------------------------------
     criterion = nn.CrossEntropyLoss()
 
@@ -188,11 +187,6 @@ def main():
             x_b, y_b = batch
             logits = fwd_out if fwd_out is not None else model(x_b)
             return criterion(logits, y_b)
-
-        raise TypeError(
-            f"otf_loss_fn expected either (logits, targets) or "
-            f"(batch, model, fwd_out), but got {len(args)} positional args."
-        )
 
     delegate = attach_lightning(
         trainer=trainer,

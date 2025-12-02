@@ -128,7 +128,7 @@
       normalized: true,
       responsive: true,
       maintainAspectRatio: false,
-      interaction: { intersect: false },
+      interaction: { intersect: false, mode: 'index', axis: 'x' },
       devicePixelRatio: 1,
       plugins: {
         legend: { display: false },
@@ -173,6 +173,8 @@
 
     opts.plugins.tooltip = opts.plugins.tooltip || {};
     opts.plugins.tooltip.callbacks = opts.plugins.tooltip.callbacks || {};
+    opts.plugins.tooltip.mode = 'index';
+    opts.plugins.tooltip.intersect = false;
     opts.plugins.tooltip.proximityThreshold = DEFAULT_TOOLTIP_THRESHOLD;
     opts.plugins.tooltip.callbacks.label = (ctx) => {
       const label = ctx.dataset?.label ? `${ctx.dataset.label}: ` : '';
