@@ -432,6 +432,7 @@ function setRunning(running) {
   updateSelectRegionGate();
   updateSelectedExportGate();
   gateHealthButtons();
+  window.ChartReportSelection?.setTrainingLive?.(IS_RUNNING);
 }
 
 function setRunningFor(runKey, running) {

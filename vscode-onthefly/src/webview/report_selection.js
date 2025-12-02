@@ -16,6 +16,8 @@
   let btnExportSelectedSubset = null;
   let exportSubsetFmt = null;
   let overlayFmt = null;
+  let forkOkBtn = null;
+  let trainingLive = false;
 
   function notify(text, level = 'info') {
     if (typeof window.notify === 'function') window.notify(text, level);
@@ -72,6 +74,33 @@
     btnExportSelectedSubset.disabled = !available;
     btnExportSelectedSubset.style.display = available ? '' : 'none';
     btnExportSelectedSubset.title = available ? '' : 'Click “Select Region” first.';
+  }
+
+  function getForkButton() {
+    if (!forkOkBtn) forkOkBtn = byId('forkOk');
+    return forkOkBtn;
+  }
+
+  function updateForkGate() {
+    const btn = getForkButton();
+    if (!btn) return;
+    const allowed = !trainingLive;
+    btn.disabled = !allowed;
+    btn.title = allowed ? '' : 'Pause training to fork from this selection.';
+    if (allowed) {
+      btn.removeAttribute('aria-disabled');
+      btn.style.opacity = '';
+      btn.style.pointerEvents = '';
+    } else {
+      btn.setAttribute('aria-disabled', 'true');
+      btn.style.opacity = '0.5';
+      btn.style.pointerEvents = 'none';
+    }
+  }
+
+  function setTrainingLiveState(isLive) {
+    trainingLive = !!isLive;
+    updateForkGate();
   }
 
   function computeSelectedSampleCount(minLoss, maxLoss) {
@@ -190,7 +219,9 @@
     }
 
     listen(btnExportSelectedSubset, 'click', exportSelectedSubset);
-    listen(byId('forkOk'), 'click', confirmFork);
+    forkOkBtn = byId('forkOk');
+    listen(forkOkBtn, 'click', confirmFork);
+    updateForkGate();
     listen(byId('forkCancel'), 'click', cancelSelection);
 
     listen(byId('forkALeft'),  'click', () => { regionSel.dragging = 'a'; bumpHandle('a', -1); });
@@ -400,7 +431,8 @@
     updateSelectRegionGate,
     updateSelectedExportGate,
     onReportRendered,
-    getState: () => ({ enabled: selectionActive(), sel: cloneSel() })
+    getState: () => ({ enabled: selectionActive(), sel: cloneSel() }),
+    setTrainingLive: setTrainingLiveState
   };
 
   window.enableDragOnReportChart = enableDragOnReportChart;
