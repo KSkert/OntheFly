@@ -63,7 +63,7 @@ Optional extras:
 - Data Explorer downloads: `pip install "onthefly-ai[explorer]"`
 - GPU metrics (pynvml): `pip install "onthefly-ai[metrics]"`
 
-**Requirements**
+#### Requirements
 
 * Visual Studio Code 1.102+
 * Python ≥ 3.9
