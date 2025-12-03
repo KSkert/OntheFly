@@ -2,7 +2,7 @@
   "name": "onthefly",
   "displayName": "OnTheFly",
   "description": "Interactive ML Development in VS Code.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "OnTheFly",
   "license": "MIT",
   "repository": {
@@ -37,7 +37,7 @@
       "properties": {
         "onthefly.minPythonPackage": {
           "type": "string",
-          "default": "0.1.2",
+          "default": "0.1.3",
           "description": "Minimum onthefly-ai version required by the extension."
         }
       }
