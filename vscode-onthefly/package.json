@@ -35,16 +35,6 @@
       "type": "object",
       "title": "OnTheFly",
       "properties": {
-        "onthefly.pythonPath": {
-          "type": "string",
-          "default": "python",
-          "description": "Path to Python interpreter running OnTheFlySession (>=3.9)."
-        },
-        "onthefly.storagePathOverride": {
-          "type": "string",
-          "default": "",
-          "description": "Override path for the SQLite DB (advanced)."
-        },
         "onthefly.minPythonPackage": {
           "type": "string",
           "default": "0.1.1",
