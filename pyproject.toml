@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "onthefly_ai"
-version = "0.1.1"
-description = "Human-in-the-Loop ML Training Orchestrator."
+version = "0.1.2"
+description = "Interactive ML Development in VS Code."
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
