@@ -3,7 +3,7 @@
   "displayName": "OnTheFly",
   "description": "Interactive ML Development in VS Code.",
   "version": "0.1.0",
-  "publisher": "lukeskertich",
+  "publisher": "OnTheFly",
   "license": "MIT",
   "repository": {
     "type": "git",
