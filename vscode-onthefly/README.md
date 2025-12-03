@@ -1,57 +1,65 @@
-# OnTheFly · VS Code Extension
+# OnTheFly — interactive PyTorch training in VS Code
 
-Human-in-the-loop ML training directly inside VS Code. This extension streams live metrics, logs, and actions from your `onthefly-ai` trainers into a dashboard panel so you can pause, inspect, fork, and merge runs without leaving the editor.
+OnTheFly adds a live training dashboard to VS Code for **local/offline** PyTorch runs. Run your training script the way you already do; while it trains, you can watch per-sample behavior, pause safely, trigger tests/health checks, and export/import sessions for reproducible continuation.
 
----
+> [!IMPORTANT]
+> **Status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges—please report issues.
 
-## Requirements
-
-- VS Code `1.102.0+`
-- Python `3.9+` with `onthefly-ai ≥ 0.1.1`
-- PyTorch `2.2+` (Lightning optional)
-- Local training scripts that instantiate `OnTheFlyTrainer` or call `attach_lightning(...)`
-
-The extension enforces the `onthefly-ai` minimum: if the connected trainer is older or cannot report its version, the connection is rejected with an upgrade prompt.
+![OnTheFly dashboard](https://github.com/KSkert/onthefly/raw/main/docs/images/onthefly_dashboard.png)
 
 ---
 
-## Installation
+## What you get
 
-1. Install **OnTheFly** from the VS Code Marketplace (or `vsce package` → “Install from VSIX…”).
-2. Ensure the Python environment you use for training has `onthefly-ai`:
-   ```bash
-   pip install -U onthefly-ai
-   ```
-3. In VS Code: press `Ctrl/Cmd+Shift+P` → `OnTheFly: Show Dashboard`.
-
-The dashboard listens on `localhost:47621`. Whenever your training script runs and instantiates an OnTheFly trainer, the dashboard connects automatically as long as the panel is open.
+- **Live visibility**: per-sample loss + metrics + logs + runtime stats
+- **Mid-run control**: pause/resume, trigger tests, run health checks
+- **Reproducible continuation**: export/import sessions (includes optimizer state)
+- **Optional specialization**: fork short-budget specialists on hard regions and merge improvements
+- **Fully local**: no accounts, no external services, no cloud storage
 
 ---
 
-## Quickstart
+## Quickstart (VS Code + Python)
+
+1) **Install the extension**: *OnTheFly* (VS Code Marketplace)  
+2) Install the Python package in the **same Python environment** you run training with:
+
+```bash
+pip install onthefly-ai
+```
+
+In VS Code, open the Command Palette (Cmd/Ctrl+Shift+P) and run **OnTheFly: Show Dashboard**.
+
+Run your training script normally:
+
+```bash
+python train.py
+```
+
+When your run reaches `Trainer.fit(...)` (native) or you call `attach_lightning(...)` (Lightning), the dashboard attaches and begins streaming. You can open the dashboard before or after starting training; the session backfills and keeps streaming.
+
+---
+
+## Supported workflows
+
+### Native PyTorch (`onthefly.Trainer`)
+Use OnTheFly’s trainer for any `torch.nn.Module` + standard `DataLoader`s.
 
 ```python
 from onthefly import Trainer
 
-trainer = Trainer(
-    project="mnist-demo",
-    run_name="baseline",
-    max_epochs=1,
-    do_test_after=True,
-    val_every_n_epochs=1,
-)
-
+trainer = Trainer(project="demo", run_name="baseline", max_epochs=3)
 trainer.fit(
     model=model,
     optimizer=optimizer,
     loss_fn=loss_fn,
     train_loader=train_loader,
     val_loader=val_loader,
-    test_loader=test_loader,
 )
 ```
 
-Lightning users can wrap an existing `L.Trainer`:
+### Lightning (`attach_lightning(...)`)
+Keep using `lightning.Trainer`. Call `attach_lightning(...)` to wire your run into the dashboard, then call `trainer.fit(...)` as usual.
 
 ```python
 from onthefly import attach_lightning
@@ -61,44 +69,63 @@ attach_lightning(
     model=model,
     project="demo",
     run_name="lightning-baseline",
-    loss_fn=model.loss,
     train_loader=train_loader,
     val_loader=val_loader,
-    test_loader=test_loader,
+    loss_fn=model.loss,
 )
-trainer.fit(model, datamodule=data_module)
+trainer.fit(model, train_loader, val_loader)
 ```
 
-Run your script normally (`python train.py`). Once the dashboard reports “Trainer connected”, live metrics, logs, checkpoints, and controls stream immediately.
+---
+
+## Requirements
+- VS Code 1.102+
+- Python 3.9+
+- PyTorch 2.2+
+- OS: Linux / macOS / Windows
+
+Optional extras:
+
+```bash
+pip install "onthefly-ai[explorer]"   # data explorer / slice export helpers
+pip install "onthefly-ai[metrics]"    # GPU metrics (pynvml)
+```
 
 ---
 
-## Dashboard Workflow
+## How to think about it (workflow)
+**Train → Observe → Pause → Focus → Compare → Merge → Export/Resume**
 
-1. **Open the panel** (`OnTheFly: Show Dashboard`).
-2. **Run training** in a terminal/notebook with `onthefly-ai` imported.
-3. **Monitor** loss curves, runtime metrics, and logs in real time.
-4. **Act**: pause/resume, trigger tests, generate reports, fork specialists, or merge checkpoints from the dashboard.
-5. **Export sessions** or load previous bundles directly from the panel to revisit runs.
-
-If the dashboard disconnects, simply reopen it—active trainers reconnect automatically.
+You can use only the “observe + pause + export” pieces, or go deeper with forking/merging when you need it. Forking is optional.
 
 ---
 
-## Features
-
-- **Live metrics & logs**: per-step loss, val loss, throughput, GPU stats, and structured log streaming.
-- **Mid-training controls**: pause/resume, save checkpoints, run health checks, launch reports without touching the script.
-- **Fork & merge**: branch specialists from loss tails, compare experts, and merge via SWA, distillation, Fisher soup, or adapter fusion.
-- **Session management**: export/import SQLite-backed bundles with checkpoints and final models for reproducible workflows.
-- **Offline-first**: everything runs locally; no external accounts or telemetry.
+## Storage & privacy
+- Everything runs locally (offline).
+- Sessions are ephemeral until you export them.
+- Exporting is how you save a run for resuming later (includes optimizer state).
 
 ---
 
 ## Troubleshooting
 
-- **Version warning**: upgrade `onthefly-ai` (`pip install -U onthefly-ai`) until the dashboard accepts the trainer.
-- **Port busy**: ensure nothing else uses `localhost:47621`, or set `ONTHEFLY_DASHBOARD_PORT` before launching VS Code.
-- **No data**: confirm the training script instantiates `Trainer`/`attach_lightning` and that the dashboard tab stays open.
+### Dashboard didn’t attach
+- Confirm `onthefly-ai` is installed in the same Python environment VS Code uses to run `python train.py`.
+- Make sure your script reaches `Trainer.fit(...)` (native) or calls `attach_lightning(...)` before `trainer.fit(...)` (Lightning).
+- If you use multiple terminals/interpreters, verify the interpreter shown in VS Code matches the environment you installed into.
 
-Need help? File an issue at [github.com/KSkert/OnTheFly](https://github.com/KSkert/OnTheFly/issues).
+### Port issues
+- OnTheFly attaches over localhost (default port `47621`).
+- If something else is using the port, stop the other run or configure a different port if exposed.
+
+### Lightning gotchas
+- Call `attach_lightning(...)` before `trainer.fit(...)`.
+- Provide the dataloaders you want visible in the dashboard, plus a callable loss function.
+
+---
+
+## Links
+- Repo + full docs + examples: https://github.com/KSkert/onthefly
+- Python package (PyPI): https://pypi.org/project/onthefly-ai/
+- Issues: https://github.com/KSkert/onthefly/issues
+- License: https://github.com/KSkert/onthefly/blob/main/LICENSE.txt

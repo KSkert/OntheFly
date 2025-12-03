@@ -18,14 +18,21 @@ Everything is local/offline with no accounts or external services. Sessions are 
 
 ![On-the-Fly overview](./docs/images/onthefly_dashboard.png)
 
-OnTheFly turns training into a tight, iterative loop:
+---
 
-- watch per-sample loss and slices **while you train**
-- pause to inspect hard examples or drift
-- fork short-budget specialists on rough regions
-- merge improvements back into a single exportable model
+## Contents
+- [When should you use OnTheFly?](#when-should-you-use-onthefly)
+- [Getting Started](#getting-started)
+- [Interactive Training Loop](#interactive-training-loop-how-to--features)
+- [License](#license)
+- [Citation](#citation)
 
-This shifts training from a fixed, single-pass run into an incremental process that can be revisited and extended as new data arrives. Any previous session can be resumed with its full optimizer state, enabling controlled continuation rather than full retrains. Real-time visibility into failure regions turns continuous improvement into a measurable, iterative workflow rather than a periodic batch job.
+---
+
+OnTheFly turns model development into a tight, iterative loop:
+
+As new data arrives, any previous session can be resumed with its full optimizer state, enabling controlled continuation rather than full retrains. Real-time visibility into pain points makes continuous improvement a measurable, iterative experimentation workflow rather than a one-off job.
+
 ---
 
 ## When should you use OnTheFly?
@@ -59,9 +66,9 @@ The Python backend prints `[onthefly] dashboard connected on tcp://127.0.0.1:476
 pip install onthefly-ai
 ```
 
-Optional extras:
-- Data Explorer downloads: `pip install "onthefly-ai[explorer]"`
-- GPU metrics (pynvml): `pip install "onthefly-ai[metrics]"`
+Optional extras (quote the spec so your shell doesn’t expand the brackets):
+- Data Explorer downloads (`pandas>=2.0`, `scikit-learn>=1.3`, `umap-learn>=0.5`): `pip install "onthefly-ai[explorer]"`
+- GPU metrics (`pynvml>=11.5`): `pip install "onthefly-ai[metrics]"`
 
 #### Requirements
 
