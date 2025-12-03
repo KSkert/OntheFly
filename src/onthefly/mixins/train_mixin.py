@@ -516,3 +516,7 @@ class TrainMixin:
                 if callable(wait_fn):
                     wait_fn(timeout=5.0)
                 self._cleanup_reset_snapshot()
+
+        fatal_reason = getattr(self, "_fatal_error", None)
+        if fatal_reason:
+            raise RuntimeError(str(fatal_reason))

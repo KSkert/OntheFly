@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import * as net from 'net';
 import * as crypto from 'crypto';
+import semver from 'semver';
 
 import {
   insertRun,
@@ -33,6 +34,9 @@ const DASHBOARD_PORT = Number(process.env.ONTHEFLY_DASHBOARD_PORT || '47621');
 let trainerSocket: net.Socket | null = null;
 let trainerBuffer = '';
 let trainerServer: net.Server | null = null;
+const MIN_PYTHON_PACKAGE_FALLBACK = '0.1.1';
+const VERSION_BLOCK_MESSAGE =
+  'Current pip onthefly-ai version is outdated. Update it in your terminal with "pip install -U onthefly-ai" for the compatible version.';
 
 type HardResetHandler = (context: vscode.ExtensionContext, opts?: { fromUser?: boolean }) => Promise<void>;
 let hardResetHandler: HardResetHandler | null = null;
@@ -47,7 +51,9 @@ export function trainerActive(): boolean {
 
 export function sendReq(cmd: string, payload: any = {}, timeoutMs = 15000): Promise<any> {
   if (!trainerSocket || trainerSocket.destroyed) {
-    return Promise.reject(new Error('No Trainer connected. Run your script with OnTheFlyTrainer first.'));
+    return Promise.reject(
+      new Error('No Trainer connected. Run your training script with an OnTheFlyTrainer to stream data.')
+    );
   }
   const id = crypto.randomUUID();
   const line = JSON.stringify({ id, cmd, payload }) + '\n';
@@ -60,6 +66,83 @@ export function sendReq(cmd: string, payload: any = {}, timeoutMs = 15000): Prom
     }, timeoutMs);
     pending.set(id, { resolve, reject, timer });
   });
+}
+
+function postCompatError(message: string): void {
+  const msg = (message || '').trim() || VERSION_BLOCK_MESSAGE;
+  const alreadySent = extensionState.compatGateActive && extensionState.compatErrorMessage === msg;
+  extensionState.compatGateActive = true;
+  extensionState.compatErrorMessage = msg;
+  if (!alreadySent) {
+    post({ type: 'compatError', message: msg });
+  }
+  if (!extensionState.compatNotified) {
+    extensionState.compatNotified = true;
+    vscode.window.showErrorMessage(msg);
+  }
+}
+
+function clearCompatibilityBlock(): void {
+  if (!extensionState.compatGateActive && !extensionState.compatErrorMessage) {
+    extensionState.compatNotified = false;
+    return;
+  }
+  extensionState.compatGateActive = false;
+  extensionState.compatErrorMessage = null;
+  extensionState.compatNotified = false;
+  post({ type: 'compatClear' });
+}
+
+async function sendTrainerVersionAbort(message: string, required: string, reported: string | null): Promise<void> {
+  if (!trainerSocket || trainerSocket.destroyed) return;
+  try {
+    await sendReq(
+      'enforce_version',
+      { message: (message || '').trim() || VERSION_BLOCK_MESSAGE, required, reported: reported ?? null },
+      10_000
+    );
+  } catch (err) {
+    console.warn('[onthefly] enforce_version command failed:', err);
+  }
+}
+
+async function enforceMinPythonPackage(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration('onthefly');
+  const raw = String(cfg.get('minPythonPackage') || MIN_PYTHON_PACKAGE_FALLBACK).trim();
+  const minVersion = semver.coerce(raw);
+  if (!minVersion) {
+    console.warn(`[onthefly] invalid onthefly.minPythonPackage value "${raw}" (unable to parse)`);
+    return;
+  }
+  if (!trainerSocket || trainerSocket.destroyed) {
+    return;
+  }
+
+  let info: any;
+  try {
+    info = await sendReq('server_info', {}, 10_000);
+  } catch (err) {
+    postCompatError(VERSION_BLOCK_MESSAGE);
+    await sendTrainerVersionAbort(VERSION_BLOCK_MESSAGE, raw, null);
+    throw err;
+  }
+
+  const reportedRaw = typeof info?.version === 'string' ? info.version.trim() : '';
+  const reported = reportedRaw || (info?.version != null ? String(info.version) : '');
+  const parsedReported = reported ? semver.coerce(reported) : null;
+  if (!parsedReported) {
+    postCompatError(VERSION_BLOCK_MESSAGE);
+    await sendTrainerVersionAbort(VERSION_BLOCK_MESSAGE, raw, reported || null);
+    throw new Error('Trainer reported an unrecognized onthefly-ai version.');
+  }
+
+  if (semver.lt(parsedReported, minVersion)) {
+    postCompatError(VERSION_BLOCK_MESSAGE);
+    await sendTrainerVersionAbort(VERSION_BLOCK_MESSAGE, raw, reported || parsedReported.version);
+    throw new Error('Trainer onthefly-ai version is below the dashboard minimum.');
+  }
+
+  clearCompatibilityBlock();
 }
 
 export function ensureTrainerServer(): void {
@@ -99,6 +182,18 @@ export function ensureTrainerServer(): void {
 
       postStatus(true);
       post({ type: 'log', text: 'Trainer connected. Streaming events live.' });
+
+      try {
+        await enforceMinPythonPackage();
+      } catch (err: any) {
+        if (!extensionState.compatGateActive) {
+          const msg = err?.message || 'Trainer version check failed.';
+          post({ type: 'error', text: msg });
+          vscode.window.showErrorMessage(msg);
+        }
+        disconnectTrainer(false);
+        return;
+      }
 
       const target =
         (extensionState.modelNavSelectedRunId && extensionState.modelNavSelectedRunId.trim()) ||

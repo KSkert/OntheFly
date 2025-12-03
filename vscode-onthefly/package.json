@@ -1,17 +1,17 @@
 {
   "name": "onthefly",
   "displayName": "OnTheFly",
-  "description": "Human-in-the-Loop ML Training Orchestrator.",
+  "description": "Interactive ML Development in VS Code.",
   "version": "0.1.0",
   "publisher": "lukeskertich",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/KSkert/OntheFly"
+    "url": "https://github.com/KSkert/OnTheFly"
   },
-  "homepage": "https://github.com/KSkert/OntheFly",
+  "homepage": "https://github.com/KSkert/OnTheFly",
   "bugs": {
-    "url": "https://github.com/KSkert/OntheFly/issues"
+    "url": "https://github.com/KSkert/OnTheFly/issues"
   },
   "engines": {
     "vscode": "^1.102.0"
@@ -19,7 +19,7 @@
   "categories": [
     "Other"
   ],
-  "icon": "images/icon.png",
+  "icon": "images/fly.png",
   "activationEvents": [
     "onStartupFinished"
   ],
@@ -33,7 +33,7 @@
     ],
     "configuration": {
       "type": "object",
-      "title": "On the Fly",
+      "title": "OnTheFly",
       "properties": {
         "onthefly.pythonPath": {
           "type": "string",
@@ -47,7 +47,7 @@
         },
         "onthefly.minPythonPackage": {
           "type": "string",
-          "default": "0.0.5",
+          "default": "0.1.1",
           "description": "Minimum onthefly-ai version required by the extension."
         }
       }

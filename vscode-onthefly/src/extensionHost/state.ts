@@ -17,6 +17,9 @@ export type ExtensionRuntimeState = {
   lastExtensionContext: vscode.ExtensionContext | null;
   hasTrainerConnectedOnce: boolean;
   pendingResumeAwaitingFirstRun: boolean;
+  compatGateActive: boolean;
+  compatErrorMessage: string | null;
+  compatNotified: boolean;
 };
 
 export const extensionState: ExtensionRuntimeState = {
@@ -33,6 +36,9 @@ export const extensionState: ExtensionRuntimeState = {
   lastExtensionContext: null,
   hasTrainerConnectedOnce: false,
   pendingResumeAwaitingFirstRun: false,
+  compatGateActive: false,
+  compatErrorMessage: null,
+  compatNotified: false,
 };
 
 export function setRunActivityState(activity: RunActivityState): void {

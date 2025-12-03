@@ -117,6 +117,21 @@ const dagClose   = byId('dagClose');
 const dagMergeBtn= byId('dagMergeBtn');
 const dagStrategy= byId('dagStrategy');
 
+const compatOverlay = byId('compatOverlay');
+const compatMessage = byId('compatMessage');
+
+function showCompatOverlay(message) {
+  if (!compatOverlay) return;
+  compatOverlay.hidden = false;
+  if (compatMessage) compatMessage.textContent = message || 'Current onthefly-ai version is outdated.';
+}
+
+function hideCompatOverlay() {
+  if (!compatOverlay) return;
+  compatOverlay.hidden = true;
+  if (compatMessage) compatMessage.textContent = '';
+}
+
 //exports
 const btnExportSubset = byId('btnExportSubset');
 const exportSubsetFmt = byId('exportSubsetFmt');
@@ -917,6 +932,12 @@ window.addEventListener('message', (e) => {
   const m = e.data;
 
   switch (m.type) {
+    case 'compatError':
+      showCompatOverlay(m?.message || 'Current onthefly-ai version is outdated.');
+      return;
+    case 'compatClear':
+      hideCompatOverlay();
+      break;
     case 'resetOk': {
       // Now it’s safe to clear the webview state because the user confirmed.
       try {

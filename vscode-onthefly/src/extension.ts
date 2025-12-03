@@ -230,6 +230,10 @@ function configurePanel(context: vscode.ExtensionContext, webviewPanel: vscode.W
   extensionState.panel.webview.onDidReceiveMessage((m: any) => { onMessage(context, m); });
 
   extensionState.panel.webview.html = getHtml(context, extensionState.panel.webview, nonce);
+
+  if (extensionState.compatGateActive && extensionState.compatErrorMessage) {
+    post({ type: 'compatError', message: extensionState.compatErrorMessage });
+  }
 }
 
 function getHtml(context: vscode.ExtensionContext, webview: vscode.Webview, nonce: string) {

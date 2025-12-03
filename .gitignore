@@ -1,4 +1,3 @@
-cat > .gitignore <<'EOF'
 # Python build artifacts
 dist/
 build/
@@ -13,12 +12,12 @@ __pycache__/
 .venv/
 .DS_Store
 
-# VS Code extension deps
+# VS Code extension deps & artifacts
 vscode-onthefly/node_modules/
-EOF
+vscode-onthefly/out/
+vscode-onthefly/*.vsix
 
-vscode-onthefly/node_modules/
-vscode-onthefly/.vscodeignorei
+# Local caches & example outputs
 cache/
 examples/results/
 examples/AvgImprovement.png

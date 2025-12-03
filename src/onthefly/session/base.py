@@ -94,6 +94,7 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
         self._data_order_policy = "user"
         self._enforce_sampler_state = True
         self._reset_backend_step_tracking()
+        self._fatal_error: Optional[str] = None
 
         # IO/control plumbing
         self._bus = ControlBus()

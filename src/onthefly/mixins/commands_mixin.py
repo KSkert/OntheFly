@@ -369,6 +369,16 @@ class CommandsMixin:
             self._event({"type": "stopping"})
             return {"status": "stopping"}
 
+        @self._router.on("enforce_version")
+        def _enforce_version(payload):
+            message = payload.get("message")
+            reason = str(message or "Current onthefly-ai version is outdated.").strip()
+            self._fatal_error = reason
+            self._halt_evt.set()
+            self._running = False
+            self._event({"type": "log", "level": "error", "text": reason})
+            return {"status": "fatal", "message": reason}
+
         # ----------------------------- checkpoints ------------------------------
         @self._router.on("save_ckpt")
         def _save(_payload):

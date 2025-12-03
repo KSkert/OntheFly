@@ -72,6 +72,39 @@
 
     .rootWrap { max-width: 1200px; margin: 16px auto; padding: 0 16px 32px; }
 
+    .compatOverlay {
+      position: fixed;
+      inset: 0;
+      background: var(--bg);
+      color: var(--fg);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+      text-align: center;
+      z-index: 9999;
+    }
+    .compatOverlay[hidden] { display: none; }
+    .compatBox {
+      max-width: 520px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 28px;
+      background: var(--panel-bg);
+      box-shadow: 0 24px 50px rgba(0, 0, 0, 0.35);
+    }
+    .compatTitle {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 0 0 10px;
+    }
+    .compatMessage {
+      margin: 0;
+      font-size: 15px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+
     /* ---------- Unified components ---------- */
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .workspaceStatus { margin-bottom: 12px; color: var(--muted); }
@@ -563,6 +596,12 @@
 
 </head>
 <body>
+  <div id="compatOverlay" class="compatOverlay" hidden>
+    <div class="compatBox">
+      <div class="compatTitle">Update Required</div>
+      <p id="compatMessage" class="compatMessage"></p>
+    </div>
+  </div>
   <!-- ===== Header ===== -->
   <header class="flyHeader" role="banner">
     <div class="flyHeaderInner">
