@@ -1,5 +1,9 @@
 # OnTheFly
 
+[![PyPI](https://img.shields.io/pypi/v/onthefly-ai)](#)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
+[![Python](https://img.shields.io/badge/python-3.9%2B-blue)](#requirements)
+
 OnTheFly is a **VS Code extension + Python package** for interactive PyTorch training. Run your training script exactly as you do today; while it trains, a VS Code dashboard can:
 
 - stream per-sample loss, metrics, logs, and runtime stats
@@ -208,73 +212,45 @@ Open the dashboard tab whenever you want visibility, then run your script via `p
 
 OnTheFly `Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely. When `do_test_after=True`, the automatic evaluation runs once the stop condition hits, and then the trainer keeps streaming so you can continue interacting with the run from VS Code.
 
-> **Sessions & storage**
+> **Storage**
 >
-> Starting a new session wipes the previous session’s storage. Export a session whenever you want to keep it around.
+> To support rapid model development and keep the app lightweight, we don't currently store metadata in cloud. That means you are responsible for exporting sessions that you want to save. Starting a new session or resetting the current one will clean out the previous session’s storage.
 
 ---
 
+## Interactive Training Loop (How To + Features)
 
-## Features
+**Train → Observe → Pause → Focus → Compare → Merge → Export/Resume**  
+Use all of OnTheFly, or just the parts you want (forking is optional).
 
-**Mid-training control & visibility**
-- Start and control training from the VS Code dashboard.
-- Stream per-sample loss (optionally grad-norm, margin) with robust quantiles to surface loss tails early.
-- Run mid-run health check-ups to detect instability and configuration issues before they cascade.
+### 1) Observe training in real time
+- Stream **per-sample loss** (optionally grad-norm, margin) plus robust quantiles to surface tails early
+- Track metrics, logs, and runtime stats from inside VS Code (no cloud, no accounts)
 
-**Fork, specialize, and merge**
-- Fork short-budget specialists from high-loss tails or residual clusters, then route with a lightweight gate.
-- Compare experts side-by-side on target slices.
-- Merge via SWA, distillation, Fisher Soup, or adapter fusion; view model lineage (parent/children) before committing.
+### 2) Intervene safely mid-run
+- **Pause/Resume** anytime to take a clean snapshot and avoid “hope-and-pray” long runs
+- Trigger **mid-run tests** and **health checks** (determinism, gradients, instability signals) before committing more budget
 
-**Data & sessions**
-- One-click export of indices/rows for any slice to CSV / Parquet / JSON.
-- Ephemeral sessions: storage is cleared when a new session begins; exporting is how you save.
-- Portable sessions: exported sessions include the final model and can be re-imported to run tests, reports, or further training.
+### 3) Focus on failure regions (optional)
+- **Mine hard samples** (loss tails / residual clusters) and fork short-budget specialists
+- Export slice indices/rows to **CSV / Parquet / JSON** for notebook debugging or dataset fixes
 
-**Training backend**
-- OnTheFly owns training process for any `torch.nn.Module` (including custom ones) and standard `DataLoader`s.
-- Actions like pauses, forks, resumes, and loaded sessions are deterministic, with a surfaced determinism “health check” for monitoring.
-- Supports Automatically Mixed Precision (AMP) training.
-- Seamless continuation of training after tests, whether they were triggered automatically or manually.
+### 4) Compare specialists and choose what to keep
+- Evaluate experts side-by-side on target slices
+- Inspect lineage (parent/children) before you commit to a merge
+
+### 5) Merge improvements into one model
+- Merge via **SWA, distillation, Fisher Soup, or adapter fusion**
+- Resume training from the merged model without restarting the whole run
+
+### 6) Make runs reproducible and portable
+- **Export sessions** (model + optimizer state) for controlled continuation instead of full retrains
+- **Import sessions** later to run tests, generate reports, or extend training
+
+**Works with:** PyTorch `nn.Module` + standard `DataLoader`s, and Lightning via `attach_lightning(...)`  
+**Also:** AMP support • deterministic actions (pause/fork/resume/load) • fully local/offline
 
 ---
-
-## Manual human-in-the-loop
-
-Instead of trusting a long run and hoping for the best, you keep tight control over when to pause, inspect, fork, and merge — with deterministic actions and evidence in front of you.
-
-**What you can do**
-
-* **Pause/Resume** at any time to take a clean snapshot.
-* **Inspect before acting**: View per-sample loss distributions, export subsets for offline analysis.
-* **Approve or edit plan cards** prior to execution.
-* **Compare experts** on target slices.
-* **Merge on your terms** via SWA / Distill / Fisher Soup / adapter fusion.
-* **Run health check-ups mid-run** to validate determinism, gradients, and metrics before committing to longer budgets.
-* **Export & import sessions** knowing that exported sessions include the final model and can later be imported, tested, and trained further.
-
-**Typical manual loop**
-
-1. Pause when drift or a weak slice appears.
-2. Inspect loss tails, export a subset for a quick notebook check.
-3. Fork a short-budget specialist for chosen samples, with desired parameters.
-4. Evaluate on target slices; iterate if needed.
-5. Merge improvements and resume training.
-6. Export the session for traceability, or import a prior session to continue training or generate reports.
-
-
-## Method (at a glance)
-
-> Train a generalist, detect hard cases, focus on those specialists, learn a gating network, and export a unified MoE for inference. Or, don't use forking at all; simply manage your model development from VS Code without connecting to any externals or cloud.
-
-1. Train a compact **generalist** on all data.
-2. **Hard-sample mining** flags high-loss examples online.
-3. **Clustering** groups hard samples into candidate regimes.
-4. Boost rough areas of the loss curve by forking specialists.
-5. Choose a **gating network** to unify experts.
-6. **Benchmark fairly** against a monolithic baseline with matched compute.
-
 
 ## License
 
