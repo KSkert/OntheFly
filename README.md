@@ -35,7 +35,7 @@ As new data arrives, any previous session can be resumed with its full optimizer
 
 ---
 
-## ⏳ When should you use OnTheFly?
+## 🐣 How to know you're ready to start?
 
 OnTheFly can make your life easier if you:
 
