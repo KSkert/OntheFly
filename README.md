@@ -1,10 +1,10 @@
-# OnTheFly
+# 🪰 OnTheFly
 
 [![PyPI](https://img.shields.io/pypi/v/onthefly-ai)](https://pypi.org/project/onthefly-ai/0.1.3/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](#requirements)
 
-OnTheFly is a **VS Code extension + Python package** for interactive PyTorch training. Run your training script exactly as you do today; while it trains, a VS Code dashboard can:
+OnTheFly is a **VS Code extension + Python package** for interactive PyTorch training. Run your training script exactly as you do today; while it trains, use the dashboard to:
 
 - stream per-sample loss, metrics, logs, and runtime stats
 - pause/resume training and trigger tests
@@ -29,23 +29,24 @@ Everything is local/offline with no accounts or external services. Sessions are 
 
 ---
 
-OnTheFly turns model development into a tight, iterative loop:
+## 🕹 OnTheFly turns model development into a tight, iterative loop
 
 As new data arrives, any previous session can be resumed with its full optimizer state, enabling controlled continuation rather than full retrains. Real-time visibility into pain points makes continuous improvement a measurable, iterative experimentation workflow rather than a one-off job.
 
 ---
 
-## When should you use OnTheFly?
+## ⏳ When should you use OnTheFly?
 
-OnTheFly is aimed at people who:
+OnTheFly can make your life easier if you:
 
 - train **PyTorch models** (classification, regression, etc.) and want more actionability than TensorBoard/print logs
-- are currently using no trainer or a lightning trainer
+- are using either a lightning trainer or no trainer
 - prefer a **local, offline** workflow inside VS Code rather than cloud dashboards
+- are training large models on high-dimensional, possibly sensitive data
 
 ---
 
-## Getting Started
+## 🚀 Getting Started
 
 ### Quickstart (Python + VS Code)
 
@@ -55,7 +56,7 @@ OnTheFly is aimed at people who:
 
 The Python backend prints `[onthefly] dashboard connected on tcp://127.0.0.1:47621` when the dashboard is available. You can open the dashboard before or after launching the script—the session backfills metrics and keeps streaming so you can pause, resume, and trigger tests at any time.
 
-### Install
+### 👇 Install
 
 #### 1) VS Code extension
 - Install “[OnTheFly](https://marketplace.visualstudio.com/items?itemName=OnTheFly.onthefly)” from the VS Code Marketplace.
@@ -225,13 +226,13 @@ OnTheFly `Trainer` skips validation unless you pass `val_every_n_epochs`. Set it
 
 ---
 
-## Interactive Training Loop (How To + Features)
+## 🎛 Interactive Training Loop (How To + Features)
 
 **Train → Observe → Pause → Focus → Compare → Merge → Export/Resume**  
 Use all of OnTheFly, or just the parts you want (forking is optional).
 
 ### 1) Observe training in real time
-- Stream **per-sample loss** (optionally grad-norm, margin) plus robust quantiles to surface tails early
+- Compute **per-sample loss** and export subsets for visibility, on demand.
 - Track metrics, logs, and runtime stats from inside VS Code (no cloud, no accounts)
 
 ### 2) Intervene safely mid-run
