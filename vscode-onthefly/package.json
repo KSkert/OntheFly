@@ -2,7 +2,7 @@
   "name": "onthefly",
   "displayName": "OnTheFly",
   "description": "Interactive ML Development in VS Code.",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "publisher": "OnTheFly",
   "license": "MIT",
   "repository": {
@@ -17,11 +17,13 @@
     "vscode": "^1.102.0"
   },
   "categories": [
-    "Other"
+    "Debuggers",
+    "Machine Learning"
   ],
   "icon": "images/fly.png",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onCommand:onthefly.showDashboard"
   ],
   "main": "./out/extension.js",
   "contributes": {

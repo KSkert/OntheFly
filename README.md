@@ -1,6 +1,6 @@
 # OnTheFly
 
-[![PyPI](https://img.shields.io/pypi/v/onthefly-ai)](https://pypi.org/project/onthefly-ai/0.1.1/)
+[![PyPI](https://img.shields.io/pypi/v/onthefly-ai)](https://pypi.org/project/onthefly-ai/0.1.3/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](#requirements)
 
@@ -58,7 +58,7 @@ The Python backend prints `[onthefly] dashboard connected on tcp://127.0.0.1:476
 ### Install
 
 #### 1) VS Code extension
-- Install “OnTheFly” from the VS Code Marketplace (or use the `.vsix` while it’s unpublished).
+- Install “[OnTheFly](https://marketplace.visualstudio.com/items?itemName=OnTheFly.onthefly)” from the VS Code Marketplace.
 
 #### 2) Python package
 
