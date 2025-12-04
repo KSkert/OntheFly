@@ -1,6 +1,13 @@
-# OnTheFly — interactive PyTorch training in VS Code
+# 🪰 OnTheFly — interactive PyTorch training in VS Code
 
-OnTheFly adds a live training dashboard to VS Code for **local/offline** PyTorch runs. Run your training script the way you already do; while it trains, you can watch per-sample behavior, pause safely, trigger tests/health checks, and export/import sessions for reproducible continuation.
+OnTheFly is a **VS Code extension + Python package** for interactive PyTorch training. Run your training script exactly as you do today; while it trains, use the dashboard to:
+
+- stream per-sample loss, metrics, logs, and runtime stats
+- pause/resume training and trigger tests
+- export/import sessions (with optimizer state) for reproducible resumes
+- fork short specialists on rough regions and merge improvements
+
+Everything is local/offline with no accounts or external services. Sessions are ephemeral until you export them, so saving or exporting is how you keep a run around.
 
 > **Status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues.
 
@@ -8,7 +15,7 @@ OnTheFly adds a live training dashboard to VS Code for **local/offline** PyTorch
 
 ---
 
-## Feature Overview
+## 🎛 Feature Overview
 
 - **Live visibility**: per-sample loss + metrics + logs + runtime stats
 - **Mid-run control**: pause/resume, trigger tests, run health checks
@@ -18,7 +25,7 @@ OnTheFly adds a live training dashboard to VS Code for **local/offline** PyTorch
 
 ---
 
-## Quickstart (VS Code + Python)
+## 🚀 Quickstart (VS Code + Python)
 
 1) **Install the extension**: *OnTheFly* (VS Code Marketplace)  
 2) Install the Python package in the **same Python environment** you run training with:
@@ -50,7 +57,7 @@ See the full docs on GitHub: https://github.com/KSkert/OnTheFly.
 
 ---
 
-## Requirements
+## ✅ Requirements
 - VS Code 1.102+
 - Python 3.9+
 - PyTorch 2.2+
@@ -73,7 +80,7 @@ pip install "onthefly-ai[metrics]"    # GPU metrics (pynvml)
 
 ---
 
-## Troubleshooting
+## ⛔️ Troubleshooting
 
 ### Dashboard didn’t attach
 - Confirm `onthefly-ai` is installed in the same Python environment VS Code uses to run `python train.py`.
@@ -90,7 +97,7 @@ pip install "onthefly-ai[metrics]"    # GPU metrics (pynvml)
 
 ---
 
-## Links
+## ⛓ Links
 - Repo + full docs + examples: https://github.com/KSkert/onthefly
 - Python package (PyPI): https://pypi.org/project/onthefly-ai/
 - Issues: https://github.com/KSkert/onthefly/issues
