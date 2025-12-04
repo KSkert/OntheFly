@@ -2,14 +2,13 @@
 
 OnTheFly adds a live training dashboard to VS Code for **local/offline** PyTorch runs. Run your training script the way you already do; while it trains, you can watch per-sample behavior, pause safely, trigger tests/health checks, and export/import sessions for reproducible continuation.
 
-> [!IMPORTANT]
-> **Status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges—please report issues.
+> **Status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues.
 
 ![OnTheFly dashboard](https://github.com/KSkert/onthefly/raw/main/docs/images/onthefly_dashboard.png)
 
 ---
 
-## What you get
+## Feature Overview
 
 - **Live visibility**: per-sample loss + metrics + logs + runtime stats
 - **Mid-run control**: pause/resume, trigger tests, run health checks
@@ -35,46 +34,19 @@ Run your training script normally:
 ```bash
 python train.py
 ```
-
-When your run reaches `Trainer.fit(...)` (native) or you call `attach_lightning(...)` (Lightning), the dashboard attaches and begins streaming. You can open the dashboard before or after starting training; the session backfills and keeps streaming.
-
----
-
-## Supported workflows
-
-### Native PyTorch (`onthefly.Trainer`)
-Use OnTheFly’s trainer for any `torch.nn.Module` + standard `DataLoader`s.
-
-```python
+Works with
+Native PyTorch
 from onthefly import Trainer
+Trainer(project="demo", run_name="baseline", max_epochs=3).fit(...)
 
-trainer = Trainer(project="demo", run_name="baseline", max_epochs=3)
-trainer.fit(
-    model=model,
-    optimizer=optimizer,
-    loss_fn=loss_fn,
-    train_loader=train_loader,
-    val_loader=val_loader,
-)
-```
-
-### Lightning (`attach_lightning(...)`)
-Keep using `lightning.Trainer`. Call `attach_lightning(...)` to wire your run into the dashboard, then call `trainer.fit(...)` as usual.
-
-```python
+Lightning
 from onthefly import attach_lightning
+attach_lightning(trainer=trainer, model=model, project="demo", run_name="baseline", ...)
+trainer.fit(...)
 
-attach_lightning(
-    trainer=trainer,
-    model=model,
-    project="demo",
-    run_name="lightning-baseline",
-    train_loader=train_loader,
-    val_loader=val_loader,
-    loss_fn=model.loss,
-)
-trainer.fit(model, train_loader, val_loader)
-```
+
+➡️ Integrations & advanced workflows (experiment tracking, export/import, specialists):
+See the full docs on GitHub: https://github.com/KSkert/OnTheFly.
 
 ---
 
@@ -93,12 +65,6 @@ pip install "onthefly-ai[metrics]"    # GPU metrics (pynvml)
 
 ---
 
-## How to think about it (workflow)
-**Train → Observe → Pause → Focus → Compare → Merge → Export/Resume**
-
-You can use only the “observe + pause + export” pieces, or go deeper with forking/merging when you need it. Forking is optional.
-
----
 
 ## Storage & privacy
 - Everything runs locally (offline).
