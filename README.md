@@ -21,9 +21,14 @@ Everything is local/offline with no accounts or external services. Sessions are 
 ---
 
 ## Contents
-- [When should you use OnTheFly?](#when-should-you-use-onthefly)
-- [Getting Started](#getting-started)
-- [Interactive Training Loop](#interactive-training-loop-how-to--features)
+- [When should you use?](#when-should-you-use)
+- [Getting Started](#-getting-up-and-running-in-2-minutes)
+  - [Install](#-install)
+  - [Quickstart](#-quickstart)
+  - [Minimal PyTorch script](#-minimal-pytorch-script)
+  - [Minimal Lightning script](#-minimal-lightning-script)
+  - [Distributed / DDP runs](#-distributed--ddp-runs)
+- [Interactive Training Loop](#-using-the-interactive-training-loop)
 - [License](#license)
 - [Citation](#citation)
 
@@ -35,26 +40,18 @@ As new data arrives, any previous session can be resumed with its full optimizer
 
 ---
 
-## 🐣 How to know you're ready to start?
+## When should you use?
 
 OnTheFly can make your life easier if you:
 
 - train **PyTorch models** (classification, regression, etc.) and want more actionability than TensorBoard/print logs
-- are using either a lightning trainer or no trainer
+- are using either a Lightning trainer or no trainer
 - prefer a **local, offline** workflow inside VS Code rather than cloud dashboards
 - are training large models on high-dimensional, possibly sensitive data
 
 ---
 
-## 🚀 Getting Started
-
-### Quickstart (Python + VS Code)
-
-1. Launch **OnTheFly: Show Dashboard** from the Command Palette (`Cmd/Ctrl+Shift+P`).
-2. `pip install onthefly-ai` inside the same Python environment as your training script.
-3. Run your script exactly as you do today; as soon as it calls `Trainer.fit(...)` or `attach_lightning(...)`, the VS Code dashboard listens on `localhost:47621` and attaches automatically.
-
-The Python backend prints `[onthefly] dashboard connected on tcp://127.0.0.1:47621` when the dashboard is available. You can open the dashboard before or after launching the script—the session backfills metrics and keeps streaming so you can pause, resume, and trigger tests at any time.
+## 🚀 Getting Up and Running in 2 minutes
 
 ### 👇 Install
 
@@ -69,7 +66,7 @@ pip install onthefly-ai
 
 Optional extras (quote the spec so your shell doesn’t expand the brackets):
 - Data Explorer downloads (`pandas>=2.0`, `scikit-learn>=1.3`, `umap-learn>=0.5`): `pip install "onthefly-ai[explorer]"`
-- GPU metrics (`pynvml>=11.5`): `pip install "onthefly-ai[metrics]"`
+- Surfacing GPU metrics requires (`pynvml>=11.5`): `pip install "onthefly-ai[metrics]"`
 
 #### Requirements
 
@@ -78,8 +75,22 @@ Optional extras (quote the spec so your shell doesn’t expand the brackets):
 * PyTorch ≥ 2.2 (CUDA 12.x optional)
 * OS: Linux, macOS, or Windows
 
+### ✅ Quickstart
 
-### Minimal PyTorch script
+1. Launch **OnTheFly: Show Dashboard** from the Command Palette (`Cmd/Ctrl+Shift+P`).
+2. `pip install onthefly-ai` inside the same Python environment as your training script.
+3. Run your script exactly as you do today; as soon as it calls `Trainer.fit(...)` or `attach_lightning(...)`, the VS Code dashboard listens on `localhost:47621` and attaches automatically.
+
+
+
+> [!NOTE]
+> **Storage:** To support rapid model development and keep the app lightweight, we don't currently store metadata in cloud. That means you are responsible for exporting sessions that you want to save. Starting a new session or resetting the current one will clean out the previous session’s storage.
+
+
+The Python backend prints `[onthefly] dashboard connected on tcp://127.0.0.1:47621` when the dashboard is available. You can open the dashboard before or after launching the script—the session backfills metrics and keeps streaming so you can pause, resume, and trigger tests at any time.
+
+
+### 🤏 Minimal PyTorch script
 
 <details>
 <summary>Show PyTorch example</summary>
@@ -137,7 +148,7 @@ if __name__ == "__main__":
 
 </details>
 
-### Minimal Lightning script
+### 🤏 Minimal Lightning script
 
 <details>
 <summary>Show Lightning example</summary>
@@ -218,15 +229,19 @@ Open the dashboard tab whenever you want visibility, then run your script via `p
 
 `attach_lightning(...)` simply wraps the Lightning trainer so you can keep calling `trainer.fit(...)` exactly as before. Pass the dataloaders you want available in the dashboard plus a callable loss function; everything else is optional.
 
-OnTheFly `Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely. When `do_test_after=True`, the automatic evaluation runs once the stop condition hits, and then the trainer keeps streaming so you can continue interacting with the run from VS Code.
+### 🌐 Distributed / DDP runs
 
-> **Storage**
->
-> To support rapid model development and keep the app lightweight, we don't currently store metadata in cloud. That means you are responsible for exporting sessions that you want to save. Starting a new session or resetting the current one will clean out the previous session’s storage.
+If you're using `torch.distributed`/`torchrun`, launch your script the same way. OnTheFly detects PyTorch `DistributedSampler`s, keeps them in place with a per-rank batch cursor. When training is paused, the dashboard's **Distribution Health** command issues collectives to gather metadata and optional weight hashes from all ranks so you can confirm parity before resuming.
+
+```bash
+torchrun --nproc_per_node=4 train.py --run-name ddp-baseline
+```
+
+OnTheFly `Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely. When `do_test_after=True`, the automatic evaluation runs once the stop condition hits, and then the trainer keeps streaming so you can continue interacting with the run from VS Code.
 
 ---
 
-## 🎛 Interactive Training Loop (How To + Features)
+## 🎛 Using the Interactive Training Loop
 
 **Train → Observe → Pause → Focus → Compare → Merge → Export/Resume**  
 Use all of OnTheFly, or just the parts you want (forking is optional).
@@ -255,7 +270,7 @@ Use all of OnTheFly, or just the parts you want (forking is optional).
 - **Export sessions** (model + optimizer state) for controlled continuation instead of full retrains
 - **Import sessions** later to run tests, generate reports, or extend training
 
-**Works with:** PyTorch `nn.Module` + standard `DataLoader`s, and Lightning via `attach_lightning(...)`  
+**Works with:** PyTorch `nn.Module` + standard `DataLoader`s (single GPU or torch.distributed/DDP), and Lightning via `attach_lightning(...)`  
 **Also:** AMP support • deterministic actions (pause/fork/resume/load) • fully local/offline
 
 ---
