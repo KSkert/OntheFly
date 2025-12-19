@@ -315,6 +315,7 @@ class LightningFrameworkDelegate(FrameworkDelegate):
         self._streaming_started = False  # ensure before_training runs only once
         self._auto_test_count: int = 0
         self._baseline_device = None  # device Lightning was using at baseline capture
+        self._lightning_test_inflight = False
 
         Callback = _resolve_lightning_callback()
 
@@ -621,6 +622,41 @@ class LightningFrameworkDelegate(FrameworkDelegate):
                     val_dataloaders=self.session.val_loader,
                     datamodule=self.datamodule,
                 )
+
+    def run_lightning_test(self, *, test_loader, label: str, source: str) -> None:
+        if self._lightning_test_inflight:
+            return
+        trainer = getattr(self, "trainer", None)
+        model = getattr(self, "model", None)
+        if trainer is None or model is None:
+            return
+        loader = test_loader
+        if loader is None:
+            loader = self.session._ensure_test_loader()
+        if loader is None:
+            return
+        self._lightning_test_inflight = True
+        self.session._event(
+            {
+                "type": "log",
+                "level": "info",
+                "phase": "test",
+                "text": f"[lightning_test] invoking trainer.test for label='{label}' (source={source})",
+            }
+        )
+        try:
+            trainer.test(model=model, dataloaders=loader)
+        except Exception as exc:
+            self.session._event(
+                {
+                    "type": "log",
+                    "level": "warn",
+                    "phase": "test",
+                    "text": f"[lightning_test] trainer.test failed: {exc}",
+                }
+            )
+        finally:
+            self._lightning_test_inflight = False
 
     # ------------------------------------------------------------------ baseline restore
 

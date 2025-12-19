@@ -54,6 +54,7 @@ The host maintains all mutable state in `extensionHost/state.ts`. Key fields:
    - `newRun` → ensures the run exists in SQLite, updates session IDs, and emits `runs` so the UI refreshes the run list.
    - `log` → heuristically infers the phase (train/test/info), extracts steps/epochs, and filters out redundant `step` badges before posting to the UI.
    - `trainStep` → writes metrics via `insertMetric`, echoes a friendly log line, and transitions the activity state to `running`.
+   - `test_complete` → carries `avg_loss`, optional checkpoints, and the `env_test_label` value so the UI (or downstream automations) can display which Lightning `test_x` label produced emitted artifacts.
    - `session_started` → optionally calls the Python `clean_disk` RPC on first connect to remove stale checkpoints.
    - `auto_test_complete` / `checkpoint_saved` → record fresh checkpoints so they appear in bundle exports immediately.
 

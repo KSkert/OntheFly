@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import threading
 import time
 from functools import partial
@@ -79,6 +80,7 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
         )
         self._ckpts: list[str] = []
         self._test_inflight = False
+        self._test_counter = 0
         self._halt_evt = threading.Event()
         self._tick_pause_notified = False
         self._fork_counter_seed = 0
@@ -595,6 +597,7 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
             }
 
         self._test_inflight = True
+        test_tag = self._prepare_test_env_label()
         try:
             self._event(
                 {
@@ -636,6 +639,7 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
                 "step": int(self.step),
                 "label": label,
                 "ckpt_path": ckpt_path,
+                "env_test_label": test_tag,
             }
 
             event = dict(result)
@@ -651,3 +655,12 @@ class OnTheFlySessionBase(  # pylint: disable=too-many-instance-attributes
             return result
         finally:
             self._test_inflight = False
+
+    def _prepare_test_env_label(self) -> str:
+        self._test_counter += 1
+        tag = f"test_{self._test_counter}"
+        try:
+            os.environ["ONTHEFLY_TEST_LABEL"] = tag
+        except Exception:
+            pass
+        return tag

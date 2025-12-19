@@ -337,6 +337,29 @@ class OnTheFlyExternalSession(OnTheFlySessionBase):
             self.step = int(step)
             return self.step
 
+    def _run_labeled_test_and_ckpt(self, *, label: str = "final", source: str = "manual") -> Dict[str, Any]:
+        result = super()._run_labeled_test_and_ckpt(label=label, source=source)
+        self._run_lightning_delegate_test(label=label, source=source)
+        return result
+
+    def _run_lightning_delegate_test(self, *, label: str, source: str) -> None:
+        delegate = self._framework_delegate
+        if delegate is None:
+            return
+        loader = self._ensure_test_loader()
+        if loader is None:
+            return
+        try:
+            delegate.run_lightning_test(test_loader=loader, label=label, source=source)
+        except Exception as exc:
+            self._event(
+                {
+                    "type": "log",
+                    "level": "warn",
+                    "text": f"[lightning_test] failed ({label}/{source}): {exc}",
+                }
+            )
+
     def _notify_train_loader_changed(self) -> None:
         delegate = self._framework_delegate
         if delegate and hasattr(delegate, "refresh_train_loader"):

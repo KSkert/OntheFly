@@ -56,6 +56,9 @@ Key responsibilities:
          via a best-effort detection path
        * emits per-step `testStep` events and averaged test loss logs
        * preserves and restores the model’s training/eval mode around evaluation
+   - Before each labeled test, `_prepare_test_env_label` increments a counter and
+     publishes `ONTHEFLY_TEST_LABEL=test_<n>` so Lightning hooks and user code can
+     derive unique artifact paths if desired.
    - Uses utilities from `data_explorer.py` to:
        * generate candidate model inputs (`model_input_candidates`)
        * normalize model output to a tensor (`ensure_tensor_output`)
@@ -122,7 +125,11 @@ Key components:
    - Exposes a labeled test entrypoint (`_run_labeled_test_and_ckpt`) that:
        * runs a test pass (`_run_test`)
        * forces a ring checkpoint save
-       * emits a structured completion event
+       * emits a structured completion event (including `env_test_label`)
+   - After the framework-neutral pass completes, `_run_lightning_delegate_test`
+     calls the delegate’s `run_lightning_test`, which runs Lightning’s own
+     `trainer.test(...)` so `test_step` / `on_test_end` hooks fire for both manual
+     dashboard tests and auto-tests triggered by `do_test_after=True`.
 
 
 Data & Loss Inspection Utilities (`src/onthefly/data_explorer.py`)
@@ -269,6 +276,9 @@ End-to-End Runtime Flow (Relevant Portions)
 4) Test and reporting pathways
    - `OnTheFlySessionBase._run_test` runs a standalone evaluation pass over the
      `test_loader`, using data_explorer helpers to interpret batches and compute loss.
+   - External sessions immediately hand off to the delegate’s Lightning test run
+     so framework hooks execute; both phases share the same `ONTHEFLY_TEST_LABEL`
+     value for per-run artifact naming.
    - Per-sample scans and report generation use `compute_per_sample_losses` and
      spooling to remain memory-stable on large datasets.
 

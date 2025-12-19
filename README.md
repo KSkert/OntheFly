@@ -14,7 +14,7 @@ OnTheFly is a **VS Code extension + Python package** for interactive PyTorch tra
 Everything is local/offline with no accounts or external services. Sessions are ephemeral until you export them, so saving or exporting is how you keep a run around.
 
 > [!IMPORTANT]
-> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. Currently, the console only supports PyTorch modules and Lightning trainers, in addition to our native trainer.
+> **Project status: Beta.** APIs, UI flows, and file formats may change before v1.0. Expect rough edges and please report issues. Currently, the console only supports PyTorch modules and Lightning trainers, in addition to our native trainer. Not yet supported: multi-node DDP, ZeRO/FSDP sharded optimizers, `torch.compile` graphs, or third-party trainer abstractions outside PyTorch/Lightning.
 
 ![On-the-Fly overview](./docs/images/onthefly_dashboard.png)
 
@@ -28,6 +28,8 @@ Everything is local/offline with no accounts or external services. Sessions are 
   - [Minimal PyTorch script](#-minimal-pytorch-script)
   - [Minimal Lightning script](#-minimal-lightning-script)
   - [Distributed / DDP runs](#-distributed--ddp-runs)
+  - [Gradient Accumulation](#gradient-accumulation)
+  - [Validation](#validation)
 - [Interactive Training Loop](#-using-the-interactive-training-loop)
 - [License](#license)
 - [Citation](#citation)
@@ -231,13 +233,67 @@ Open the dashboard tab whenever you want visibility, then run your script via `p
 
 ### 🌐 Distributed / DDP runs
 
-If you're using `torch.distributed`/`torchrun`, launch your script the same way. OnTheFly detects PyTorch `DistributedSampler`s, keeps them in place with a per-rank batch cursor. When training is paused, the dashboard's **Distribution Health** command issues collectives to gather metadata and optional weight hashes from all ranks so you can confirm parity before resuming.
+If you're using `torch.distributed`/`torchrun` on a single machine, launch your script the same way—OnTheFly detects PyTorch `DistributedSampler`s, keeps them in place, and tracks a per-rank cursor so pause/resume/fork scans don't disturb ordering. When training is paused, the dashboard's **Distribution Health** command issues collectives to gather metadata and optional weight hashes from all ranks so you can confirm parity before resuming.
 
 ```bash
 torchrun --nproc_per_node=4 train.py --run-name ddp-baseline
 ```
 
+### Gradient Accumulation
+
+The native trainer zeroes gradients and steps every batch by default, so gradient accumulation is up to your `training_step(...)` override. Register a custom step that mirrors the pattern you already use in vanilla PyTorch—divide the loss, delay `optimizer.step()`, and only update the scaler when the accumulation window completes. Whatever dict you return becomes the metrics stream.
+
+<details>
+<summary>Show example</summary>
+
+```python
+trainer = Trainer(project="demo", run_name="accum", max_epochs=5)
+
+@trainer.training_step
+def train_step(batch, state):
+    accum = 4  # 4 micro-batches per optimizer step
+    idx = train_step.counter % accum
+    if idx == 0:
+        state["optimizer"].zero_grad(set_to_none=True)
+    x, y = batch
+    with state["autocast"]:
+        logits = state["model"](x.to(state["device"]))
+        loss = state["loss_fn"](logits, y.to(state["device"])) / accum
+    state["scaler"].scale(loss).backward()
+    if idx == accum - 1:
+        state["scaler"].step(state["optimizer"])
+        state["scaler"].update()
+    train_step.counter += 1
+    return {"loss": loss.detach()}
+
+train_step.counter = 0
+trainer.fit(model=..., optimizer=..., loss_fn=..., train_loader=..., val_loader=...)
+```
+
+</details>
+
+Lightning integrations just keep using Lightning's built-in accumulation settings (`accumulate_grad_batches`, manual strategies, etc.) since `attach_lightning(...)` doesn't override the optimizer loop.
+
+### Validation
+
 OnTheFly `Trainer` skips validation unless you pass `val_every_n_epochs`. Set it to the cadence you need (e.g., `1` for every epoch); omit or set `0` to disable validation entirely. When `do_test_after=True`, the automatic evaluation runs once the stop condition hits, and then the trainer keeps streaming so you can continue interacting with the run from VS Code.
+
+### Avoiding Lightning Test Overwrites
+
+When you attach a Lightning trainer, every manual **Run Test** request and every automatic post-train test now executes Lightning’s real `trainer.test`, so your module’s `test_step` and `on_test_end` hooks always fire. Because those hooks own the file paths, they will overwrite previous artifacts unless you append an identifier yourself.
+
+OnTheFly exposes the active test label via the `ONTHEFLY_TEST_LABEL` environment variable (`test_1`, `test_2`, …) before each test run. Reading it is optional, but highly recommended if your hook writes to fixed paths:
+
+```python
+import os
+
+class LitGAN(L.LightningModule):
+    def on_test_end(self):
+        label = os.environ.get("ONTHEFLY_TEST_LABEL", "test_latest")
+        csv_path = f"logs/{self.results_prefix}_{label}.csv"
+```
+
+If you skip this, your original file destinations remain untouched and each successive test overwrites the last run’s outputs.
 
 ---
 
