@@ -371,12 +371,11 @@ class TrainMixin:
                             "val_loss": (
                                 float(self._last_val_loss) if self._last_val_loss is not None else None
                             ),
+                            "epoch": current_epoch,
                         }
 
-                        # Only include epoch when it changes (edge-triggered)
                         last_emitted = getattr(self, "_last_emitted_epoch", None)
                         if last_emitted is None or current_epoch != last_emitted:
-                            payload["epoch"] = current_epoch
                             self._last_emitted_epoch = current_epoch
                             self._event(
                                 {

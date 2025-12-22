@@ -158,9 +158,23 @@ export function ensureTrainerServer(): void {
     }
 
     (async () => {
-      if (extensionState.hasTrainerConnectedOnce && extensionState.lastExtensionContext && hardResetHandler) {
+      if (extensionState.lastExtensionContext && hardResetHandler) {
         try {
-          await hardResetHandler(extensionState.lastExtensionContext, { fromUser: false });
+          let hasRuns = false;
+          try {
+            hasRuns = listRuns().length > 0;
+          } catch {}
+
+          const hasUiState = Boolean(
+            extensionState.currentRunId ||
+            extensionState.modelNavSelectedRunId ||
+            extensionState.currentSessionId ||
+            extensionState.seenRuns.size
+          );
+
+          if (hasRuns || hasUiState) {
+            await hardResetHandler(extensionState.lastExtensionContext, { fromUser: false });
+          }
         } catch (e) {
           console.warn('[onthefly] automatic session reset on new trainer failed:', e);
         }

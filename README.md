@@ -1,6 +1,6 @@
 # 🪰 OnTheFly
 
-[![PyPI](https://img.shields.io/pypi/v/onthefly-ai)](https://pypi.org/project/onthefly-ai/0.1.3/)
+[![PyPI](https://img.shields.io/pypi/v/onthefly-ai)](https://pypi.org/project/onthefly-ai/0.1.4/) 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](#license)
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue)](#requirements)
 

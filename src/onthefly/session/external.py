@@ -458,14 +458,15 @@ class OnTheFlyExternalSession(OnTheFlySessionBase):
             "val_loss": (float(self._last_val_loss) if self._last_val_loss is not None else None),
         }
 
-        if self._last_emitted_epoch is None or epoch != self._last_emitted_epoch:
-            payload["epoch"] = epoch
-            self._last_emitted_epoch = epoch
+        current = int(epoch)
+        payload["epoch"] = current
+        if self._last_emitted_epoch is None or current != self._last_emitted_epoch:
+            self._last_emitted_epoch = current
             self._event({
                 "type": "log",
                 "level": "info",
                 "phase": "train",
-                "text": f"[epoch] now at epoch {epoch} (step {self.step})",
+                "text": f"[epoch] now at epoch {current} (step {self.step})",
             })
 
         payload.update(snapshot)
